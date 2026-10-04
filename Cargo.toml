@@ -1,0 +1,70 @@
+[package]
+name = "netconf"
+version = "0.5.13"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "Narrow asynchronous NETCONF client for Junos: RFC 6241/6242 framing, a pluggable transport, a default-deny configuration filter with read redaction, and atomic compare-then-commit."
+repository = "https://github.com/rjorgensen123/netconf"
+authors = ["Roger Jorgensen <rogerj@gmail.com>"]
+keywords = ["netconf", "junos", "ssh", "rfc6241", "network"]
+categories = ["network-programming", "asynchronous", "api-bindings"]
+# CI configuration never ships inside the crate. Nobody consuming netconf has any
+# use for how we build it, and these files name infrastructure: the workflow
+# carries a private registry's URL, and a scan of the packaged tarball is what
+# found it sitting there. Excluding the directories is the fix that holds whatever
+# the files come to contain, rather than trusting each one to stay clean.
+exclude = [".gitea/", ".github/"]
+# WHERE this crate may be published, and nowhere else. The list refuses a wrong
+# destination outright (`error: netconf cannot be published`); it does not choose
+# one — `.cargo/config.toml` in this repo does that. Until the crate is public the
+# only destination is the private registry, so crates.io is closed off here rather
+# than guarded by care.
+publish = ["gitea"]
+
+[dependencies]
+# krypto: only the secret types, and only where they appear in the public API.
+#
+# NO `path`, deliberately. krypto is public and released, so this crate builds
+# against the published version and never against a local checkout — the same
+# thing locally, in CI and in a consumer's container. A path here was also a
+# dependency on where and how a checkout happens to be kept: renaming the sibling
+# directory once was enough to break every build that went through it.
+#
+# NO `registry` FIELD, deliberately. krypto is on crates.io, and naming a private
+# registry here does two kinds of damage. It writes that registry's URL into the
+# packaged crate, where scanning the repo will never find it. And it splits the
+# dependency graph: a consumer that also reaches krypto through nettls gets the
+# same version from two sources, which rustc treats as two different types — the
+# error reads `expected krypto::secret::SecretBuf, found krypto::SecretBuf` about
+# identical code. Both consumers hit exactly that.
+krypto = "0.7"
+async-trait = "0.1"
+bytes = "1"
+quick-xml = "0.41"
+# Structured logging as a FACADE: this crate emits events (SSH connection,
+# host-key verification, which SshPolicy is in force), but never decides where
+# they end up. The consumer attaches a subscriber. With no subscriber attached
+# this is close to free.
+tracing = "0.1"
+# The russh transport (real SSH against a device) is feature-gated, so offline
+# tests against MockTransport do not have to pull in russh or tokio.
+#
+# `default-features = false` is not decoration: russh 0.62's defaults include
+# aws-lc-rs, which would put a second cryptographic backend in the tree next to
+# the ring backend the rest of the stack uses. We pick ring explicitly.
+#
+# `rsa` covers RSA host keys, which are common on Junos; `flate2` is SSH
+# compression and is a russh default. `des` is DELIBERATELY absent (since 0.3.2):
+# 3des-cbc protected nothing.
+russh = { version = "0.62", optional = true, default-features = false, features = ["ring", "rsa", "flate2"] }
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros", "rt"], optional = true }
+# Zeroizes the transient copy of the password we have to make before russh takes
+# it (feature-gated, same as the transport itself).
+zeroize = { version = "1", optional = true }
+
+[features]
+russh-transport = ["dep:russh", "dep:tokio", "dep:zeroize"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

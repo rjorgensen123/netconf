@@ -1,0 +1,20 @@
+# cargo-audit configuration: findings that are KNOWN and have been ASSESSED. This is
+# not a place to put a new finding so it stops being looked at.
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 «Marvin» — a timing side channel in the `rsa` crate's
+    # PRIVATE-key operations. There is no fix upstream; it needs a constant-time
+    # rewrite. The crate arrives transitively through russh's RSA HOST-key support,
+    # where this crate only VERIFIES the device's signature with its public key.
+    # No private-key operation ever runs here, so there is nothing to time, and the
+    # exposure is effectively nil.
+    #
+    # The host key's type is the device's choice, not ours, and reaching a device
+    # that offers RSA is the whole point of supporting it. The RSA fence
+    # (tests/rsa_fence.rs) holds that assumption mechanically rather than by
+    # assertion in a comment.
+    #
+    # TO BE REASSESSED when the `rsa` crate ships a fix, or when russh changes
+    # backend.
+    "RUSTSEC-2023-0071",
+]

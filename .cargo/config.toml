@@ -1,0 +1,13 @@
+# WHERE a bare `cargo publish` in this repo sends the crate.
+#
+# Cargo merges this with ~/.cargo/config.toml, and the value here wins for this
+# directory tree only — nothing on the machine changes. That is the point: the
+# destination is a property of the crate, checked in beside it, not of whichever
+# machine happens to run the command.
+#
+# `gitea` while the crate is private. When it goes public this becomes
+# `crates-io`, and the archive copy to the private registry is what needs the
+# explicit `--registry gitea`. The name is all that lives here; the registry's URL
+# stays in ~/.cargo and never travels with the repo.
+[registry]
+default = "gitea"

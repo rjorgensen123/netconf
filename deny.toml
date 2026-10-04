@@ -1,0 +1,50 @@
+# cargo-deny — an audit of the dependency tree.
+# It runs in CI (`cargo deny check`): a vulnerable or wrongly licensed dependency
+# must break the build rather than be discovered later. The tree is checked both
+# with and without the russh-transport feature; the russh side is the large one.
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # The Marvin attack: a timing side channel in the `rsa` crate's PRIVATE-key
+    # operations. The tree pulls it in through russh's `rsa` feature, which we
+    # turn on because RSA host keys are common on older Junos. This crate only
+    # VERIFIES the device's host key — a client-side public-key operation — and
+    # never holds an RSA private key, so the attack surface does not exist here.
+    # No fixed release of `rsa` exists, and dropping the feature would cut off
+    # the older devices the crate is meant to reach. TO BE REASSESSED when `rsa`
+    # ships a fix, or if this crate ever performs a private-key operation.
+    { id = "RUSTSEC-2023-0071", reason = "client-side host-key verification only — no RSA private-key operations in this crate" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+# The aws-lc fence, the same trap rustls sets: russh's defaults pull in aws-lc-rs.
+# We choose ring explicitly, and this turns a regression into a build failure.
+deny = [{ name = "aws-lc-rs" }, { name = "aws-lc-sys" }]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# crates.io and nothing else. Every dependency of this crate is public, krypto
+# included, so there is no second registry to allow — and listing one anyway was
+# not harmless. The private registry's URL sat in this file, which travels with
+# the repo wherever it goes, and the allowance made it possible for a dependency
+# to quietly come from there instead. This line is now the guard: name a private
+# registry on any dependency and `cargo deny check` says so, in those words,
+# instead of the build failing later with a type error about identical code.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

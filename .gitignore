@@ -1,0 +1,22 @@
+# ── Rust / Cargo ──
+/target/
+debug/
+**/*.rs.bk
+*.pdb
+# Cargo.lock is committed deliberately: a security-sensitive crate wants reproducible builds
+
+# ── Editor / OS ──
+/.idea/
+/.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# ── AI / Agent / LLM ──
+GEMINI.md
+AGENTS.md
+.agents/
+.agent/
+.claude/
+.cursor/
