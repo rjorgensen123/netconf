@@ -55,13 +55,14 @@ fn hash_tag_is_kept_so_the_operator_sees_the_form() {
 
 #[test]
 fn encrypted_password_with_secret_data_annotation() {
+    // md5-crypt of the word "example" — a dummy, not a credential from anywhere.
     assert_redacted(
-        "    encrypted-password \"$1$WRGisGQx$twfB0m8PjBAXaUWFlfS/40\"; ## SECRET-DATA",
-        "WRGisGQx",
+        "    encrypted-password \"$1$nEtC0nf1$zi4gP2zRBmSmeZmGSotIT0\"; ## SECRET-DATA",
+        "nEtC0nf1",
         "encrypted-password",
     );
     // The annotation and the semicolon are structure, and must survive.
-    let out = r("    encrypted-password \"$1$WRGisGQx$twfB0m8\"; ## SECRET-DATA");
+    let out = r("    encrypted-password \"$1$nEtC0nf1$zi4gP2z\"; ## SECRET-DATA");
     assert_eq!(
         out,
         format!("    encrypted-password {REDACTED}; ## SECRET-DATA"),

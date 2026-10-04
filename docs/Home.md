@@ -96,7 +96,7 @@ not do.
 
 The code is written by Claude AI (Opus and Fable).
 
-Reviewed independently by Gemini.
+Reviewed independently by Fable, Opus and Gemini.
 
 ## License
 

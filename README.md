@@ -1,5 +1,10 @@
 # netconf — a narrow NETCONF client for Junos
 
+> **This repository is a mirror.** Development happens elsewhere and is pushed here;
+> every sync overwrites what is here, so a pull request cannot be merged and a commit
+> made here is lost. Issues are read — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+> form a change has to arrive in, and [SECURITY.md](SECURITY.md) for vulnerabilities.
+
 An asynchronous NETCONF client (RFC 6241/6242) built for one job: letting a program
 change network equipment **without being trusted to do it responsibly.**
 
@@ -109,7 +114,7 @@ not do.
 
 The code is written by Claude AI (Opus and Fable).
 
-Reviewed independently by Gemini.
+Reviewed independently by Fable, Opus and Gemini.
 
 ## License
 

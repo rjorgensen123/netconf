@@ -1,0 +1,86 @@
+# GitHub Actions CI for netconf.
+# It runs on every push to main, and on pull requests.
+#
+# The same jobs as .gitea/workflows/ci.yml, step for step, in the same
+# rust:1-bookworm container, so a result here means the same as a result there.
+# The one difference is the checkout: on GitHub that is actions/checkout.
+#
+# No private registry and no token. Every dependency is on crates.io, krypto
+# included, and there are no path dependencies — so CI builds exactly what a
+# consumer builds. `.cargo/config.toml` names a registry for publishing only;
+# nothing in a build reads it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read the repository and nothing else. No job here writes anywhere.
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1-bookworm
+    steps:
+      # Pinned to a commit, not a tag: a tag can be moved, a commit cannot.
+      # The job token is not left behind in .git/config, since nothing here pushes.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Add clippy and rustfmt
+        run: rustup component add clippy rustfmt
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-targets
+
+      # `--all-targets` does not run doctests, and the doctests are where the
+      # public surface is pinned (a `compile_fail` block proves that a match on
+      # a `non_exhaustive` enum needs a wildcard arm). Run them on their own.
+      - name: Doctests (skipped by --all-targets)
+        run: cargo test --locked --doc
+
+      # The russh transport is feature-gated, but it must always COMPILE, and the
+      # parts that can be tested without a device — the TTL frame, the policy
+      # refusal, the refusal to trust on first use — must always RUN. That catches
+      # regressions with no hardware in the loop.
+      - name: Test with russh-transport (the offline parts)
+        run: cargo test --locked --all-targets --features russh-transport
+
+      - name: Clippy with russh-transport (warnings are errors)
+        run: cargo clippy --all-targets --locked --features russh-transport -- -D warnings
+
+  # The dependency audit: RustSec advisories, with the documented
+  # RUSTSEC-2023-0071 exception (see deny.toml), the licence allowlist, the
+  # aws-lc ban and the source check. `all-features` in deny.toml means the russh
+  # tree is audited too.
+  deny:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch cargo-deny
+        run: |
+          curl -sSfL -o /tmp/cd.tgz \
+            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/cd.tgz -C /tmp --strip-components=1
+          install /tmp/cargo-deny /usr/local/bin/
+
+      - name: cargo deny check
+        run: cargo deny check
