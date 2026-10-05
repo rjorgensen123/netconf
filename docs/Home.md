@@ -4,6 +4,11 @@
 across both older and newer equipment generations. Think of it as the interpreter between your
 program and the actual boxes in the network.
 
+## Status
+
+**Pre-release — beta.** netconf is not yet in a release state. It is in beta testing, and not
+ready for uncritical use in production.
+
 ## Why does it exist?
 
 Because talking to network equipment is easier said than done — and because the hard parts are not

@@ -16,6 +16,11 @@ change network equipment **without being trusted to do it responsibly.**
   becomes an ordinary `String`
 - **Safety:** `#![forbid(unsafe_code)]`
 
+## Status
+
+**Pre-release — beta.** netconf is not yet in a release state. It is in beta testing, and not
+ready for uncritical use in production.
+
 ## Why this crate exists
 
 We had to talk to the network, and for that we needed a gateway — something we actually
