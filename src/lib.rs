@@ -19,9 +19,15 @@
 //! s.close().await?;
 //! # let _ = reply; Ok(()) }
 //! ```
+//!
+//! # Features
+//!
+//! - `russh-transport` (off by default): the `russh_transport` module, the real SSH
+//!   transport, over russh and tokio. Without it the crate builds without either,
+//!   with the protocol layer and the in-memory transport in [`mock`].
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 pub mod change;
 pub mod error;

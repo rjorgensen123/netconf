@@ -1,43 +1,25 @@
 [package]
 name = "netconf"
-version = "0.5.14"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
-description = "Narrow asynchronous NETCONF client for Junos: RFC 6241/6242 framing, a pluggable transport, a default-deny configuration filter with read redaction, and atomic compare-then-commit."
+description = "Pre-release (beta). Narrow asynchronous NETCONF client for Junos: RFC 6241/6242 framing, a pluggable transport, a default-deny configuration filter with read redaction, and atomic compare-then-commit."
 repository = "https://github.com/rjorgensen123/netconf"
+documentation = "https://docs.rs/netconf"
 authors = ["Roger Jorgensen <rogerj@gmail.com>"]
-keywords = ["netconf", "junos", "ssh", "rfc6241", "network"]
+keywords = ["netconf", "junos", "juniper", "ssh", "network-automation"]
 categories = ["network-programming", "asynchronous", "api-bindings"]
-# CI configuration never ships inside the crate. Nobody consuming netconf has any
-# use for how we build it, and these files name infrastructure: the workflow
-# carries a private registry's URL, and a scan of the packaged tarball is what
-# found it sitting there. Excluding the directories is the fix that holds whatever
-# the files come to contain, rather than trusting each one to stay clean.
+# CI configuration is not part of the crate, so it is never packaged.
 exclude = [".gitea/", ".github/"]
-# WHERE this crate may be published, and nowhere else. The list refuses a wrong
-# destination outright (`error: netconf cannot be published`); it does not choose
-# one — `.cargo/config.toml` in this repo does that. Until the crate is public the
-# only destination is the private registry, so crates.io is closed off here rather
-# than guarded by care.
-publish = ["gitea"]
+# The crate is published on crates.io, and only there: the list refuses any other
+# destination outright.
+publish = ["crates-io"]
 
 [dependencies]
 # krypto: only the secret types, and only where they appear in the public API.
-#
-# NO `path`, deliberately. krypto is public and released, so this crate builds
-# against the published version and never against a local checkout — the same
-# thing locally, in CI and in a consumer's container. A path here was also a
-# dependency on where and how a checkout happens to be kept: renaming the sibling
-# directory once was enough to break every build that went through it.
-#
-# NO `registry` FIELD, deliberately. krypto is on crates.io, and naming a private
-# registry here does two kinds of damage. It writes that registry's URL into the
-# packaged crate, where scanning the repo will never find it. And it splits the
-# dependency graph: a consumer that also reaches krypto through nettls gets the
-# same version from two sources, which rustc treats as two different types — the
-# error reads `expected krypto::secret::SecretBuf, found krypto::SecretBuf` about
-# identical code. Both consumers hit exactly that.
+# It comes from crates.io, as published: no `path`, so no build depends on a local
+# checkout, and no `registry`, so the packaged crate names no other source.
 krypto = "0.7"
 async-trait = "0.1"
 bytes = "1"
@@ -65,6 +47,10 @@ zeroize = { version = "1", optional = true }
 
 [features]
 russh-transport = ["dep:russh", "dep:tokio", "dep:zeroize"]
+
+# docs.rs builds with every feature, so the russh transport is documented too.
+[package.metadata.docs.rs]
+all-features = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

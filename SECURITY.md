@@ -23,8 +23,8 @@ a vulnerability is to upgrade.
 
 | Version | Supported |
 |---------|-----------|
-| 0.5.x   | yes       |
-| < 0.5   | no        |
+| 0.6.x   | yes       |
+| < 0.6   | no        |
 
 ## Reporting a vulnerability
 

@@ -1,7 +1,8 @@
-# netconf — API contract (v0.5.13)
+# netconf — API contract (v0.6.0)
 
-**The version is a floor: v0.5.13 is the LOWEST netconf this contract describes.** Every netconf
-from 0.5.13 onwards has what is written here. The number is raised only when the public surface
+**The version is a floor: v0.6.0 is the LOWEST netconf this contract describes.** Every netconf
+from 0.6.0 onwards has what is written here. 0.6.0 is the first release on crates.io, so the
+contract starts there and describes nothing older. The number is raised only when the public surface
 itself changes — to the crate version at that moment — and stands still while it does not, however
 many releases pass in between. A contract *newer* than the crate it describes would promise
 something the code does not do, so it can never be ahead of `Cargo.toml`.

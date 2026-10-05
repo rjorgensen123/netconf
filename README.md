@@ -1,5 +1,7 @@
 # netconf — a narrow NETCONF client for Junos
 
+[![docs.rs](https://docs.rs/netconf/badge.svg)](https://docs.rs/netconf)
+
 > **This repository is a mirror.** Development happens elsewhere and is pushed here;
 > every sync overwrites what is here, so a pull request cannot be merged and a commit
 > made here is lost. Issues are read — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
@@ -66,11 +68,11 @@ That is the whole idea. Everything else here exists to make it hold.
 
 ```toml
 [dependencies]
-netconf = "0.5"
+netconf = "0.6"
 
 # Real SSH against a device. Without this feature the crate builds without russh
 # or tokio, which is what the offline tests use.
-netconf = { version = "0.5", features = ["russh-transport"] }
+netconf = { version = "0.6", features = ["russh-transport"] }
 ```
 
 ```rust,no_run

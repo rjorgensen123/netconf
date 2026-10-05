@@ -7,6 +7,27 @@ Every notable change to this crate is recorded here. The format follows
 > **Note:** before 1.0 the API can change between minor versions. `docs/API.md` names the
 > version its contract applies from, and that number moves only when the public surface does.
 
+## [0.6.0] — 2026-10-05
+
+The first release on crates.io. netconf is pre-release, in beta, as the README says. The public
+surface is that of 0.5.14.
+
+### Changed
+
+- The publishing destination is crates.io, and only crates.io: `publish` in `Cargo.toml` names
+  `crates-io` alone, and `.cargo/config.toml` makes it what a bare `cargo publish` means.
+- The description in `Cargo.toml` begins with «Pre-release (beta).», so the crates.io page says
+  so too.
+- The keywords are `netconf`, `junos`, `juniper`, `ssh` and `network-automation`.
+- docs.rs builds the documentation with every feature, so the `russh-transport` module is
+  documented too, and `documentation` in `Cargo.toml` points there.
+- Every public item has a doc comment, the crate documentation describes the `russh-transport`
+  feature, and `#![deny(missing_docs)]`, which was a warning, makes a public item without one a
+  build error.
+- The dependency lines in `README.md` and `docs/Usage.md` read `0.6`, and the README has a
+  docs.rs badge. The contract floor in `docs/API.md` is 0.6.0, the first version on crates.io.
+- `SECURITY.md` names 0.6.x as the supported release.
+
 ## [0.5.14] — 2026-10-04 (the repository starts over)
 
 ### Note — the history starts here, on purpose
@@ -33,7 +54,7 @@ original is archived where the people who need it can reach it.
 
 ### Added
 
-- A GitHub Actions workflow, `.github/workflows/ci.yml`, with the same jobs as the Gitea one.
+- A GitHub Actions workflow, `.github/workflows/ci.yml`.
 
 ### Removed
 
