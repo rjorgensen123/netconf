@@ -746,7 +746,7 @@ fn commit_history(
         }
     }
     // The reply goes with the error (0.5.13).
-    if entries.first().map_or(true, |e| e.fields.is_empty()) {
+    if entries.first().is_none_or(|e| e.fields.is_empty()) {
         return Err(NetconfError::protocol_with(
             "commit information: the reply has no <commit-history> entry — the device has not \
              said what its last commit is",

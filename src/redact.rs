@@ -705,7 +705,7 @@ impl Redactor {
             return out;
         }
         let b = line.as_bytes();
-        let is = |k: usize, c: u8| b[k] == c && literal.map_or(true, |l| l[k]);
+        let is = |k: usize, c: u8| b[k] == c && literal.is_none_or(|l| l[k]);
         // The next `>`, and the next `</`, at or after each byte.
         let (mut next_gt, mut next_close) = (vec![None; b.len() + 1], vec![None; b.len() + 1]);
         for k in (0..b.len()).rev() {
@@ -809,7 +809,7 @@ impl<'a> View<'a> {
                 (c, c.len_utf8())
             });
             text.push(c);
-            map.extend(std::iter::repeat(i).take(c.len_utf8()));
+            map.extend(std::iter::repeat_n(i, c.len_utf8()));
             i += len;
         }
         map.push(raw.len());
@@ -907,10 +907,10 @@ impl Doc {
             from.extend_from_slice(&self.from[pos..r.start]);
             literal.extend_from_slice(&self.literal[pos..r.start]);
             text.push_str(REDACTED);
-            from.extend(std::iter::repeat(None).take(REDACTED.len()));
+            from.extend(std::iter::repeat_n(None, REDACTED.len()));
             // The marker reads as it is written, like text that looks like it, so
             // the rules cannot tell the two apart.
-            literal.extend(std::iter::repeat(true).take(REDACTED.len()));
+            literal.extend(std::iter::repeat_n(true, REDACTED.len()));
             pos = r.end;
         }
         text.push_str(&self.text[pos..]);
@@ -1563,7 +1563,7 @@ fn first_loose_opener(
     el: &Elements<'_>,
 ) -> Option<(usize, String)> {
     let b = line.as_bytes();
-    let is = |k: usize, c: u8| b[k] == c && literal.map_or(true, |l| l[k]);
+    let is = |k: usize, c: u8| b[k] == c && literal.is_none_or(|l| l[k]);
     let (mut next_gt, mut close_after) = (vec![None; b.len() + 1], vec![false; b.len() + 1]);
     for k in (0..b.len()).rev() {
         next_gt[k] = if is(k, b'>') { Some(k) } else { next_gt[k + 1] };
@@ -1611,7 +1611,7 @@ fn secret_openers(line: &str, el: &Elements<'_>) -> Vec<(usize, String)> {
         let name = &rest[..name_len];
         let after = rest[name_len..].chars().next();
         if !name.starts_with(|c: char| c.is_ascii_alphabetic() || matches!(c, '_' | ':'))
-            || !after.map_or(true, |c| c.is_whitespace() || matches!(c, '>' | '/'))
+            || !after.is_none_or(|c| c.is_whitespace() || matches!(c, '>' | '/'))
         {
             continue;
         }
@@ -1642,8 +1642,8 @@ fn last_tag_opener(
     if line[open..].starts_with("</") {
         return None;
     }
-    let gt = (open..line.len())
-        .find(|&k| line.as_bytes()[k] == b'>' && literal.map_or(true, |l| l[k]))?;
+    let gt =
+        (open..line.len()).find(|&k| line.as_bytes()[k] == b'>' && literal.is_none_or(|l| l[k]))?;
     let raw = &line[open + 1..gt];
     if raw.ends_with('/') {
         return None;

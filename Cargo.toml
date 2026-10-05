@@ -1,8 +1,10 @@
 [package]
 name = "netconf"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
-rust-version = "1.75"
+# The oldest Rust that builds the crate with every feature on: russh 0.64 needs
+# 1.89 (since 0.6.1). Without `russh-transport` the dependencies need 1.85.
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "Pre-release (beta). Narrow asynchronous NETCONF client for Junos: RFC 6241/6242 framing, a pluggable transport, a default-deny configuration filter with read redaction, and atomic compare-then-commit."
 repository = "https://github.com/rjorgensen123/netconf"
@@ -32,14 +34,17 @@ tracing = "0.1"
 # The russh transport (real SSH against a device) is feature-gated, so offline
 # tests against MockTransport do not have to pull in russh or tokio.
 #
-# `default-features = false` is not decoration: russh 0.62's defaults include
+# russh 0.64 since 0.6.1: the 0.62 line does not get the fixes for russh's
+# advisories of 2026-09-30.
+#
+# `default-features = false` is not decoration: russh 0.64's defaults include
 # aws-lc-rs, which would put a second cryptographic backend in the tree next to
 # the ring backend the rest of the stack uses. We pick ring explicitly.
 #
 # `rsa` covers RSA host keys, which are common on Junos; `flate2` is SSH
 # compression and is a russh default. `des` is DELIBERATELY absent (since 0.3.2):
 # 3des-cbc protected nothing.
-russh = { version = "0.62", optional = true, default-features = false, features = ["ring", "rsa", "flate2"] }
+russh = { version = "0.64", optional = true, default-features = false, features = ["ring", "rsa", "flate2"] }
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros", "rt"], optional = true }
 # Zeroizes the transient copy of the password we have to make before russh takes
 # it (feature-gated, same as the transport itself).

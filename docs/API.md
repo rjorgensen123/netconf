@@ -228,7 +228,7 @@ What each policy offers, in order of preference:
 | MAC | `hmac-sha2-512-etm@openssh.com`, `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512`, `hmac-sha2-256` | `hmac-sha1-etm@openssh.com`, `hmac-sha1` |
 
 `3des-cbc` is in `LEGACY_ALGORITHMS`, so it is marked when seen, but **no policy offers it**.
- `LegacyJunos` offers everything russh 0.62 has for the R14 to Evo span;
+ `LegacyJunos` offers everything russh 0.64 has for the R14 to Evo span;
  the two full-strength additions are not legacy, the SHA-1 group exchange and
 `ssh-dss` are. `Custom` is rejected at connect (not implemented — we refuse rather than
 negotiate with a different list than the one you asked for).
@@ -1198,7 +1198,7 @@ the contract:
 | `ssh_connect` / `ssh_connect_failed` | info/warn | `ssh_connect`: the attempt (host, port, username, policy, `pinned`/`enrollment`), warn the first time per device under a legacy policy. `ssh_connect_failed` (host, port, `ssh_policy`, `error`): the TCP connection or the SSH handshake failed; a timeout, a rejected login or a refused subsystem are reported through their own errors, not this event |
 | `ssh_auth_failed` | warn | authentication rejected (the methods the device named, `partial_success`) |
 | `ssh_session_established` / `ssh_session_closed` | info | session lifecycle; established only once the device has opened the subsystem |
-| `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch (rejected) |
+| `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch or a host certificate (rejected) |
 | `ssh_host_key_enrollment` / `ssh_host_key_observed` | info | no pin — fingerprint observed |
 | `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run |
 | `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr — the device's text |
@@ -1239,11 +1239,14 @@ pub async fn observe_host_key(host: &str, port: u16, ssh_policy: &SshPolicy, tim
 NETCONF runs as the **`netconf` subsystem** on the SSH session (RFC 6242); `port` is SSH's own.
 `connect` returns only once the device has **answered** the subsystem request with a yes, or sent
 data, which only a running subsystem does.
-russh 0.62 returns from the request as soon as it is queued, so the transport reads the answer
+russh 0.64 returns from the request as soon as it is queued, so the transport reads the answer
 itself, under `Timeouts::connect` and the session deadline (`Timeout { op: "ssh-subsystem" }`).
 
 **The fingerprint format** is `SHA256:<base64 without padding>` — the form the `ssh` client shows.
 A pinned key is compared by exact byte equality, with no normalisation.
+No host certificate algorithm (`*-cert-v01@openssh.com`) is offered under any policy, and a host
+certificate is refused, pinned or not — by `connect` and by `observe_host_key` — even when the key
+it carries is the pinned one; `observed` is the fingerprint of that key.
 
 The transport enforces the session TTL (§1): the frame is validated before anything connects, the
 deadline is set at connection start, and `send`/`recv` refuse after the deadline. Each single
@@ -1261,7 +1264,7 @@ What a failure becomes (classified by russh's error types, not its message text)
 
 | | Error |
 |---|---|
-| the key is not the pinned one, or the device's signature does not hold | `HostKey { observed }` |
+| the key is not the pinned one, the device presented a host certificate, or the device's signature does not hold | `HostKey { observed }` |
 | no common algorithm | `Negotiation { offered }` — what the device announced |
 | key exchange failed otherwise | `Negotiation { offered: [] }` |
 | the password was not accepted | `AuthRejected { username, remaining_methods, partial_success }` |
@@ -1365,6 +1368,6 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
 - There is no keepalive.
 - Policy enforcement reads set payloads only: a `Text` or `Xml` load — and `prepare_change` with
   either — requires `all_free(Rwd)`.
-- russh 0.62 has no `hmac-md5`: a device that offers only that cannot be reached through
+- russh 0.64 has no `hmac-md5`: a device that offers only that cannot be reached through
   `RusshTransport`.
 

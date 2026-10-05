@@ -7,6 +7,35 @@ Every notable change to this crate is recorded here. The format follows
 > **Note:** before 1.0 the API can change between minor versions. `docs/API.md` names the
 > version its contract applies from, and that number moves only when the public surface does.
 
+## [0.6.1] — 2026-10-05
+
+The public surface is that of 0.6.0, and the contract floor in `docs/API.md` stays 0.6.0.
+
+### Security
+
+- russh moves from 0.62 to 0.64. The 0.62 line does not get the fixes for russh's advisories of
+  2026-09-30, and none of the four can be reached through netconf:
+  - GHSA-47hw-gvq5-r2gm — russh calls a client's channel callbacks for channels it never opened.
+    netconf's handler overrides none of them, and netconf reads from the channel it opened,
+    which russh feeds only for known channels.
+  - GHSA-35g8-35p8-c8fw — memory exhaustion in russh's server. netconf is an SSH client only.
+  - GHSA-w3jg-pjxf-73p4 — only `mlkem768x25519-sha256`, which no policy offers.
+  - GHSA-p8qx-h547-fjw9 — needs the MAC `none` on both sides, which no policy offers.
+
+### Changed
+
+- `rust-version` is 1.89, the Rust russh 0.64 needs. It read 1.75, which the dependencies had
+  outgrown: 0.6.0 needed 1.85, as the crate without `russh-transport` still does.
+- A host certificate is refused, by `connect` and by `observe_host_key`, pinned or not, even
+  when the key it carries is the pinned one. The error is `HostKey`, with the fingerprint of that
+  key in `observed`, and no certificate algorithm is advertised under any policy. russh 0.64
+  can hand a client a certificate; netconf pins keys and knows no authority to trust. russh 0.62
+  advertised no host certificate algorithm, so no device could present one before either.
+- The documentation and comments that describe russh name 0.64.
+- `Option::is_none_or` replaces `map_or(true, …)`, and `iter::repeat_n` replaces
+  `repeat(…).take(…)`, in `junos.rs` and `redact.rs`: clippy asks for both now that
+  `rust-version` allows them. The behaviour is the same.
+
 ## [0.6.0] — 2026-10-05
 
 The first release on crates.io. netconf is pre-release, in beta, as the README says. The public

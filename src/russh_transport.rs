@@ -7,7 +7,7 @@
 //! to. The raw byte stream is exposed as [`NetconfTransport`]; framing, whether
 //! `]]>]]>` or chunked, is handled by the layer above.
 //!
-//! **The fingerprint format is `ssh-key`'s, not ours.** russh 0.62 builds on
+//! **The fingerprint format is `ssh-key`'s, not ours.** russh 0.64 builds on
 //! `ssh-key`, whose `Fingerprint` renders as `SHA256:<base64 without padding>` —
 //! the same string an operator sees in the `ssh` client. The source is the
 //! `ssh-key` documentation. Note that russh 0.45 produced bare base64, so values
@@ -151,16 +151,32 @@ impl russh::client::Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::PublicKey,
+        server_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         // `SHA256:<base64 without padding>` — `ssh-key`'s `Fingerprint` `Display`,
-        // which is the form the `ssh` client shows. Source: the `ssh-key` docs.
-        let fp = server_public_key
+        // which is the form the `ssh` client shows. Source: the `ssh-key` docs. For
+        // a certificate it is the fingerprint of the key the certificate carries
+        // (0.6.1).
+        let fp = server_key
+            .public_key()
             .fingerprint(russh::keys::HashAlg::Sha256)
             .to_string();
         // Recorded even if the lock was poisoned: the key is what the device
         // presented, and the error that follows needs it (0.5.13).
         *self.observed.lock().unwrap_or_else(|p| p.into_inner()) = Some(fp.clone());
+        // A host certificate is refused, pinned or not (0.6.1). The pin is a key,
+        // and nothing here knows which authorities to trust, so a certificate
+        // proves nothing the pin can check. `preferred_for` advertises no
+        // certificate algorithm, so a device has no way to present one; this is
+        // the floor beneath that.
+        if server_key.certificate().is_some() {
+            tracing::warn!(
+                event = "ssh_host_key_mismatch",
+                observed = %fp,
+                "the device presented a host certificate, which is not accepted — connection rejected"
+            );
+            return Ok(false);
+        }
         match &self.pinned {
             // Pinned: accept ONLY on an exact match — never a silent accept, never
             // trust-on-first-use.
@@ -292,7 +308,7 @@ fn keep_stderr(buf: &mut String, data: &[u8], ext: u32) {
 /// Wait for the device's answer to the subsystem request. `Ok` means the subsystem
 /// is open, with any data that came before the answer.
 ///
-/// **russh 0.62's `request_subsystem` does not wait for the answer.** With
+/// **russh 0.64's `request_subsystem` does not wait for the answer.** With
 /// `want_reply` set it queues the request and returns `Ok` at once; the device's
 /// `SSH_MSG_CHANNEL_SUCCESS` or `SSH_MSG_CHANNEL_FAILURE` (RFC 4254 §5.4) arrives
 /// later, on the channel, as `ChannelMsg::Success` or `ChannelMsg::Failure`. The
@@ -456,7 +472,7 @@ async fn in_connect_phase<T>(
 ///
 /// russh runs the session in a task of its own, and that task owns the socket.
 /// Giving up on a wait — dropping the future — does not end the task, and russh
-/// 0.62 offers no call that does: there is no `Handle` until the key exchange is
+/// 0.64 offers no call that does: there is no `Handle` until the key exchange is
 /// done, `Handle::disconnect` only queues a message that the task reads when no key
 /// exchange is running and no data is waiting to go out, and russh keeps the task's
 /// join handle to itself, which detaches the task when dropped. So the task kept the
@@ -626,7 +642,7 @@ fn warn_legacy_once(host: &str) -> bool {
 /// ones form the tail. The peer chooses, so a modern device uses modern algorithms
 /// regardless. That is why the policy is *permitting* rather than *preferring*.
 ///
-/// A known limit of the library beneath us: russh 0.62 has no `hmac-md5`. A device
+/// A known limit of the library beneath us: russh 0.64 has no `hmac-md5`. A device
 /// offering ONLY that cannot be reached through this transport at all, and would need
 /// a different SSH implementation behind the same trait.
 fn preferred_for(policy: &SshPolicy) -> russh::Preferred {
@@ -737,7 +753,13 @@ fn preferred_for(policy: &SshPolicy) -> russh::Preferred {
         mac::HMAC_SHA1,
     ];
 
-    let base = russh::Preferred::default();
+    // No host certificate algorithm is advertised under any policy, whatever
+    // russh's default (0.6.1): the pin is a key, and `check_server_key` refuses
+    // a certificate.
+    let base = russh::Preferred {
+        host_key_certificates: std::borrow::Cow::Borrowed(&[]),
+        ..russh::Preferred::default()
+    };
     match policy {
         SshPolicy::Modern => russh::Preferred {
             kex: MODERN_KEX.into(),
@@ -1476,19 +1498,21 @@ mod classification_tests {
 mod host_key_tests {
     use super::ClientHandler;
     use russh::client::Handler;
+    use russh::keys::ssh_key::certificate::{Builder, CertType};
+    use russh::keys::ssh_key::private::{Ed25519Keypair, PrivateKey};
     use russh::keys::ssh_key::public::Ed25519PublicKey;
-    use russh::keys::{HashAlg, PublicKey};
+    use russh::keys::{HashAlg, PublicKey, PublicKeyOrCertificate};
     use std::sync::{Arc, Mutex};
 
     /// A host key made from fixed bytes: no device and no randomness, and two
     /// different bytes give two different keys of the same kind — whose
     /// fingerprints are therefore the same length.
-    fn key(byte: u8) -> PublicKey {
-        PublicKey::from(Ed25519PublicKey([byte; 32]))
+    fn key(byte: u8) -> PublicKeyOrCertificate {
+        PublicKey::from(Ed25519PublicKey([byte; 32])).into()
     }
 
-    fn fingerprint(k: &PublicKey) -> String {
-        k.fingerprint(HashAlg::Sha256).to_string()
+    fn fingerprint(k: &PublicKeyOrCertificate) -> String {
+        k.public_key().fingerprint(HashAlg::Sha256).to_string()
     }
 
     /// The handler `connect()` builds, with `pinned` as the pin, and the slot it
@@ -1544,6 +1568,44 @@ mod host_key_tests {
                 "the pin {wrong:?} accepted {pin}"
             );
         }
+    }
+
+    /// **A host certificate is refused** (0.6.1), pinned or not, even when the
+    /// key it carries is the pinned one: the pin is a key, and nothing here knows
+    /// which authorities to trust. The key it carries is recorded all the same.
+    #[tokio::test]
+    async fn a_host_certificate_is_refused() {
+        let device = key(4);
+        let authority = PrivateKey::from(Ed25519Keypair::from_seed(&[5; 32]));
+        let mut builder =
+            Builder::new([0; 16], device.public_key().key_data().clone(), 0, u64::MAX).unwrap();
+        builder
+            .cert_type(CertType::Host)
+            .unwrap()
+            .all_principals_valid()
+            .unwrap();
+        let certificate = PublicKeyOrCertificate::from(builder.sign(&authority).unwrap());
+        let pin = fingerprint(&device);
+        assert_eq!(fingerprint(&certificate), pin, "it carries the pinned key");
+
+        let (mut h, seen) = handler(&pin);
+        assert!(
+            !h.check_server_key(&certificate).await.unwrap(),
+            "a certificate for the pinned key was accepted"
+        );
+        assert_eq!(seen.lock().unwrap().as_deref(), Some(pin.as_str()));
+
+        let observed = Arc::new(Mutex::new(None));
+        let mut enrolling = ClientHandler {
+            pinned: None,
+            observed: observed.clone(),
+            said: Arc::default(),
+        };
+        assert!(
+            !enrolling.check_server_key(&certificate).await.unwrap(),
+            "a certificate was accepted for enrollment"
+        );
+        assert_eq!(observed.lock().unwrap().as_deref(), Some(pin.as_str()));
     }
 
     /// The key the device presented is recorded even when the lock around the
