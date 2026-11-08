@@ -22,7 +22,7 @@ publish = ["crates-io"]
 # krypto: only the secret types, and only where they appear in the public API.
 # It comes from crates.io, as published: no `path`, so no build depends on a local
 # checkout, and no `registry`, so the packaged crate names no other source.
-krypto = "0.7"
+krypto = "0.8"
 async-trait = "0.1"
 bytes = "1"
 quick-xml = "0.41"

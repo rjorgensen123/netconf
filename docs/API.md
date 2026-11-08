@@ -45,7 +45,7 @@ across that span; the problems live in **SSH negotiation** and **reply parsing**
 framing and the error model are the core, not RPC building.
 
 **No YANG layer, no multivendor abstraction.** `#![forbid(unsafe_code)]` — zero `unsafe`.
-Device passwords are taken **exclusively** as `krypto::SecretString` (krypto 0.7) —
+Device passwords are taken **exclusively** as `krypto::SecretString` (krypto 0.8) —
 secrets never cross the API boundary as plain text; that is type-enforced, not a convention.
 
 ## Root exports — 1:1 with `lib.rs`

@@ -7,6 +7,12 @@ Every notable change to this crate is recorded here. The format follows
 > **Note:** before 1.0 the API can change between minor versions. `docs/API.md` names the
 > version its contract applies from, and that number moves only when the public surface does.
 
+## [Unreleased]
+
+### Changed
+
+- Upgraded to krypto 0.8.0.
+
 ## [0.6.1] — 2026-10-05
 
 The public surface is that of 0.6.0, and the contract floor in `docs/API.md` stays 0.6.0.
