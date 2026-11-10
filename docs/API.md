@@ -228,7 +228,7 @@ What each policy offers, in order of preference:
 | MAC | `hmac-sha2-512-etm@openssh.com`, `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512`, `hmac-sha2-256` | `hmac-sha1-etm@openssh.com`, `hmac-sha1` |
 
 `3des-cbc` is in `LEGACY_ALGORITHMS`, so it is marked when seen, but **no policy offers it**.
- `LegacyJunos` offers everything russh 0.64 has for the R14 to Evo span;
+ `LegacyJunos` offers everything russh 0.65 has for the R14 to Evo span;
  the two full-strength additions are not legacy, the SHA-1 group exchange and
 `ssh-dss` are. `Custom` is rejected at connect (not implemented — we refuse rather than
 negotiate with a different list than the one you asked for).
@@ -1239,7 +1239,7 @@ pub async fn observe_host_key(host: &str, port: u16, ssh_policy: &SshPolicy, tim
 NETCONF runs as the **`netconf` subsystem** on the SSH session (RFC 6242); `port` is SSH's own.
 `connect` returns only once the device has **answered** the subsystem request with a yes, or sent
 data, which only a running subsystem does.
-russh 0.64 returns from the request as soon as it is queued, so the transport reads the answer
+russh 0.65 returns from the request as soon as it is queued, so the transport reads the answer
 itself, under `Timeouts::connect` and the session deadline (`Timeout { op: "ssh-subsystem" }`).
 
 **The fingerprint format** is `SHA256:<base64 without padding>` — the form the `ssh` client shows.
@@ -1368,6 +1368,6 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
 - There is no keepalive.
 - Policy enforcement reads set payloads only: a `Text` or `Xml` load — and `prepare_change` with
   either — requires `all_free(Rwd)`.
-- russh 0.64 has no `hmac-md5`: a device that offers only that cannot be reached through
+- russh 0.65 has no `hmac-md5`: a device that offers only that cannot be reached through
   `RusshTransport`.
 

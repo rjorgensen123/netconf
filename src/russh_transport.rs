@@ -7,7 +7,7 @@
 //! to. The raw byte stream is exposed as [`NetconfTransport`]; framing, whether
 //! `]]>]]>` or chunked, is handled by the layer above.
 //!
-//! **The fingerprint format is `ssh-key`'s, not ours.** russh 0.64 builds on
+//! **The fingerprint format is `ssh-key`'s, not ours.** russh 0.65 builds on
 //! `ssh-key`, whose `Fingerprint` renders as `SHA256:<base64 without padding>` —
 //! the same string an operator sees in the `ssh` client. The source is the
 //! `ssh-key` documentation. Note that russh 0.45 produced bare base64, so values
@@ -308,7 +308,7 @@ fn keep_stderr(buf: &mut String, data: &[u8], ext: u32) {
 /// Wait for the device's answer to the subsystem request. `Ok` means the subsystem
 /// is open, with any data that came before the answer.
 ///
-/// **russh 0.64's `request_subsystem` does not wait for the answer.** With
+/// **russh 0.65's `request_subsystem` does not wait for the answer.** With
 /// `want_reply` set it queues the request and returns `Ok` at once; the device's
 /// `SSH_MSG_CHANNEL_SUCCESS` or `SSH_MSG_CHANNEL_FAILURE` (RFC 4254 §5.4) arrives
 /// later, on the channel, as `ChannelMsg::Success` or `ChannelMsg::Failure`. The
@@ -472,7 +472,7 @@ async fn in_connect_phase<T>(
 ///
 /// russh runs the session in a task of its own, and that task owns the socket.
 /// Giving up on a wait — dropping the future — does not end the task, and russh
-/// 0.64 offers no call that does: there is no `Handle` until the key exchange is
+/// 0.65 offers no call that does: there is no `Handle` until the key exchange is
 /// done, `Handle::disconnect` only queues a message that the task reads when no key
 /// exchange is running and no data is waiting to go out, and russh keeps the task's
 /// join handle to itself, which detaches the task when dropped. So the task kept the
@@ -642,7 +642,7 @@ fn warn_legacy_once(host: &str) -> bool {
 /// ones form the tail. The peer chooses, so a modern device uses modern algorithms
 /// regardless. That is why the policy is *permitting* rather than *preferring*.
 ///
-/// A known limit of the library beneath us: russh 0.64 has no `hmac-md5`. A device
+/// A known limit of the library beneath us: russh 0.65 has no `hmac-md5`. A device
 /// offering ONLY that cannot be reached through this transport at all, and would need
 /// a different SSH implementation behind the same trait.
 fn preferred_for(policy: &SshPolicy) -> russh::Preferred {

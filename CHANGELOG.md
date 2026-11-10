@@ -9,6 +9,12 @@ Every notable change to this crate is recorded here. The format follows
 
 ## [0.7.0]
 
+### Security
+
+- 2026-11-10 — russh 0.65, with the security fixes that came with it (GHSA-4p9f-7p9m-5vfg,
+  GHSA-fw5c-8223-6h42, GHSA-9wfm-jcj8-jfv9, GHSA-vp5q-ff62-jwqv). The lockfile moves tokio to
+  1.54.1, crypto-bigint to 0.7.11 and ctutils to 0.4.8, for RUSTSEC-2026-0386, -0387 and -0385.
+
 ### Changed
 
 - 2026-11-09 — Upgraded to krypto 0.8.0. `Auth::Password` takes a `krypto::SecretString`, so a
