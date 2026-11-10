@@ -58,17 +58,29 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// secrets redacted unless the policy lets them through — see
     /// [`rpc`](crate::NetconfSession::rpc). Junos answers this one with `<ok/>`; the
     /// helpers that returned `()` dropped whatever the device answered.
+    ///
+    /// The session remembers that it holds the lock (0.7.0), until
+    /// [`unlock`](Self::unlock) goes through: the cleanup after a failed change
+    /// discards the candidate only under the session's own lock. A lock taken with
+    /// the raw [`rpc`](crate::NetconfSession::rpc) is not seen.
     pub async fn lock(&mut self) -> Result<String, NetconfError> {
         self.permit(Action::Read)?;
-        self.rpc("<lock><target><candidate/></target></lock>").await
+        let reply = self
+            .rpc("<lock><target><candidate/></target></lock>")
+            .await?;
+        self.locked = true;
+        Ok(reply)
     }
 
     /// Unlock the candidate database. Returns the device's `<rpc-reply>` (0.5.13) —
     /// see [`lock`](Self::lock).
     pub async fn unlock(&mut self) -> Result<String, NetconfError> {
         self.permit(Action::Read)?;
-        self.rpc("<unlock><target><candidate/></target></unlock>")
-            .await
+        let reply = self
+            .rpc("<unlock><target><candidate/></target></unlock>")
+            .await?;
+        self.locked = false;
+        Ok(reply)
     }
 
     /// Load configuration into the candidate. `payload` is XML-escaped internally.
@@ -238,7 +250,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
         &mut self,
         pending: &ConfirmedCommit,
     ) -> Result<(), NetconfError> {
-        let history = self.commit_history().await?;
+        let history = self.read_commit_history().await?;
         // `commit_history` refuses a history without a first entry.
         let last = history[0].line();
         if last != pending.entry.line() {
@@ -298,12 +310,46 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// entry per `<commit-history>`, the newest first. Read raw: it is the crate's
     /// own record of the device's state, and leaves the crate only through the
     /// policy.
-    async fn commit_history(&mut self) -> Result<Vec<CommitEntry>, NetconfError> {
+    async fn read_commit_history(&mut self) -> Result<Vec<CommitEntry>, NetconfError> {
         let xml = self
             .rpc_raw("<get-commit-information/>", ReplyBudget::PerRpc)
             .await?;
         let filter = |text: &str| self.redacted(text.to_string());
         commit_history(&xml, &filter).map_err(|e| self.filtered(e))
+    }
+
+    /// The device's commit history (0.7.0): one [`CommitRecord`] per commit the
+    /// device keeps, the newest first, as `<get-commit-information>` describes them
+    /// — who committed, through what, when, and with which log message.
+    ///
+    /// **It is how a consumer finds out whether a commit took effect.** A commit
+    /// that timed out, or whose connection broke, comes back as
+    /// [`CommitUnanswered`](NetconfError::CommitUnanswered): the device has not
+    /// said. The session it was sent on sends nothing more — see
+    /// [`unanswered`](crate::NetconfSession::unanswered) — so the history is read
+    /// on a new one. A commit that took effect stands first in it, with the user it
+    /// was made as and the comment it was sent with; one that did not is not there.
+    /// The crate reads what the device holds and judges nothing: the consumer knows
+    /// what it sent.
+    ///
+    /// A read, as `show system commit` is: with no policy bound it is refused. Every
+    /// text comes as the policy lets it through — the device's secrets redacted
+    /// unless the policy has `allow_secrets` or is `all_free` — and then made
+    /// printable. A reply without a first entry is `Protocol`: a device that has
+    /// committed has at least one.
+    pub async fn commit_history(&mut self) -> Result<Vec<CommitRecord>, NetconfError> {
+        self.permit(Action::Read)?;
+        let entries = self.read_commit_history().await?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| CommitRecord {
+                fields: entry
+                    .fields
+                    .into_iter()
+                    .map(|(name, value)| (printable(&name), self.shown(value)))
+                    .collect(),
+            })
+            .collect())
     }
 
     /// `commit confirmed <minutes>` — automatic rollback if not confirmed in time.
@@ -343,7 +389,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
         let reply = self.send_commit(&inner).await?;
         // The commit is live. A failure to read the record is reported as coming
         // after it, with the device's answer to the commit (0.5.13).
-        let mut history = match self.commit_history().await {
+        let mut history = match self.read_commit_history().await {
             Ok(history) => history,
             Err(error) => {
                 return Err(NetconfError::CommittedThenFailed {
@@ -569,6 +615,67 @@ impl<T: NetconfTransport> NetconfSession<T> {
             .map_err(NetconfError::Policy)?;
         let inner = format!("<command format=\"text\">{}</command>", xml_escape(cmd));
         self.rpc(&inner).await
+    }
+}
+
+/// One commit in the device's commit history — see
+/// [`commit_history`](NetconfSession::commit_history) (0.7.0).
+///
+/// It holds what the device wrote about the commit: each child of the
+/// `<commit-history>` entry, by its local name, with its text, in the device's
+/// order. Junos writes `sequence-number`, `user`, `client`, `date-time` and `log`;
+/// `seconds` is the `junos:seconds` of the `<date-time>`, the commit's time as a
+/// number. A field the device left out is `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitRecord {
+    fields: Vec<(String, String)>,
+}
+
+impl CommitRecord {
+    /// Every field of the entry, name and text, in the device's order — those
+    /// named below, and whatever else the device wrote.
+    pub fn fields(&self) -> &[(String, String)] {
+        &self.fields
+    }
+
+    /// The text of the first field called `name`.
+    fn field(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// `sequence-number`: the commit's place in the history, `0` for the newest. It
+    /// moves on by one with every later commit.
+    pub fn sequence_number(&self) -> Option<&str> {
+        self.field("sequence-number")
+    }
+
+    /// `user`: who committed.
+    pub fn user(&self) -> Option<&str> {
+        self.field("user")
+    }
+
+    /// `client`: what the commit came through — `cli`, `netconf`, …
+    pub fn client(&self) -> Option<&str> {
+        self.field("client")
+    }
+
+    /// `date-time`: when, as the device writes a time.
+    pub fn date_time(&self) -> Option<&str> {
+        self.field("date-time")
+    }
+
+    /// `seconds`: when, as a number of seconds, from the `junos:seconds` attribute
+    /// of the `<date-time>`.
+    pub fn seconds(&self) -> Option<&str> {
+        self.field("seconds")
+    }
+
+    /// `log`: the comment the commit was made with.
+    pub fn log(&self) -> Option<&str> {
+        self.field("log")
     }
 }
 

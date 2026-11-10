@@ -60,7 +60,7 @@ pub mod russh_transport; pub mod session; pub mod transport;
 pub use change::PreparedChange;
 pub use error::{DeviceError, NetconfError, TransportError};
 pub use framing::{Decoder, Framing};
-pub use junos::{Format, LoadAction};
+pub use junos::{CommitRecord, Format, LoadAction};
 pub use policy::{Access, Change, ConfigPolicy, Match, Op, ParseError, Scope, Violation};
 pub use redact::{contains_secrets, redact_secrets, Redactor, REDACTED};
 pub use session::NetconfSession;
@@ -249,6 +249,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
  pub fn capabilities(&self) -> &[String]; // made printable
  pub fn session_id(&self) -> Option<u64>;   // the device's <session-id> from hello; None when absent or not a number as RFC 6241 writes one
  pub fn take_warnings(&mut self) -> Vec<DeviceError>; // warnings from replies that succeeded
+ pub fn unanswered(&self) -> Option<String>; // the request that got no answer, in words; Some = the session sends nothing more
  pub fn framing(&self) -> Framing;
  pub fn transport(&self) -> &T;
  pub fn set_policy(&mut self, policy: ConfigPolicy);
@@ -363,6 +364,36 @@ things the NETCONF layer does not know — first and foremost which host key SSH
 
 ---
 
+### A request without an answer
+
+The session sends **one request at a time, and none on top of one that got no answer**. The next
+message from the device is then the answer to the request just sent. A request that ends in
+anything but the device's answer — a timeout, a connection that fails or ends, a framing violation,
+a reply with another `message-id`, a reply that cannot be read — breaks that: its answer may still
+come, and a request sent now would read it as its own. Junos leaves `message-id` out of some
+replies, so nothing would tell. An `<rpc-error>` is the device's answer, and changes nothing.
+
+- The failure comes back as it is: `Timeout`, `Transport`, `Protocol`, and `CommitUnanswered` for a
+  commit.
+- `unanswered()` then says which request it was: `request <message-id> (<element>) on session
+  <session-id> to <username>@<host>:<port>: <what happened>` — the session part as far as it is
+  known — where what happened is `it got no answer within its time limit`, `the connection failed
+  or ended before its answer`, or `what came back could not be read as its answer`.
+- Data the device sends that no request asked for is held to the same rule. With every request
+  answered, nothing is due from it; what is there before the next request goes out would be read
+  as that request's answer. The request is not sent: `Protocol`, `the device sent data that no
+  request asked for — the session is out of step, and sends nothing more`, with the data in
+  `received`, and `unanswered()` says `the device sent data that no request asked for`.
+- Every request after it is refused before anything is sent, as `Protocol`: `the session is out of
+  step, and sends nothing more — <unanswered>. Its answer may still come, and a new request would
+  read it as its own. Close the session, and read the device's state on a new one`.
+- `close()` does not send `<close-session/>` then. It closes the transport, which hands over what
+  the device still sends on the way — the late answer, when it comes, is in the `Closed` error's
+  `partial`, inside `CloseFailed`. The device lets go of the session's lock when the session ends.
+
+The device may have carried the request out. Whether a commit took effect is read on a new session,
+with `commit_history()` (§4): the crate reports, and the consumer decides.
+
 ## 3. Framing (RFC 6242)
 
 ```rust
@@ -434,6 +465,7 @@ Typed operations on top of the generic RPC layer, so the consumer never handcraf
 ```rust
 pub enum LoadAction { Merge, Replace, Override }
 pub enum Format { Text, Set, Xml }
+pub struct CommitRecord { /* private */ } // one commit of commit_history(): fields(), sequence_number(), user(), client(), date_time(), seconds(), log()
 
 impl<T: NetconfTransport> NetconfSession<T> {
  pub async fn lock(&mut self) -> Result<String, NetconfError>; // the <rpc-reply>, secrets redacted
@@ -445,6 +477,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
  pub async fn commit_confirmed(&mut self, minutes: u32, comment: Option<&str>)
  -> Result<String, NetconfError>; // the <rpc-reply>; no readable answer → CommitUnanswered; records the device's last commit
  pub fn confirmed_commit(&self) -> Option<String>; // the record commit_confirmed keeps, secrets redacted; None when nothing is waiting
+ pub async fn commit_history(&mut self) -> Result<Vec<CommitRecord>, NetconfError>; // the device's commits as data, the newest first
  pub async fn rollback(&mut self, n: u32) -> Result<String, NetconfError>; // the <rpc-reply>; 0 = last committed; n > 0 needs all_free(Rwd)
  pub async fn discard_changes(&mut self) -> Result<String, NetconfError>; // the <rpc-reply>
  pub async fn get_configuration(&mut self, filter: Option<&str>) -> Result<String, NetconfError>; // the <rpc-reply>, secrets redacted
@@ -522,6 +555,18 @@ What each helper sends. *Escaped* means `&`, `<` and `>` become entities — not
 | `get_configuration` | `<get-configuration/>`, or the filter inside `<get-configuration>`, serialized from what the read gate parsed |
 | `compare` | `<get-configuration compare="rollback" rollback="0" format="text"/>` |
 | `command` | `<command format="text">` command, escaped |
+| `commit_history` | `<get-commit-information/>` |
+
+**`commit_history()` is how a consumer finds out whether a commit took effect.** It returns one
+`CommitRecord` per `<commit-history>` entry, the newest first: each child of the entry by its
+local name, with its text, in the device's order — Junos writes `sequence-number` (`0` is the
+newest), `user`, `client`, `date-time` and `log` — and `seconds`, the `junos:seconds` of the
+`<date-time>`. `fields()` gives them all; `sequence_number()`, `user()`, `client()`,
+`date_time()`, `seconds()` and `log()` give the one named, `None` when the device left it out. It
+is a read, refused without a policy; every text comes as the policy lets it through, then made
+printable. A reply without a first entry is `Protocol`. The crate reads what the device holds and
+judges nothing: a commit that took effect stands first, with the user it was made as and the
+comment it was sent with, and the consumer knows what it sent.
 
 `commit` and `commit_confirmed` wait under `Timeouts::per_commit` when it is set, and under
 `per_rpc` when it is not; `commit_check` always waits under `per_rpc` (§1).
@@ -657,9 +702,21 @@ too. A change built with `from_diff`, from a diff the consumer stored at approva
 raw text and is compared with the fresh diff redacted under the session's policy. If anything
 changed in between, the consumer gets `NetconfError::Drift { fresh }`, carrying the fresh diff as
 the policy lets it through — redacted as `diff` is.
-That is the drift guard. **Every** failure in phase 2 before the commit goes in — drift, a
-timeout, a broken connection — discards the candidate and unlocks before the error is returned,
- so the device is never left locked with an unreviewed candidate.
+That is the drift guard. A failure in phase 2 before the commit goes in — drift, a refusal from
+the device — discards the candidate and unlocks before the error is returned, so the device is not
+left locked with an unreviewed candidate. A request that got no answer — a timeout, a broken
+connection — is the exception: the session sends nothing more (§2), so no cleanup goes out, and
+closing the session is what ends the lock.
+
+**The lock is the session's own.** The candidate is shared by everyone on the device, and a
+discard empties it whole. The session remembers whether it holds the lock — `lock` sets it,
+`unlock` clears it, a lock taken with the raw `rpc` is not seen — and the cleanup discards and
+unlocks only then. `confirm_commit` and `abort_change` without the lock are refused as `Policy`
+and send nothing: `confirm_commit: this session does not hold the lock on the candidate, so the
+compare and the commit would not be one step — prepare_change() takes the lock, or lock() and load
+first (denied, fail-closed)`, and `abort_change: this session does not hold the lock on the
+candidate, so what is in it may be someone else's — nothing is discarded (denied, fail-closed)`. A
+change from `from_diff` is confirmed on a session that has locked, and loaded, first.
 
 Everything that comes back is reported. Phase 2 returns the device's answers to the
 commit and the unlock, `[("commit-configuration", reply), ("unlock", reply)]`. A commit

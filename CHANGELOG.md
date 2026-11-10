@@ -23,6 +23,9 @@ Every notable change to this crate is recorded here. The format follows
 
 - 2026-11-10 — `ConfigPolicy::check_set_payload` checks a whole set payload as the session does.
   `check` sees operations and paths, not verbs.
+- 2026-11-10 — `NetconfSession::commit_history` gives the device's commits as data
+  (`CommitRecord`), so a consumer can tell whether a commit that got no answer took effect.
+  `NetconfSession::unanswered` says which request got no answer.
 
 ### Changed
 
@@ -35,6 +38,13 @@ Every notable change to this crate is recorded here. The format follows
   behaviour is the same.
 - 2026-11-10 — The contract floor in `docs/API.md` is 0.7.0: the public surface changed in this
   release.
+- 2026-11-10 — A session sends nothing more after a request that got no answer — a timeout, a
+  broken connection, a reply it cannot read — or when the device has sent data no request asked
+  for. Every later request is refused as `Protocol`, and `close()` skips `<close-session/>`. A
+  request sent on top of an unanswered one read the late answer as its own.
+- 2026-11-10 — The candidate is discarded only under the session's own lock. `confirm_commit` and
+  `abort_change` are refused without it, and the cleanup after a failed change sends nothing
+  without it.
 
 ## [0.6.1] — 2026-10-05
 

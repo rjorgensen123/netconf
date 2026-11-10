@@ -540,10 +540,46 @@ verify that the framing is handled.
 | `Protocol` | the device's answer could not be read, or did not belong to the request | `received` is what the device sent |
 | `Timeout` | a time limit ran out | `op` says which; `partial` is what had arrived |
 | `CommittedThenFailed` | the commit went in, then a later step failed | the change is live; `reply` is the device's answer to the commit |
-| `CommitUnanswered` | a commit was sent and no readable answer came back | the device has not said whether it took effect — check it |
+| `CommitUnanswered` | a commit was sent and no readable answer came back | the device has not said whether it took effect — see «A request that got no answer» below |
 | `WithReplies` | an operation failed after some of its requests went through | handle `error`; `replies` are the device's answers to those |
 | `CleanupFailed` | an operation failed, and the cleanup after it failed too | handle `error`; `cleanup` is each step that failed |
 | `CloseFailed` | `close()` failed | handle `error`; `end` has the warnings the session held |
+
+### A request that got no answer
+
+A timeout or a broken connection leaves a request without an answer, and the answer may still come.
+The session sends one request at a time, so it sends nothing more after that: a new request would
+read the late answer as its own. Every call is refused with a `Protocol` error that says which
+request is unanswered, and `session.unanswered()` says the same.
+
+netconf reports what happened; what to do is yours to decide. The steps it gives you:
+
+```rust
+# use netconf::{ConnectOptions, NetconfError, NetconfSession, NetconfTransport};
+# async fn ex<T: NetconfTransport>(mut session: NetconfSession<T>, opts: &ConnectOptions,
+#     policy: netconf::ConfigPolicy) -> Result<(), NetconfError> {
+if let Err(NetconfError::CommitUnanswered(why)) = session.commit(Some("change 4711")).await {
+    // Which request, on which session, and what happened instead of an answer.
+    let unanswered = session.unanswered();
+    // Close it: the device lets go of the lock, and what it still sends comes back here.
+    let closed = session.close().await;
+
+    // On a new session, read what the device holds.
+    let mut session = NetconfSession::<T>::connect(opts).await?;
+    session.set_policy(policy);
+    let history = session.commit_history().await?;
+    let took_effect = history
+        .first()
+        .is_some_and(|c| c.log() == Some("change 4711"));
+#   let _ = (why, unanswered, closed, took_effect);
+}
+# Ok(()) }
+```
+
+`commit_history()` gives the device's commits as data, the newest first — who committed, through
+what, when and with which comment. You know what you sent, so you can tell a commit that took
+effect from one that died. A time limit is the limit: a commit given five minutes waits five
+minutes, so put the slack you want for a slow device into `per_commit`.
 
 `Transport` carries a `TransportError`:
 

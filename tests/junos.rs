@@ -1605,3 +1605,47 @@ async fn a_wildcard_delete_is_refused_by_the_session() {
     );
     assert!(!sent_str(&log).contains("<load-configuration"));
 }
+
+/// **`commit_history` gives the device's commits as data** (0.7.0): who, through
+/// what, when and with which comment — what a consumer needs to tell whether a
+/// commit that got no answer took effect.
+#[tokio::test]
+async fn commit_history_gives_the_devices_commits_as_data() {
+    let (mut s, log) = session(vec![info_a()]).await;
+    let history = s.commit_history().await.unwrap();
+    assert!(sent_str(&log).contains("<get-commit-information/>"));
+    assert_eq!(history.len(), 2);
+    let newest = &history[0];
+    assert_eq!(newest.sequence_number(), Some("0"));
+    assert_eq!(newest.user(), Some("rjorgensen"));
+    assert_eq!(newest.client(), Some("netconf"));
+    assert_eq!(newest.date_time(), Some("2026-10-03 10:00:00 UTC"));
+    assert_eq!(newest.seconds(), Some("1"));
+    assert_eq!(newest.log(), Some("commit confirmed, rollback in 5mins"));
+    // A field the device left out is `None`, and every field it wrote is there.
+    assert_eq!(history[1].log(), None);
+    assert_eq!(history[1].fields().len(), 4);
+
+    // A read like any other: without a policy it is refused, and nothing is sent.
+    let (mut s, log) = session_without_policy(vec![]).await;
+    assert!(matches!(
+        s.commit_history().await,
+        Err(NetconfError::Policy(_))
+    ));
+    assert!(!sent_str(&log).contains("<get-commit-information/>"));
+}
+
+/// **A secret in a commit comment is redacted** (0.7.0), as everywhere else.
+#[tokio::test]
+async fn a_secret_in_the_commit_history_is_redacted() {
+    let (mut s, _log) = session(vec![commit_info_reply(
+        "0",
+        "rjorgensen",
+        "2026-10-03 10:00:00 UTC",
+        "set secret $9$hunter2",
+    )])
+    .await;
+    let history = s.commit_history().await.unwrap();
+    let log = history[0].log().unwrap();
+    assert!(!log.contains("hunter2"), "{log}");
+}

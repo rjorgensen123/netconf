@@ -42,6 +42,35 @@ pub struct NetconfSession<T: NetconfTransport> {
     /// confirming `commit` checks that the device still shows it, and that the
     /// candidate is clean, before it confirms.
     pub(crate) confirmed: Option<crate::junos::ConfirmedCommit>,
+    /// The request this session sent and got no answer to that it could read, or
+    /// data the device sent unasked, if there is either (0.7.0). While it stands,
+    /// nothing more is sent: see [`unanswered`](Self::unanswered).
+    unanswered: Option<Unanswered>,
+    /// Whether this session holds the lock on the candidate (0.7.0): set by
+    /// [`lock`](Self::lock), cleared by [`unlock`](Self::unlock). The cleanup after
+    /// a failed change discards and unlocks only then.
+    pub(crate) locked: bool,
+    /// Who the session is to — `username@host:port` — when it was made by
+    /// [`connect`](Self::connect) (0.7.0). For what [`unanswered`](Self::unanswered)
+    /// says.
+    peer: Option<String>,
+}
+
+/// Why a session sends nothing more (0.7.0).
+#[derive(Debug, Clone)]
+enum Unanswered {
+    /// A request got no answer the session could read.
+    Request {
+        /// The request's `message-id`.
+        message_id: u64,
+        /// The name of the request's element: `commit-configuration`, `lock`, …
+        operation: String,
+        /// What happened instead of an answer, in words that hold nothing the
+        /// device sent.
+        why: &'static str,
+    },
+    /// The device sent data that no request asked for.
+    Unasked,
 }
 
 impl<T: NetconfTransport> NetconfSession<T> {
@@ -160,7 +189,9 @@ impl<T: NetconfTransport> NetconfSession<T> {
     pub async fn connect(opts: &ConnectOptions) -> Result<Self, NetconfError> {
         // No policy is bound yet, so what the device sent is redacted (0.5.13).
         let transport = T::connect(opts).await.map_err(redact_content)?;
-        Self::establish(transport, true).await
+        let mut session = Self::establish(transport, true).await?;
+        session.peer = Some(format!("{}@{}:{}", opts.username, opts.host, opts.port));
+        Ok(session)
     }
 
     /// Run the hello exchange on a transport that is already connected.
@@ -230,6 +261,9 @@ impl<T: NetconfTransport> NetconfSession<T> {
             policy: None,
             synchronize_commits: false,
             confirmed: None,
+            unanswered: None,
+            locked: false,
+            peer: None,
         })
     }
 
@@ -323,9 +357,51 @@ impl<T: NetconfTransport> NetconfSession<T> {
     }
 
     /// One request and its reply — see [`rpc_raw`](Self::rpc_raw).
+    ///
+    /// **One request at a time, and none on top of one that got no answer** (0.7.0).
+    /// The session sends a request only when the one before it has been answered, so
+    /// the next message from the device is the answer to the request just sent. A
+    /// request that ends in anything but the device's answer — a timeout, a broken
+    /// connection, a framing violation, a reply that is not this request's or cannot
+    /// be read — leaves that broken: its answer may still come, and a request sent
+    /// now would read it as its own. Junos leaves `message-id` out of some replies,
+    /// so nothing would tell. The request is therefore recorded as unanswered, and
+    /// every request after it is refused before anything is sent. An `<rpc-error>`
+    /// is the device's answer, and leaves the session as it was.
     async fn exchange(&mut self, inner: &str, budget: ReplyBudget) -> Result<String, NetconfError> {
+        if let Some(refusal) = self.out_of_step() {
+            return Err(refusal);
+        }
+        // Every request has been answered, so nothing is due from the device. Data
+        // that is here all the same is something no request asked for: sent now, a
+        // request would read it as its answer.
+        if self.decoder.holds_data() {
+            self.unanswered = Some(Unanswered::Unasked);
+            return Err(NetconfError::protocol_with(
+                "the device sent data that no request asked for — the session is out of \
+                 step, and sends nothing more",
+                bytes_as_text(self.decoder.buffered()),
+            ));
+        }
         self.transport.reply_budget(budget);
         self.msg_id += 1;
+        let answer = self.send_and_read(inner).await;
+        let why = match &answer {
+            Ok(_) | Err(NetconfError::Device(_)) => return answer,
+            Err(NetconfError::Timeout { .. }) => "it got no answer within its time limit",
+            Err(NetconfError::Transport(_)) => "the connection failed or ended before its answer",
+            Err(_) => "what came back could not be read as its answer",
+        };
+        self.unanswered = Some(Unanswered::Request {
+            message_id: self.msg_id,
+            operation: operation_of(inner),
+            why,
+        });
+        answer
+    }
+
+    /// The request on the wire and what comes back — see [`exchange`](Self::exchange).
+    async fn send_and_read(&mut self, inner: &str) -> Result<String, NetconfError> {
         let env = rpc::wrap_rpc(self.msg_id, inner);
         if let Err(e) = self
             .transport
@@ -336,6 +412,53 @@ impl<T: NetconfTransport> NetconfSession<T> {
         }
         let reply = read_message(&mut self.transport, &mut self.decoder).await?;
         self.take_reply(reply)
+    }
+
+    /// The request this session sent and got no answer to, in words (0.7.0): which
+    /// request it was — its element and `message-id` — what happened instead of an
+    /// answer, and which session it was sent on. `None` while every request has been
+    /// answered.
+    ///
+    /// It also says when the device has sent data that no request asked for: with
+    /// every request answered, nothing is due from the device, and what is there
+    /// before the next request goes out would be read as that request's answer.
+    ///
+    /// When it is `Some`, the session sends nothing more: every request is refused
+    /// with a `Protocol` error that says the same. The device may have carried the
+    /// request out all the same. What to do is the consumer's to decide, and the
+    /// crate has the pieces for it: [`close`](Self::close) this session, which
+    /// hands over what the device still sends and lets go of its lock; then, on a
+    /// new session, [`commit_history`](Self::commit_history) says whether a commit
+    /// took effect.
+    pub fn unanswered(&self) -> Option<String> {
+        let unanswered = self.unanswered.as_ref()?;
+        let session = match (&self.peer, self.session_id) {
+            (Some(peer), Some(id)) => format!(" on session {id} to {peer}"),
+            (Some(peer), None) => format!(" to {peer}"),
+            (None, Some(id)) => format!(" on session {id}"),
+            (None, None) => String::new(),
+        };
+        Some(match unanswered {
+            Unanswered::Request {
+                message_id,
+                operation,
+                why,
+            } => format!("request {message_id} (<{operation}>){session}: {why}"),
+            Unanswered::Unasked => {
+                format!("the device sent data that no request asked for{session}")
+            }
+        })
+    }
+
+    /// The refusal for a session with an unanswered request — see
+    /// [`unanswered`](Self::unanswered).
+    fn out_of_step(&self) -> Option<NetconfError> {
+        let unanswered = self.unanswered()?;
+        Some(NetconfError::protocol(format!(
+            "the session is out of step, and sends nothing more — {unanswered}. Its \
+             answer may still come, and a new request would read it as its own. Close \
+             the session, and read the device's state on a new one"
+        )))
     }
 
     /// A reply as the session reads every one: text, the answer to the request just
@@ -412,10 +535,24 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// and the `SessionEnd`, so the warnings reach the caller then too; when the
     /// close-session and the closing of the transport both fail, the error is
     /// `CleanupFailed` with the step `"close"`.
+    ///
+    /// With a request [`unanswered`](Self::unanswered), `<close-session/>` is not
+    /// sent (0.7.0): what came back would be read as its answer. The transport is
+    /// closed, and what the device still sends on the way — the late answer, when
+    /// it comes — is in what the transport hands over. Ending the session is what
+    /// lets go of its lock on the device.
     pub async fn close(mut self) -> Result<SessionEnd, NetconfError> {
-        let answered = match self.close_session().await {
-            Ok(()) => Ok(()),
-            Err(e) => Err(self.filtered(e)),
+        // With a request unanswered, `<close-session/>` is not sent (0.7.0): what
+        // came back would be read as its answer. The transport is closed, and what
+        // the device still sends on the way — the late answer, if it comes — is
+        // what the transport hands over.
+        let answered = if self.unanswered.is_some() {
+            Ok(())
+        } else {
+            match self.close_session().await {
+                Ok(()) => Ok(()),
+                Err(e) => Err(self.filtered(e)),
+            }
         };
         let allowed = self.secrets_allowed();
         let filter = |e: NetconfError| if allowed { e } else { redact_content(e) };
@@ -525,6 +662,25 @@ pub(crate) fn no_policy_bound() -> NetconfError {
          ConfigPolicy::all_free(Rwd) if you deliberately want everything allowed"
             .into(),
     )
+}
+
+/// The name of a request's element, for [`NetconfSession::unanswered`]: what stands
+/// between the first `<` and the first whitespace, `/` or `>`, when it is an XML
+/// name; `request` for anything else. The crate writes the requests of its typed
+/// helpers; a raw one is the consumer's own text.
+fn operation_of(inner: &str) -> String {
+    let name: String = inner
+        .trim_start()
+        .strip_prefix('<')
+        .unwrap_or_default()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+        .collect();
+    if name.is_empty() {
+        "request".to_string()
+    } else {
+        name
+    }
 }
 
 /// Read one complete message: pump the transport until the de-framer yields one.

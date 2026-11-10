@@ -11,6 +11,12 @@
 //!    fresh diff, inside [`NetconfError::WithReplies`] with the device's answers to
 //!    the discard and the unlock.
 //!
+//! The lock is the session's own (0.7.0): `confirm_commit` and `abort_change` need
+//! it, and the cleanup after a failure discards and unlocks only under it — the
+//! candidate is shared by everyone on the device. After a request that got no
+//! answer the session sends nothing more, so no cleanup goes out; closing the
+//! session ends the lock.
+//!
 //! The point is that a change which slipped in between review and commit is
 //! caught: we commit exactly what the operator saw, or nothing. The comparison is
 //! made on the diff as the device wrote it (0.5.12), so a change inside a value the
@@ -215,6 +221,19 @@ impl<T: NetconfTransport> NetconfSession<T> {
         approved: &PreparedChange,
         comment: &str,
     ) -> Result<Vec<(&'static str, String)>, NetconfError> {
+        // Compare-then-commit holds the lock from the compare to the commit (0.7.0):
+        // without it, the candidate can change between the two, and what is
+        // committed is not what was compared. `prepare_change` takes the lock; a
+        // change from `from_diff` is confirmed on a session that has locked, and
+        // loaded, first.
+        if !self.locked {
+            return Err(NetconfError::Policy(
+                "confirm_commit: this session does not hold the lock on the candidate, so \
+                 the compare and the commit would not be one step — prepare_change() takes \
+                 the lock, or lock() and load first (denied, fail-closed)"
+                    .into(),
+            ));
+        }
         // Every failure path cleans up, not just the drift one.
         //
         // This used to use `?` directly on the network calls, so a timeout or a
@@ -275,7 +294,20 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// `"unlock"` — with each `<rpc-reply>`, redacted as a reply is (0.5.13). When
     /// one of them fails, the other's answer goes with its error, in
     /// [`WithReplies`](NetconfError::WithReplies).
+    ///
+    /// The candidate is the device's, shared by everyone on it, and a discard empties
+    /// it whole. It is discarded under this session's own lock, which says what is in
+    /// it is this session's (0.7.0): without the lock the abort is refused as
+    /// `Policy`, and nothing is sent.
     pub async fn abort_change(&mut self) -> Result<Vec<(&'static str, String)>, NetconfError> {
+        if !self.locked {
+            return Err(NetconfError::Policy(
+                "abort_change: this session does not hold the lock on the candidate, so \
+                 what is in it may be someone else's — nothing is discarded (denied, \
+                 fail-closed)"
+                    .into(),
+            ));
+        }
         let discarded = self.discard_changes().await;
         let unlocked = self.unlock().await;
         match (discarded, unlocked) {
@@ -302,9 +334,20 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// Discard and unlock after an earlier failure. Both are attempted. Every step
     /// that goes through is returned with the device's answer, and every step that
     /// fails with its error, to be reported with the failure it followed.
+    ///
+    /// Nothing is sent when there is nothing this session can clean up (0.7.0):
+    ///
+    /// - It does not hold the lock. The candidate is shared, and a discard without
+    ///   the lock could empty it of someone else's work.
+    /// - A request of its is unanswered — the failure being reported, when that was
+    ///   a timeout or a broken connection. The session sends nothing more; closing
+    ///   it ends the lock, and the device discards what the lock held.
     async fn cleanup(&mut self) -> Cleanup {
         let mut answered = Vec::new();
         let mut failed = Vec::new();
+        if !self.locked || self.unanswered().is_some() {
+            return (answered, failed);
+        }
         match self.discard_changes().await {
             Ok(reply) => answered.push(("discard-changes", reply)),
             Err(e) => failed.push(("discard-changes", e)),

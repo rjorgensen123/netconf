@@ -258,19 +258,51 @@ async fn prepare_change_refuses_raw_xml_unless_all_free_rwd_is_deliberate() {
 
 /// **A failure must not leave the device locked.**
 ///
-/// `confirm_commit` used to apply `?` to the network calls directly, so a timeout
-/// or a dropped connection in compare, commit or unlock returned straight out with
-/// the configuration still locked and an unreviewed candidate loaded. Nothing in
-/// this crate would unlock it afterwards, and the device does not time it out
-/// either — a person has to go and clear it by hand.
+/// `confirm_commit` used to apply `?` to the network calls directly, so a failure
+/// in compare, commit or unlock returned straight out with the configuration still
+/// locked and an unreviewed candidate loaded.
 ///
-/// The mock runs out of replies part-way through, which is what a connection
-/// breaking looks like from here.
+/// When the device answers — here it refuses the compare — the session is in step,
+/// and discards and unlocks on the way out.
 #[tokio::test]
-async fn a_failure_during_confirm_still_discards_and_unlocks() {
+async fn a_refusal_during_confirm_still_discards_and_unlocks() {
     let body = "+  set interfaces ge-0/0/1 unit 1";
-    // Enough replies to prepare, then the compare inside confirm_commit finds
-    // nothing left: the session breaks exactly where the device would go quiet.
+    let refused = eom(&format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><rpc-error>\
+         <error-tag>operation-failed</error-tag>\
+         <error-message>compare refused</error-message></rpc-error></rpc-reply>"
+    ));
+    let (mut s, log) = session(vec![
+        ok_reply(),       // lock
+        ok_reply(),       // load
+        diff_reply(body), // compare (prepare)
+        refused,          // compare (confirm): the device says no
+        ok_reply(),       // discard (cleanup)
+        ok_reply(),       // unlock (cleanup)
+    ])
+    .await;
+    let prepared = s
+        .prepare_change(PAYLOAD, Format::Set, LoadAction::Merge)
+        .await
+        .unwrap();
+    match after_cleanup(s.confirm_commit(&prepared, "job").await) {
+        Err(NetconfError::Device(d)) => assert_eq!(d.message.as_deref(), Some("compare refused")),
+        other => panic!("expected the compare's Device error, got {other:?}"),
+    }
+    let sent = sent_str(&log);
+    assert!(sent.contains("<discard-changes/>"), "{sent}");
+    assert_eq!(sent.matches("<unlock>").count(), 1, "{sent}");
+    assert!(s.unanswered().is_none());
+}
+
+/// **A request that got no answer ends what the session sends** (0.7.0). The mock
+/// runs out of replies part-way through, which is what a connection breaking looks
+/// like from here. The compare's answer may still come, and a discard sent now
+/// would read it as its own — so nothing more is sent, the session says which
+/// request is unanswered, and closing it is what lets go of the lock.
+#[tokio::test]
+async fn a_request_without_an_answer_ends_what_the_session_sends() {
+    let body = "+  set interfaces ge-0/0/1 unit 1";
     let (mut s, log) = session(vec![
         ok_reply(),       // lock
         ok_reply(),       // load
@@ -287,19 +319,27 @@ async fn a_failure_during_confirm_still_discards_and_unlocks() {
         .await
         .expect_err("the session has no replies left, so this must fail");
     assert!(
-        !matches!(err, NetconfError::Drift { .. }),
-        "this is a transport failure, not drift: {err:?}"
+        matches!(err, NetconfError::Transport(_)),
+        "the failure comes back as it is: {err:?}"
     );
-
     let sent = sent_str(&log);
+    assert!(!sent.contains("<discard-changes/>"), "{sent}");
+    assert!(!sent.contains("<unlock>"), "{sent}");
+
+    let unanswered = s.unanswered().expect("the compare is unanswered");
     assert!(
-        sent.contains("<discard-changes/>"),
-        "the candidate must be discarded on the way out: {sent}"
+        unanswered.contains("request 4 (<get-configuration>)"),
+        "{unanswered}"
     );
-    assert!(
-        sent.matches("<unlock>").count() >= 1,
-        "the configuration must be unlocked on the way out: {sent}"
-    );
+    // Every request after it is refused, before anything is sent.
+    match s.unlock().await {
+        Err(NetconfError::Protocol { detail, .. }) => {
+            assert!(detail.contains("out of step"), "{detail}");
+            assert!(detail.contains("request 4"), "{detail}");
+        }
+        other => panic!("expected the out-of-step refusal, got {other:?}"),
+    }
+    assert!(!sent_str(&log).contains("<unlock>"));
 }
 
 /// The commit succeeded and the unlock after it failed. Both are reported: the error
@@ -342,44 +382,48 @@ async fn a_failed_unlock_after_a_commit_reports_the_commit() {
     assert!(!sent_str(&log).contains("<discard-changes/>"));
 }
 
-/// A reply to the commit that cannot be tied to it is no answer. The cleanup after it
-/// goes through here, so what comes back is `CommitUnanswered`, carrying the reason,
-/// inside `WithReplies` with the answers to the cleanup (0.5.13).
+/// A reply to the commit that cannot be tied to it is no answer: what comes back is
+/// `CommitUnanswered`, carrying the reason. The commit's own answer may still come,
+/// so the session sends nothing more (0.7.0) — no cleanup goes out on top of it.
 #[tokio::test]
 async fn a_commit_answered_by_something_else_is_reported_as_unanswered() {
     let body = "+  set interfaces ge-0/0/1 unit 1";
     let foreign = eom(&format!(
         "<rpc-reply xmlns=\"{BASE_1_0}\" message-id=\"99\"><ok/></rpc-reply>"
     ));
-    let (mut s, _log) = session(vec![
+    let (mut s, log) = session(vec![
         ok_reply(),       // lock
         ok_reply(),       // load
         diff_reply(body), // compare (prepare)
         diff_reply(body), // compare (confirm)
         foreign,          // commit: an answer to something else
-        ok_reply(),       // discard (cleanup)
-        ok_reply(),       // unlock (cleanup)
     ])
     .await;
     let prepared = s
         .prepare_change(PAYLOAD, Format::Set, LoadAction::Merge)
         .await
         .unwrap();
-    match after_cleanup(s.confirm_commit(&prepared, "job").await) {
+    match s.confirm_commit(&prepared, "job").await {
         Err(NetconfError::CommitUnanswered(inner)) => {
             assert!(matches!(*inner, NetconfError::Protocol { .. }), "{inner:?}");
         }
         other => panic!("expected CommitUnanswered, got {other:?}"),
     }
+    assert!(!sent_str(&log).contains("<discard-changes/>"));
+    let unanswered = s.unanswered().expect("the commit is unanswered");
+    assert!(
+        unanswered.contains("(<commit-configuration>)"),
+        "{unanswered}"
+    );
 }
 
-/// When the connection breaks at the commit, the commit is unanswered and the
-/// cleanup after it cannot get through either. Both are reported, each step with
-/// what came back.
+/// When the connection breaks at the commit, the commit is unanswered, and that is
+/// what is reported. No cleanup is attempted on a connection that is gone (0.7.0;
+/// the two cleanup steps used to be sent, and reported as failed).
 #[tokio::test]
-async fn an_unanswered_commit_and_a_failed_cleanup_are_both_reported() {
+async fn an_unanswered_commit_is_reported_and_nothing_follows_it() {
     let body = "+  set interfaces ge-0/0/1 unit 1";
-    let (mut s, _log) = session(vec![
+    let (mut s, log) = session(vec![
         ok_reply(),       // lock
         ok_reply(),       // load
         diff_reply(body), // compare (prepare)
@@ -391,16 +435,11 @@ async fn an_unanswered_commit_and_a_failed_cleanup_are_both_reported() {
         .await
         .unwrap();
     match s.confirm_commit(&prepared, "job").await {
-        Err(NetconfError::CleanupFailed { error, cleanup }) => {
-            assert!(
-                matches!(*error, NetconfError::CommitUnanswered(_)),
-                "{error:?}"
-            );
-            let steps: Vec<&str> = cleanup.iter().map(|(step, _)| *step).collect();
-            assert_eq!(steps, ["discard-changes", "unlock"]);
-        }
-        other => panic!("expected CleanupFailed carrying both, got {other:?}"),
+        Err(NetconfError::CommitUnanswered(_)) => {}
+        other => panic!("expected CommitUnanswered, got {other:?}"),
     }
+    assert!(!sent_str(&log).contains("<discard-changes/>"));
+    assert!(s.unanswered().is_some());
 }
 
 /// A compare reply with no `<configuration-output>` does not say what the diff is.
@@ -490,12 +529,31 @@ async fn an_abort_reports_a_failed_discard() {
          <error-tag>operation-failed</error-tag>\
          <error-message>discard refused</error-message></rpc-error></rpc-reply>"
     ));
-    let (mut s, _log) = session(vec![discard_error, ok_reply()]).await;
+    let (mut s, _log) = session(vec![ok_reply(), discard_error, ok_reply()]).await;
+    s.lock().await.unwrap();
     // The unlock went through, and its answer goes with the discard's error (0.5.13).
     match after_cleanup(s.abort_change().await) {
         Err(NetconfError::Device(d)) => assert_eq!(d.message.as_deref(), Some("discard refused")),
         other => panic!("expected the discard's Device error, got {other:?}"),
     }
+}
+
+/// **The candidate is discarded only under the session's own lock** (0.7.0). It is
+/// shared by everyone on the device: without the lock, what is in it may be someone
+/// else's, so an abort and a confirm are refused and nothing is sent.
+#[tokio::test]
+async fn without_the_lock_nothing_is_discarded_or_committed() {
+    let (mut s, log) = session(vec![]).await;
+    match s.abort_change().await {
+        Err(NetconfError::Policy(m)) => assert!(m.contains("does not hold the lock"), "{m}"),
+        other => panic!("expected a Policy refusal, got {other:?}"),
+    }
+    let approved = netconf::PreparedChange::from_diff("+ approved".into());
+    match s.confirm_commit(&approved, "job").await {
+        Err(NetconfError::Policy(m)) => assert!(m.contains("does not hold the lock"), "{m}"),
+        other => panic!("expected a Policy refusal, got {other:?}"),
+    }
+    assert!(!sent_str(&log).contains("<rpc"), "{}", sent_str(&log));
 }
 
 /// **The diff is what the policy lets through** (0.5.11). Under the ordinary policy
@@ -603,18 +661,27 @@ async fn a_change_inside_a_redacted_value_is_drift() {
 
 /// A change built from a stored diff has no raw text to compare with, so it is
 /// compared with the fresh diff redacted the same way: the same redacted text is no
-/// drift, a different one is.
+/// drift, a different one is. It is confirmed on a session that holds the lock
+/// (0.7.0).
 #[tokio::test]
 async fn a_change_built_from_a_stored_diff_compares_the_redacted_diff() {
     let body = "[edit system login user x authentication]\n\
 +  encrypted-password \"$9$HASH\"; ## SECRET-DATA";
-    let (mut s, _log) = session(vec![diff_reply(body), ok_reply(), ok_reply()]).await;
+    let (mut s, _log) = session(vec![ok_reply(), diff_reply(body), ok_reply(), ok_reply()]).await;
+    s.lock().await.unwrap();
     let stored = netconf::redact_secrets(body);
     s.confirm_commit(&netconf::PreparedChange::from_diff(stored), "job")
         .await
         .expect("the stored redacted diff equals the fresh one redacted");
 
-    let (mut s, _log) = session(vec![diff_reply("+ something else"), ok_reply(), ok_reply()]).await;
+    let (mut s, _log) = session(vec![
+        ok_reply(),
+        diff_reply("+ something else"),
+        ok_reply(),
+        ok_reply(),
+    ])
+    .await;
+    s.lock().await.unwrap();
     match after_cleanup(
         s.confirm_commit(
             &netconf::PreparedChange::from_diff("+ approved".into()),

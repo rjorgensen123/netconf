@@ -54,7 +54,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use change::PreparedChange;
 pub use error::{DeviceError, NetconfError, TransportError};
 pub use framing::{Decoder, Framing};
-pub use junos::{Format, LoadAction};
+pub use junos::{CommitRecord, Format, LoadAction};
 pub use policy::{Access, Change, ConfigPolicy, Match, Op, ParseError, Scope, Violation};
 pub use redact::{REDACTED, Redactor, contains_secrets, redact_secrets};
 pub use session::NetconfSession;

@@ -1017,3 +1017,106 @@ async fn the_text_of_an_io_error_goes_through_the_filter() {
         }
     }
 }
+
+/// **After a request that got no answer, the session sends nothing more** (0.7.0).
+/// One request goes at a time, so the next message from the device is the answer to
+/// the one just sent — until one is left unanswered. Its answer may still come, and
+/// a request sent on top of it would read that answer as its own: Junos leaves
+/// `message-id` out of some replies, and nothing would tell.
+#[tokio::test]
+async fn after_a_timeout_the_session_sends_nothing_more() {
+    use netconf::NetconfError;
+    let t = StopsWith {
+        inbound: vec![hello(false)].into(),
+        end: || NetconfError::Timeout {
+            op: "rpc-recv",
+            partial: String::new(),
+        },
+    };
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    assert!(s.unanswered().is_none());
+    assert!(matches!(
+        s.rpc("<commit-configuration/>").await,
+        Err(NetconfError::Timeout { op: "rpc-recv", .. })
+    ));
+    let unanswered = s.unanswered().expect("the commit is unanswered");
+    assert!(
+        unanswered.contains("request 1 (<commit-configuration>)"),
+        "{unanswered}"
+    );
+    assert!(unanswered.contains("time limit"), "{unanswered}");
+    match s.rpc("<get-configuration/>").await {
+        Err(NetconfError::Protocol { detail, .. }) => {
+            assert!(detail.contains("out of step"), "{detail}");
+            assert!(detail.contains("request 1"), "{detail}");
+        }
+        other => panic!("expected the out-of-step refusal, got {other:?}"),
+    }
+}
+
+/// **A refusal from the device is an answer** (0.7.0): the session is in step after
+/// an `<rpc-error>`, and the next request goes out. A session that is out of step is
+/// closed without `<close-session/>`, whose answer it could not tell from the late
+/// one.
+#[tokio::test]
+async fn an_rpc_error_keeps_the_session_in_step_and_a_broken_one_closes_quietly() {
+    use netconf::NetconfError;
+    let reply = |body: &str| {
+        encode(
+            Framing::Eom,
+            format!("<rpc-reply xmlns=\"{}\">{body}</rpc-reply>", rpc::BASE_1_0).as_bytes(),
+        )
+    };
+    let (t, log) = MockTransport::recording(vec![
+        hello(false),
+        reply("<rpc-error><error-message>no</error-message></rpc-error>"),
+        reply("<ok/>"),
+    ]);
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    assert!(matches!(
+        s.rpc("<lock/>").await,
+        Err(NetconfError::Device(_))
+    ));
+    assert!(s.unanswered().is_none());
+    s.rpc("<unlock/>").await.expect("the session is in step");
+
+    // The mock has nothing more: the device goes quiet, and the request is unanswered.
+    assert!(matches!(
+        s.rpc("<get-configuration/>").await,
+        Err(NetconfError::Transport(_))
+    ));
+    assert!(s.unanswered().is_some());
+    s.close().await.expect("closing the transport goes through");
+    let sent = String::from_utf8_lossy(&log.lock().unwrap()).into_owned();
+    assert!(!sent.contains("<close-session/>"), "{sent}");
+}
+
+/// **Data no request asked for ends what the session sends** (0.7.0). With every
+/// request answered, nothing is due from the device; a second message that came
+/// with the first reply would be read as the answer to the next request.
+#[tokio::test]
+async fn data_no_request_asked_for_ends_what_the_session_sends() {
+    use netconf::NetconfError;
+    let reply = format!("<rpc-reply xmlns=\"{}\"><ok/></rpc-reply>", rpc::BASE_1_0);
+    let mut twice = encode(Framing::Eom, reply.as_bytes());
+    twice.extend(encode(Framing::Eom, reply.as_bytes()));
+    let (t, log) = MockTransport::recording(vec![hello(false), twice]);
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    s.rpc("<lock/>")
+        .await
+        .expect("the first reply is the answer");
+    match s.rpc("<commit-configuration/>").await {
+        Err(NetconfError::Protocol { detail, received }) => {
+            assert!(detail.contains("no request asked for"), "{detail}");
+            assert!(received.is_some_and(|r| r.contains("<ok/>")));
+        }
+        other => panic!("expected a Protocol error, got {other:?}"),
+    }
+    let sent = String::from_utf8_lossy(&log.lock().unwrap()).into_owned();
+    assert!(!sent.contains("<commit-configuration/>"), "{sent}");
+    assert!(s.unanswered().is_some());
+    assert!(matches!(
+        s.rpc("<unlock/>").await,
+        Err(NetconfError::Protocol { .. })
+    ));
+}

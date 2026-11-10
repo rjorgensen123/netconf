@@ -89,7 +89,8 @@ pub enum NetconfError {
     /// A commit was sent, and no answer that could be read came back. The inner
     /// error is what happened instead: a timeout, a broken connection, a reply that
     /// did not parse or did not belong to the request. The device has not said
-    /// whether the commit took effect.
+    /// whether the commit took effect. The session sends nothing more after it
+    /// (0.7.0); `commit_history` on a new session says what the device holds.
     CommitUnanswered(Box<NetconfError>),
     /// An operation failed, and the cleanup after it failed too. Both are reported:
     /// the first failure as it came back, and every cleanup step that failed after
