@@ -2,8 +2,8 @@
 //! Parsing of rpc-error and replies against fixtures: classic Junos style with
 //! namespace prefixes, RFC-compliant style, and malformed input.
 
-use netconf::rpc::parse_rpc_reply;
 use netconf::NetconfError;
+use netconf::rpc::parse_rpc_reply;
 
 #[test]
 fn ok_reply_is_ok() {
@@ -135,7 +135,7 @@ fn reply_message_id_is_extracted_and_tolerates_absence() {
         Some(42)
     );
     assert_eq!(reply_message_id("<rpc-reply><ok/></rpc-reply>"), None); // the Junos quirk, tolerated
-                                                                        // A number is what this crate writes: `042` is not 42.
+    // A number is what this crate writes: `042` is not 42.
     assert_eq!(
         reply_message_id("<rpc-reply message-id=\"042\"><ok/></rpc-reply>"),
         None
@@ -518,9 +518,11 @@ fn parse_rpc_reply_gives_the_warnings_back() {
         warnings[0].message.as_deref(),
         Some("statement has no effect")
     );
-    assert!(parse_rpc_reply("<rpc-reply><ok/></rpc-reply>")
-        .expect("ok")
-        .is_empty());
+    assert!(
+        parse_rpc_reply("<rpc-reply><ok/></rpc-reply>")
+            .expect("ok")
+            .is_empty()
+    );
 }
 
 /// **Every protocol error on what the device sent carries it** (0.5.13): an unknown

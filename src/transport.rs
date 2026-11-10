@@ -254,15 +254,15 @@ impl Timeouts {
         // `None` runs commits under `per_rpc`, which is checked above. A commit budget
         // that is set is held to the ceiling: a commit allowed to wait longer than any
         // session can live is a mistake, not a setting.
-        if let Some(per_commit) = self.per_commit {
-            if per_commit < Duration::from_secs(1) || per_commit > self.max_total {
-                return Err(format!(
-                    "Timeouts::per_commit is {}s — a commit's budget must be at least 1s and \
+        if let Some(per_commit) = self.per_commit
+            && (per_commit < Duration::from_secs(1) || per_commit > self.max_total)
+        {
+            return Err(format!(
+                "Timeouts::per_commit is {}s — a commit's budget must be at least 1s and \
                      at most max_total ({}s), or None to use per_rpc; nothing is silently clamped",
-                    per_commit.as_secs(),
-                    self.max_total.as_secs()
-                ));
-            }
+                per_commit.as_secs(),
+                self.max_total.as_secs()
+            ));
         }
         // Deliberately NOT checked: that `per_rpc`, `per_commit` or `connect` fits
         // inside `total`. A short-lived task keeps the default per-read limit, and

@@ -56,9 +56,9 @@ pub use error::{DeviceError, NetconfError, TransportError};
 pub use framing::{Decoder, Framing};
 pub use junos::{Format, LoadAction};
 pub use policy::{Access, Change, ConfigPolicy, Match, Op, ParseError, Scope, Violation};
-pub use redact::{contains_secrets, redact_secrets, Redactor, REDACTED};
+pub use redact::{REDACTED, Redactor, contains_secrets, redact_secrets};
 pub use session::NetconfSession;
 pub use transport::{
-    is_legacy, Auth, ConnectOptions, NetconfTransport, Platform, SshPolicy, Timeouts,
-    LEGACY_ALGORITHMS,
+    Auth, ConnectOptions, LEGACY_ALGORITHMS, NetconfTransport, Platform, SshPolicy, Timeouts,
+    is_legacy,
 };

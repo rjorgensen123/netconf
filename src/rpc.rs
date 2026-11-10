@@ -6,8 +6,8 @@
 //! [`NetconfError::Protocol`] for parsing, or [`NetconfError::Device`] for an
 //! `<rpc-error>`.
 
-use quick_xml::events::{BytesRef, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesRef, Event};
 
 use crate::error::{DeviceError, NetconfError};
 use crate::wire::{printable, strict_u32, strict_u64};
@@ -46,7 +46,7 @@ pub(crate) fn resolve_entity(r: &BytesRef<'_>, filter: Filter<'_>) -> Result<Str
             return Err(NetconfError::protocol(format!(
                 "unknown XML entity &{};",
                 quoted(filter, other)
-            )))
+            )));
         }
     }
     .to_string())
@@ -109,7 +109,7 @@ pub fn parse_hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> 
                 return Err(NetconfError::protocol_with(
                     format!("hello XML parse error: {}", quoted(filter, &e.to_string())),
                     xml,
-                ))
+                ));
             }
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
@@ -326,7 +326,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
                         quoted(filter, &e.to_string())
                     ),
                     xml,
-                ))
+                ));
             }
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
@@ -336,10 +336,8 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
                 if root_seen.is_none() {
                     root_seen = Some(name.to_vec());
                 }
-                if !in_error {
-                    if let Some(parent) = outside.last_mut() {
-                        *parent = true;
-                    }
+                if !in_error && let Some(parent) = outside.last_mut() {
+                    *parent = true;
                 }
                 if !in_error && local_eq(name, b"rpc-error") {
                     in_error = true;
@@ -538,13 +536,12 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
                             };
                             set_field(&mut de, &open, value);
                         }
-                    } else if let Some(open) = cur_field.as_mut() {
-                        if matches!(open.field, Field::Info)
-                            && open.path.last().is_some_and(|n| n.as_bytes() == name)
-                        {
-                            open.flush_info(&mut cur);
-                            open.path.pop();
-                        }
+                    } else if let Some(open) = cur_field.as_mut()
+                        && matches!(open.field, Field::Info)
+                        && open.path.last().is_some_and(|n| n.as_bytes() == name)
+                    {
+                        open.flush_info(&mut cur);
+                        open.path.pop();
                     }
                 } else {
                     let had_child = outside.pop().unwrap_or(true);
@@ -722,7 +719,7 @@ pub(crate) fn compare_diff(xml: &str, filter: Filter<'_>) -> Result<String, Netc
                         quoted(filter, &e.to_string())
                     ),
                     xml,
-                ))
+                ));
             }
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) if local_eq(e.local_name().as_ref(), b"configuration-output") => {

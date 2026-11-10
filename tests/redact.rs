@@ -2,7 +2,7 @@
 //! The read filter (`redact_secrets`): what is redacted, what must be left
 //! alone, and that the drift protection is untouched by it.
 
-use netconf::redact::{contains_secrets, redact_secrets, Redactor, REDACTED};
+use netconf::redact::{REDACTED, Redactor, contains_secrets, redact_secrets};
 
 fn r(s: &str) -> String {
     redact_secrets(s)
@@ -1192,10 +1192,10 @@ fn the_filter_reads_on_past_a_value_and_a_closing_tag() {
             .contains("s3cr3t")
     );
     // Several secret elements can be open at once, each until its own closing tag.
-    assert!(!r(
-        "<secret><authentication-key>\n hunter2\n</authentication-key>\n s3cr3t\n</secret>"
-    )
-    .contains("s3cr3t"));
+    assert!(
+        !r("<secret><authentication-key>\n hunter2\n</authentication-key>\n s3cr3t\n</secret>")
+            .contains("s3cr3t")
+    );
 }
 
 /// **A PEM rule is one rule among the others on its line** (0.5.13): a line that

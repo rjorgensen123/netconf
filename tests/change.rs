@@ -2,7 +2,7 @@
 //! Atomic compare-then-commit over the mock transport: the happy path, the
 //! abort on drift, and the fail-fast policy block before the device is touched.
 
-use netconf::framing::{encode, Framing};
+use netconf::framing::{Framing, encode};
 use netconf::mock::{MockTransport, SentLog};
 use netconf::rpc::BASE_1_0;
 use netconf::{ConfigPolicy, Format, LoadAction, Match, NetconfError, NetconfSession, Op};

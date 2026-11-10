@@ -344,7 +344,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
                 return Err(NetconfError::CommittedThenFailed {
                     reply,
                     error: Box::new(error),
-                })
+                });
             }
         };
         // `commit_history` refuses a history without a first entry.
@@ -659,7 +659,7 @@ fn commit_history(
                         crate::rpc::quoted(filter, &e.to_string())
                     ),
                     xml,
-                ))
+                ));
             }
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
@@ -814,10 +814,10 @@ fn read_filter(filter: &str) -> Result<ReadFilter, NetconfError> {
     let mut open: Vec<(String, bool)> = Vec::new();
     let mut whole = false;
     let child = |open: &mut Vec<(String, bool)>, name: &str| {
-        if let Some(parent) = open.last_mut() {
-            if name != "name" {
-                parent.1 = true;
-            }
+        if let Some(parent) = open.last_mut()
+            && name != "name"
+        {
+            parent.1 = true;
         }
     };
     loop {
@@ -826,7 +826,7 @@ fn read_filter(filter: &str) -> Result<ReadFilter, NetconfError> {
                 return Err(refuse(format!(
                     "not well-formed XML: {}",
                     printable(&e.to_string())
-                )))
+                )));
             }
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
@@ -1049,7 +1049,7 @@ mod commit_budget_tests {
     use bytes::Bytes;
 
     use crate::error::NetconfError;
-    use crate::framing::{encode, Framing};
+    use crate::framing::{Framing, encode};
     use crate::policy::ConfigPolicy;
     use crate::rpc::BASE_1_0;
     use crate::session::NetconfSession;

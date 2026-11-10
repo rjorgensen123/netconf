@@ -1,10 +1,10 @@
 [package]
 name = "netconf"
-version = "0.6.1"
-edition = "2021"
-# The oldest Rust that builds the crate with every feature on: russh 0.64 needs
-# 1.89 (since 0.6.1). Without `russh-transport` the dependencies need 1.85.
-rust-version = "1.89"
+version = "0.7.0"
+edition = "2024"
+# The crate follows the newest stable Rust and asks for it (since 0.7.0): 1.99.1,
+# with edition 2024. The dependencies alone would need 1.89.
+rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
 description = "Pre-release (beta). Narrow asynchronous NETCONF client for Junos: RFC 6241/6242 framing, a pluggable transport, a default-deny configuration filter with read redaction, and atomic compare-then-commit."
 repository = "https://github.com/rjorgensen123/netconf"

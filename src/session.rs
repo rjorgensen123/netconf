@@ -6,7 +6,7 @@
 use bytes::Bytes;
 
 use crate::error::{DeviceError, NetconfError, SshMessages, TransportError};
-use crate::framing::{encode, Decoder, Framing};
+use crate::framing::{Decoder, Framing, encode};
 use crate::rpc;
 use crate::transport::{ConnectOptions, NetconfTransport, ReplyBudget};
 use crate::wire::{bytes_as_text, printable};
@@ -367,20 +367,20 @@ impl<T: NetconfTransport> NetconfSession<T> {
         //
         // The reply goes with the error, not only its id (0.5.13): what it answers
         // is in the reply.
-        if let Some(raw) = rpc::reply_message_id_raw(&xml) {
-            if raw != self.msg_id.to_string() {
-                return Err(NetconfError::protocol_with(
-                    format!(
-                        "reply message-id `{}` does not match the request's ({}) — this is \
+        if let Some(raw) = rpc::reply_message_id_raw(&xml)
+            && raw != self.msg_id.to_string()
+        {
+            return Err(NetconfError::protocol_with(
+                format!(
+                    "reply message-id `{}` does not match the request's ({}) — this is \
                          an answer to something else, or the device did not echo the id as \
                          it was sent",
-                        // The device's id, filtered as the reply is (0.5.13).
-                        printable(&self.redacted(raw.clone())),
-                        self.msg_id
-                    ),
-                    xml,
-                ));
-            }
+                    // The device's id, filtered as the reply is (0.5.13).
+                    printable(&self.redacted(raw.clone())),
+                    self.msg_id
+                ),
+                xml,
+            ));
         }
 
         // Every `<rpc-error>` is reported. An error fails the call and carries the

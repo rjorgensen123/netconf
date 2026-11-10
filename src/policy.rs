@@ -499,7 +499,9 @@ impl ConfigPolicy {
     fn check_read(&self, targets: &[String], abbreviations: bool) -> Result<(), String> {
         match self.mode {
             Mode::AllDeny => {
-                return Err("all-deny: nothing is permitted — no read (denied, fail-closed)".into())
+                return Err(
+                    "all-deny: nothing is permitted — no read (denied, fail-closed)".into(),
+                );
             }
             Mode::AllFree(_) => return Ok(()),
             Mode::Rules | Mode::ReadOnly => {}
@@ -765,20 +767,20 @@ impl ConfigPolicy {
             Mode::AllDeny => {
                 return "all-deny: nothing is permitted — no read, no command, no change, \
                         whatever is granted"
-                    .into()
+                    .into();
             }
             Mode::AllFree(access) => {
                 return format!(
                     "all-free({access:?}): access level only — no scope rules, no floor, \
                      nothing redacted"
-                )
+                );
             }
             Mode::ReadOnly => {
                 return format!(
                     "read-only: `show` and configuration reads, the sensitive trees behind \
                      allow_read; no other command and no change, whatever is granted; {}",
                     self.describe_secrets()
-                )
+                );
             }
             Mode::Rules => {}
         }
@@ -924,13 +926,13 @@ impl ConfigPolicy {
                 return Err(Violation {
                     change: c.clone(),
                     reason: "all-deny: nothing is permitted".into(),
-                })
+                });
             }
             Mode::ReadOnly => {
                 return Err(Violation {
                     change: c.clone(),
                     reason: "read-only: no change is permitted, whatever is granted".into(),
-                })
+                });
             }
             // All-free: only the access level is enforced, with no scope and no floor.
             Mode::AllFree(access) => {
@@ -1421,7 +1423,7 @@ pub(crate) fn parse_set_lines(payload: &str) -> Result<Vec<SetLine>, ParseError>
                 other => {
                     return Err(ParseError::UnknownVerb(crate::redact::redact_secrets(
                         &format!("wildcard {}", other.unwrap_or("")),
-                    )))
+                    )));
                 }
             }
         } else {

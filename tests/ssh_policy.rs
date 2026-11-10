@@ -6,7 +6,7 @@
 //! consumer can log when one is in use. These tests keep that list from drifting
 //! quietly.
 
-use netconf::{is_legacy, LEGACY_ALGORITHMS};
+use netconf::{LEGACY_ALGORITHMS, is_legacy};
 
 #[test]
 fn legacy_algorithms_are_classified() {

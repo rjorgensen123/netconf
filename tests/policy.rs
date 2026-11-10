@@ -2,7 +2,7 @@
 //! The configuration filter: ConfigPolicy as WHAT × WHERE, plus the absolute
 //! floor and default-deny.
 
-use netconf::policy::{parse_set_payload, DEFAULT_PROTECTED_ROOTS};
+use netconf::policy::{DEFAULT_PROTECTED_ROOTS, parse_set_payload};
 use netconf::{Access, Change, ConfigPolicy, Match, Op, ParseError, Scope};
 
 fn ch(op: Op, path: &[&str]) -> Change {
@@ -44,28 +44,31 @@ fn absolute_floor_denies_deleting_a_top_level_tree() {
 fn delete_below_protocol_ok_but_not_the_protocol_itself() {
     let p = deploy_policy();
     // Below protocols l2circuit: permitted by the Subtree rule.
-    assert!(p
-        .check(&[ch(
+    assert!(
+        p.check(&[ch(
             Op::Delete,
             &["protocols", "l2circuit", "neighbor", "10.0.0.2"]
         )])
-        .is_ok());
+        .is_ok()
+    );
     // The protocol node itself is refused: no Node rule, and the floor does not
     // reach a two-segment path.
-    assert!(p
-        .check(&[ch(Op::Delete, &["protocols", "l2circuit"])])
-        .is_err());
+    assert!(
+        p.check(&[ch(Op::Delete, &["protocols", "l2circuit"])])
+            .is_err()
+    );
 }
 
 #[test]
 fn set_under_unit_ok() {
     let p = deploy_policy();
-    assert!(p
-        .check(&[ch(
+    assert!(
+        p.check(&[ch(
             Op::Set,
             &["interfaces", "ge-0/0/1", "unit", "123", "family", "ccc"]
         )])
-        .is_ok());
+        .is_ok()
+    );
 }
 
 #[test]
@@ -91,9 +94,10 @@ fn physical_interface_delete_is_not_in_the_floor() {
 
     // A mode CAN permit it, since the floor does not block it:
     let p2 = ConfigPolicy::with_default_floor().allow("interfaces *", Match::Node, &[Op::Delete]);
-    assert!(p2
-        .check(&[ch(Op::Delete, &["interfaces", "ge-0/0/1"])])
-        .is_ok());
+    assert!(
+        p2.check(&[ch(Op::Delete, &["interfaces", "ge-0/0/1"])])
+            .is_ok()
+    );
 }
 
 #[test]
@@ -101,15 +105,15 @@ fn modification_is_never_floor_denied() {
     // A set on system is a modification and is not blocked categorically — it is
     // default-denied without a rule, and allowed when a mode opens it.
     let p = ConfigPolicy::with_default_floor().allow("system", Match::Subtree, &[Op::Set]);
-    assert!(p
-        .check(&[ch(Op::Set, &["system", "ntp", "server", "10.0.0.1"])])
-        .is_ok());
+    assert!(
+        p.check(&[ch(Op::Set, &["system", "ntp", "server", "10.0.0.1"])])
+            .is_ok()
+    );
 }
 
 #[test]
 fn parse_set_payload_is_quote_aware() {
-    let payload =
-        "set interfaces ge-0/0/1 unit 123 description \"10G - Customer - CIR-13080123\"\n\
+    let payload = "set interfaces ge-0/0/1 unit 123 description \"10G - Customer - CIR-13080123\"\n\
                    set protocols l2circuit neighbor 10.0.0.2 interface ge-0/0/1.123 ignore-mtu";
     let changes = parse_set_payload(payload).unwrap();
     assert_eq!(changes.len(), 2);
@@ -147,9 +151,11 @@ set interfaces ge-0/0/1 unit 123 vlan-id 123
 set interfaces ge-0/0/1 unit 123 family ccc
 set protocols l2circuit neighbor 10.255.0.2 interface ge-0/0/1.123 virtual-circuit-id 13080123
 set protocols l2circuit neighbor 10.255.0.2 interface ge-0/0/1.123 ignore-mtu";
-    assert!(deploy_mode()
-        .check(&parse_set_payload(payload).unwrap())
-        .is_ok());
+    assert!(
+        deploy_mode()
+            .check(&parse_set_payload(payload).unwrap())
+            .is_ok()
+    );
 }
 
 /// **Not a duplicate of `delete_below_protocol_ok_but_not_the_protocol_itself`.**
@@ -160,34 +166,37 @@ set protocols l2circuit neighbor 10.255.0.2 interface ge-0/0/1.123 ignore-mtu";
 #[test]
 fn scope_protocols_rwd_deletes_below_but_not_the_protocol_node() {
     let p = deploy_mode();
-    assert!(p
-        .check(&[ch(
+    assert!(
+        p.check(&[ch(
             Op::Delete,
             &["protocols", "l2circuit", "neighbor", "10.0.0.2"]
         )])
-        .is_ok());
+        .is_ok()
+    );
     // The protocol node itself can never be deleted through the Protocols scope,
     // which only reaches the subtree below it.
-    assert!(p
-        .check(&[ch(Op::Delete, &["protocols", "l2circuit"])])
-        .is_err());
+    assert!(
+        p.check(&[ch(Op::Delete, &["protocols", "l2circuit"])])
+            .is_err()
+    );
 }
 
 #[test]
 fn scope_logical_units_rwd_deletes_the_whole_unit_node() {
     // Decommissioning: LogicalUnits:Rwd permits deleting the unit node itself.
     let p = deploy_mode();
-    assert!(p
-        .check(&[ch(Op::Delete, &["interfaces", "ge-0/0/1", "unit", "123"])])
-        .is_ok());
+    assert!(
+        p.check(&[ch(Op::Delete, &["interfaces", "ge-0/0/1", "unit", "123"])])
+            .is_ok()
+    );
 }
 
 #[test]
 fn scope_descriptions_rw_sets_but_does_not_delete_unit() {
     let p = ConfigPolicy::with_default_floor().grant(Scope::InterfaceDescriptions, Access::Rw);
     // Setting a description, which carries a value token, is fine.
-    assert!(p
-        .check(&[ch(
+    assert!(
+        p.check(&[ch(
             Op::Set,
             &[
                 "interfaces",
@@ -198,11 +207,13 @@ fn scope_descriptions_rw_sets_but_does_not_delete_unit() {
                 "new text"
             ]
         )])
-        .is_ok());
+        .is_ok()
+    );
     // Deleting a whole unit is not.
-    assert!(p
-        .check(&[ch(Op::Delete, &["interfaces", "ge-0/0/1", "unit", "123"])])
-        .is_err());
+    assert!(
+        p.check(&[ch(Op::Delete, &["interfaces", "ge-0/0/1", "unit", "123"])])
+            .is_err()
+    );
 }
 
 /// **`read_only` is the ordinary policy's reading side, and nothing else** (0.5.11).
@@ -226,9 +237,10 @@ fn read_only_reads_like_the_ordinary_policy_and_gates_the_sensitive_trees() {
     assert!(ro.check_command("show configuration system").is_err());
     ro.check_command("show interfaces terse | match ge-")
         .expect("show with a read-only pipe");
-    assert!(ro
-        .check_command("show interfaces | save /var/tmp/x")
-        .is_err());
+    assert!(
+        ro.check_command("show interfaces | save /var/tmp/x")
+            .is_err()
+    );
     assert_eq!(
         ro.all_free_access(),
         None,
@@ -283,12 +295,13 @@ fn all_deny_permits_nothing_whatever_is_granted() {
     assert!(p.check_command("show version").is_err());
     assert!(p.check_config_read(&["interfaces".to_string()]).is_err());
     assert!(p.check_config_read(&[]).is_err());
-    assert!(p
-        .check(&[ch(
+    assert!(
+        p.check(&[ch(
             Op::Set,
             &["interfaces", "ge-0/0/1", "unit", "1", "vlan-id", "1"]
         )])
-        .is_err());
+        .is_err()
+    );
     assert_eq!(p.all_free_access(), None);
     assert!(!p.is_all_free_rwd());
     assert!(p.describe().contains("all-deny"));
@@ -300,12 +313,13 @@ fn all_deny_permits_nothing_whatever_is_granted() {
 #[test]
 fn scope_read_only_denies_all_changes() {
     let p = ConfigPolicy::read_only();
-    assert!(p
-        .check(&[ch(
+    assert!(
+        p.check(&[ch(
             Op::Set,
             &["interfaces", "ge-0/0/1", "unit", "1", "family", "ccc"]
         )])
-        .is_err());
+        .is_err()
+    );
 }
 
 #[test]
@@ -732,9 +746,10 @@ fn all_free_rwd_may_delete_a_top_level_tree_and_a_floored_policy_may_not() {
 #[test]
 fn all_free_rw_allows_set_but_not_delete() {
     let p = ConfigPolicy::all_free(Access::Rw);
-    assert!(p
-        .check(&[ch(Op::Set, &["system", "ntp", "server", "x"])])
-        .is_ok());
+    assert!(
+        p.check(&[ch(Op::Set, &["system", "ntp", "server", "x"])])
+            .is_ok()
+    );
     assert!(p.check(&[ch(Op::Delete, &["system", "ntp"])]).is_err());
 }
 
@@ -816,14 +831,16 @@ fn logical_units_can_create_a_unit_not_only_delete_one() {
     }
     // Read-only still creates nothing.
     let ro = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Ro);
-    assert!(ro
-        .check(&[ch(Op::Set, &["interfaces", "ge-0/0/1", "unit", "100"])])
-        .is_err());
+    assert!(
+        ro.check(&[ch(Op::Set, &["interfaces", "ge-0/0/1", "unit", "100"])])
+            .is_err()
+    );
     // And Rw still does not delete it.
     let rw = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rw);
-    assert!(rw
-        .check(&[ch(Op::Delete, &["interfaces", "ge-0/0/1", "unit", "100"])])
-        .is_err());
+    assert!(
+        rw.check(&[ch(Op::Delete, &["interfaces", "ge-0/0/1", "unit", "100"])])
+            .is_err()
+    );
 }
 
 /// **An empty quoted value is an argument, not an absence.**
@@ -1171,9 +1188,11 @@ fn a_hash_comment_is_dropped_before_the_line_is_judged() {
     assert_eq!(p, parse_set_payload("set system host-name r1").unwrap());
     let quoted = parse_set_payload("set interfaces ge-0/0/0 description \"a # b\"").unwrap();
     assert_eq!(quoted[0].path.last().map(String::as_str), Some("a # b"));
-    assert!(parse_set_payload("# set system host-name r1")
-        .unwrap()
-        .is_empty());
+    assert!(
+        parse_set_payload("# set system host-name r1")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 fn change(op: Op, path: &str) -> Change {
@@ -1211,11 +1230,12 @@ fn apply_groups_except_is_a_known_hierarchy() {
 fn a_wildcard_delete_of_a_whole_tree_meets_the_floor() {
     let p = ConfigPolicy::with_default_floor().grant(Scope::Protocols, Access::Rwd);
     let changes = parse_set_payload("wildcard delete protocols *").unwrap();
-    assert!(p
-        .check(&changes)
-        .unwrap_err()
-        .reason
-        .contains("absolute floor"));
+    assert!(
+        p.check(&changes)
+            .unwrap_err()
+            .reason
+            .contains("absolute floor")
+    );
 }
 
 /// **`rename` deletes its source and writes its target; `copy` writes its target**
@@ -1245,12 +1265,14 @@ fn rename_and_copy_have_a_filter_of_their_own() {
 fn show_ephemeral_configuration_is_a_configuration_read() {
     let p = ConfigPolicy::with_default_floor();
     assert!(p.check_command("show ephemeral-configuration").is_err());
-    assert!(p
-        .check_command("show ephemeral-configuration instance i1 system")
-        .is_err());
-    assert!(p
-        .check_command("show ephemeral-configuration instance i1 interfaces")
-        .is_ok());
+    assert!(
+        p.check_command("show ephemeral-configuration instance i1 system")
+            .is_err()
+    );
+    assert!(
+        p.check_command("show ephemeral-configuration instance i1 interfaces")
+            .is_ok()
+    );
 }
 
 /// **A logical system is a configuration of its own** (0.5.13): it is not deleted,
@@ -1258,23 +1280,28 @@ fn show_ephemeral_configuration_is_a_configuration_read() {
 #[test]
 fn a_logical_system_is_judged_as_the_top_level() {
     let p = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rwd);
-    assert!(p
-        .check(&[change(Op::Delete, "logical-systems ls1")])
-        .is_err());
+    assert!(
+        p.check(&[change(Op::Delete, "logical-systems ls1")])
+            .is_err()
+    );
     assert!(p.check(&[change(Op::Delete, "tenants t1 system")]).is_err());
-    assert!(p
-        .check(&[change(
+    assert!(
+        p.check(&[change(
             Op::Set,
             "logical-systems ls1 interfaces ge-0/0/0 unit 0 family inet"
         )])
-        .is_ok());
-    assert!(p
-        .check_command("show configuration logical-systems ls1 system")
-        .is_err());
-    assert!(p
-        .check_command("show configuration logical-systems ls1")
-        .is_err());
-    assert!(p
-        .check_command("show configuration logical-systems ls1 interfaces")
-        .is_ok());
+        .is_ok()
+    );
+    assert!(
+        p.check_command("show configuration logical-systems ls1 system")
+            .is_err()
+    );
+    assert!(
+        p.check_command("show configuration logical-systems ls1")
+            .is_err()
+    );
+    assert!(
+        p.check_command("show configuration logical-systems ls1 interfaces")
+            .is_ok()
+    );
 }

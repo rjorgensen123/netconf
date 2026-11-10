@@ -7,11 +7,17 @@ Every notable change to this crate is recorded here. The format follows
 > **Note:** before 1.0 the API can change between minor versions. `docs/API.md` names the
 > version its contract applies from, and that number moves only when the public surface does.
 
-## [Unreleased]
+## [0.7.0]
 
 ### Changed
 
-- Upgraded to krypto 0.8.0.
+- 2026-11-09 — Upgraded to krypto 0.8.0. `Auth::Password` takes a `krypto::SecretString`, so a
+  consumer that builds the password moves to krypto 0.8 as well: krypto 0.7 and 0.8 are two
+  different types in one build.
+- 2026-11-10 — `rust-version` is 1.99.1, the newest stable Rust, and the crate is on edition 2024.
+  The dependencies alone would need 1.89. The code changes that come with it are mechanical:
+  nested `if let` written as let chains, and the formatting rustfmt gives edition 2024. The
+  behaviour is the same.
 
 ## [0.6.1] — 2026-10-05
 

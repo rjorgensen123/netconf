@@ -53,13 +53,17 @@ fn every_branch_names_itself() {
     assert!(text(protocol("bad hello")).starts_with("protocol:"));
     assert!(text(NetconfError::Policy("denied".into())).starts_with("policy:"));
     assert!(text(timeout("commit")).starts_with("timeout:"));
-    assert!(text(NetconfError::Transport(TransportError::Io(
-        "broken pipe".into()
-    )))
-    .starts_with("transport:"));
+    assert!(
+        text(NetconfError::Transport(TransportError::Io(
+            "broken pipe".into()
+        )))
+        .starts_with("transport:")
+    );
     assert!(text(NetconfError::Device(Box::default())).starts_with("device:"));
-    assert!(text(changed(ConfirmedCheck::Candidate, Some(0), Some("x")))
-        .starts_with("changed since the confirmed commit:"));
+    assert!(
+        text(changed(ConfirmedCheck::Candidate, Some(0), Some("x")))
+            .starts_with("changed since the confirmed commit:")
+    );
 }
 
 /// The payload has to survive the wrapping. A prefix with the detail dropped
@@ -67,10 +71,12 @@ fn every_branch_names_itself() {
 #[test]
 fn the_detail_survives_the_prefix() {
     assert!(text(protocol("unknown XML entity &foo;")).contains("unknown XML entity &foo;"));
-    assert!(text(NetconfError::Policy(
-        "floor: delete of a top-level tree".into()
-    ))
-    .contains("floor: delete of a top-level tree"));
+    assert!(
+        text(NetconfError::Policy(
+            "floor: delete of a top-level tree".into()
+        ))
+        .contains("floor: delete of a top-level tree")
+    );
     assert!(text(timeout("compare")).contains("compare"));
 }
 

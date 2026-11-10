@@ -2,10 +2,10 @@
 //! Session tests over the mock transport: hello exchange, framing selection
 //! and RPC — all without a network.
 
-use netconf::framing::{encode, Framing};
+use netconf::NetconfSession;
+use netconf::framing::{Framing, encode};
 use netconf::mock::MockTransport;
 use netconf::rpc;
-use netconf::NetconfSession;
 
 fn hello(offer_1_1: bool) -> Vec<u8> {
     let extra = if offer_1_1 {
@@ -667,12 +667,13 @@ async fn close_reports_what_goes_wrong_and_hands_over_the_warnings() {
 
     let t = MockTransport::new(vec![hello(false)]);
     let s = NetconfSession::establish(t, true).await.unwrap();
-    assert!(s
-        .close()
-        .await
-        .expect("ended without a word")
-        .warnings
-        .is_empty());
+    assert!(
+        s.close()
+            .await
+            .expect("ended without a word")
+            .warnings
+            .is_empty()
+    );
 }
 
 /// **When `close()` fails, the warnings the session held still reach the caller**
@@ -717,10 +718,11 @@ async fn the_devices_hello_is_there_to_read_whole() {
     let t = MockTransport::new(vec![encode(Framing::Eom, hello.as_bytes())]);
     let s = NetconfSession::establish(t, true).await.unwrap();
     assert_eq!(s.hello(), hello);
-    assert!(s
-        .capabilities()
-        .iter()
-        .any(|c| c == "http://xml.juniper.net/netconf/junos/1.0"));
+    assert!(
+        s.capabilities()
+            .iter()
+            .any(|c| c == "http://xml.juniper.net/netconf/junos/1.0")
+    );
     assert_eq!(s.session_id(), None, "not a number as RFC 6241 writes one");
 }
 

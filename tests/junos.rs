@@ -3,9 +3,9 @@
 //! payloads are XML-escaped, and that ok and rpc-error replies are handled.
 
 use netconf::error::ConfirmedCheck;
-use netconf::framing::{encode, Framing};
+use netconf::framing::{Framing, encode};
 use netconf::mock::{MockTransport, SentLog};
-use netconf::rpc::{wrap_rpc, BASE_1_0};
+use netconf::rpc::{BASE_1_0, wrap_rpc};
 use netconf::{Access, ConfigPolicy, Format, LoadAction, NetconfError, NetconfSession, Scope};
 
 fn eom(xml: &str) -> Vec<u8> {
@@ -76,7 +76,9 @@ async fn load_set_format_escapes_payload() {
     let sent = sent_str(&log);
     // The Junos XML protocol requires both attributes for configuration mode
     // commands; `format` defaults to `xml` on the device.
-    assert!(sent.contains("<load-configuration action=\"set\" format=\"text\"><configuration-set>"));
+    assert!(
+        sent.contains("<load-configuration action=\"set\" format=\"text\"><configuration-set>")
+    );
     assert!(sent.contains("R&amp;D")); // the & left escaped
 }
 
@@ -166,7 +168,10 @@ async fn commits_carry_no_synchronize_by_default() {
     let sent = sent_str(&log);
     for (id, body) in [
         (1, "<commit-configuration/>"),
-        (2, "<commit-configuration><log>t</log></commit-configuration>"),
+        (
+            2,
+            "<commit-configuration><log>t</log></commit-configuration>",
+        ),
         (
             3,
             "<commit-configuration><confirmed/><confirm-timeout>5</confirm-timeout></commit-configuration>",
@@ -200,7 +205,10 @@ async fn commits_carry_synchronize_when_set() {
     s.commit_confirmed(5, Some("t")).await.unwrap();
     let sent = sent_str(&log);
     for (id, body) in [
-        (1, "<commit-configuration><synchronize/></commit-configuration>"),
+        (
+            1,
+            "<commit-configuration><synchronize/></commit-configuration>",
+        ),
         (
             2,
             "<commit-configuration><synchronize/><log>t</log></commit-configuration>",

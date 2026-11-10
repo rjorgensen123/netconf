@@ -2,7 +2,7 @@
 //! Framing unit tests: end-of-message and chunked, including messages split at
 //! arbitrary TCP boundaries and terminator sequences split across reads.
 
-use netconf::framing::{encode, Decoder, Framing};
+use netconf::framing::{Decoder, Framing, encode};
 
 /// Feed the buffer one byte at a time and collect every complete message.
 fn decode_byte_by_byte(mode: Framing, wire: &[u8]) -> Vec<Vec<u8>> {

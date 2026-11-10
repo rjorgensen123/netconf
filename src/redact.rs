@@ -716,34 +716,37 @@ impl Redactor {
         let find_close = |from: usize| next_close[from];
         let mut i = 0usize;
         while i < b.len() {
-            if is(i, b'<') && i + 1 < b.len() && b[i + 1] != b'/' && b[i + 1] != b'?' {
-                if let Some(gt) = next_gt[i] {
-                    let raw = &line[i + 1..gt];
-                    // The element name is what comes before the first whitespace.
-                    // Requiring the whole tag to be whitespace-free skipped every
-                    // element carrying an attribute — and Junos annotates freely,
-                    // so `<authentication-key junos:changed="changed">` walked
-                    // straight through with its value intact.
-                    let name = raw.split_whitespace().next().unwrap_or("");
-                    if !name.is_empty() && !raw.ends_with('/') {
-                        let local = name.rsplit(':').next().unwrap_or(name);
-                        if el.secret(local, i) {
-                            if let Some(close) = find_close(gt + 1) {
-                                if close > gt + 1 {
-                                    out.push(gt + 1..close);
-                                }
-                                i = close;
-                                continue;
+            if is(i, b'<')
+                && i + 1 < b.len()
+                && b[i + 1] != b'/'
+                && b[i + 1] != b'?'
+                && let Some(gt) = next_gt[i]
+            {
+                let raw = &line[i + 1..gt];
+                // The element name is what comes before the first whitespace.
+                // Requiring the whole tag to be whitespace-free skipped every
+                // element carrying an attribute — and Junos annotates freely,
+                // so `<authentication-key junos:changed="changed">` walked
+                // straight through with its value intact.
+                let name = raw.split_whitespace().next().unwrap_or("");
+                if !name.is_empty() && !raw.ends_with('/') {
+                    let local = name.rsplit(':').next().unwrap_or(name);
+                    if el.secret(local, i) {
+                        if let Some(close) = find_close(gt + 1) {
+                            if close > gt + 1 {
+                                out.push(gt + 1..close);
                             }
-                            // Not closed on this line. The following lines are carried
-                            // as value (`unclosed_secret_openers`), and so is
-                            // whatever already follows the tag here — that part used
-                            // to go out as it was.
-                            if !line[gt + 1..].trim().is_empty() {
-                                out.push(gt + 1..line.len());
-                            }
-                            return out;
+                            i = close;
+                            continue;
                         }
+                        // Not closed on this line. The following lines are carried
+                        // as value (`unclosed_secret_openers`), and so is
+                        // whatever already follows the tag here — that part used
+                        // to go out as it was.
+                        if !line[gt + 1..].trim().is_empty() {
+                            out.push(gt + 1..line.len());
+                        }
+                        return out;
                     }
                 }
             }
@@ -1497,12 +1500,11 @@ fn url_password_ranges(s: &str) -> Vec<std::ops::Range<usize>> {
             }
             end += utf8_len(b[end]);
         }
-        if let Some(at) = s[auth..end].rfind('@') {
-            if let Some(colon) = s[auth..auth + at].find(':') {
-                if colon + 1 < at {
-                    out.push(auth + colon + 1..auth + at);
-                }
-            }
+        if let Some(at) = s[auth..end].rfind('@')
+            && let Some(colon) = s[auth..auth + at].find(':')
+            && colon + 1 < at
+        {
+            out.push(auth + colon + 1..auth + at);
         }
         from = end.max(auth);
     }
