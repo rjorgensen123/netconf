@@ -386,13 +386,15 @@ replies, so nothing would tell. An `<rpc-error>` is the device's answer, and cha
   `received`, and `unanswered()` says `the device sent data that no request asked for`.
 - Every request after it is refused before anything is sent, as `Protocol`: `the session is out of
   step, and sends nothing more — <unanswered>. Its answer may still come, and a new request would
-  read it as its own. Close the session, and read the device's state on a new one`.
+  read it as its own. Close the session, check that the device answers, and read its state on a
+  new one`.
 - `close()` does not send `<close-session/>` then. It closes the transport, which hands over what
   the device still sends on the way — the late answer, when it comes, is in the `Closed` error's
   `partial`, inside `CloseFailed`. The device lets go of the session's lock when the session ends.
 
-The device may have carried the request out. Whether a commit took effect is read on a new session,
-with `commit_history()` (§4): the crate reports, and the consumer decides.
+The device may have carried the request out. Whether the device answers at all is what
+`check_device` (§9) says, and whether a commit took effect is read on a new session, with
+`commit_history()` (§4): the crate reports, and the consumer decides.
 
 ## 3. Framing (RFC 6242)
 
@@ -1327,6 +1329,23 @@ impl RusshTransport { pub fn observed_host_key(&self) -> Option<String>; }
 
 pub async fn observe_host_key(host: &str, port: u16, ssh_policy: &SshPolicy, timeouts: &Timeouts)
  -> Result<String, NetconfError>;
+
+pub async fn check_device(opts: &ConnectOptions) -> Result<DeviceCheck, NetconfError>; // a connection, step by step; Err only for what connect refuses before connecting
+pub struct DeviceCheck; // what check_device found; Display writes all of it
+impl DeviceCheck {
+ pub fn verdict(&self) -> Verdict; // one word
+ pub fn summary(&self) -> String; // one line
+ pub fn elapsed(&self) -> Duration; // the time the whole check took
+ pub fn limit(&self) -> Duration; // the time it was given: Timeouts::connect
+ pub fn steps(&self) -> &[(CheckStep, Duration)]; // the steps that answered, in order, with their time
+ pub fn stopped(&self) -> Option<(CheckStep, &NetconfError)>; // the step that did not, and why
+ pub fn fingerprint(&self) -> Option<&str>; // the host key the device presented
+ pub fn capabilities(&self) -> &[String]; // of its hello
+ pub fn session_id(&self) -> Option<u64>; // of its hello
+ pub fn banner(&self) -> Option<&str>; // shown before the login, redacted
+}
+pub enum CheckStep { Tcp, Ssh, Login, Netconf, Hello, Request } // #[non_exhaustive]
+pub enum Verdict { Ok, Slow, VerySlow, Dead, NoContact } // #[non_exhaustive]
 ```
 
 NETCONF runs as the **`netconf` subsystem** on the SSH session (RFC 6242); `port` is SSH's own.
@@ -1395,6 +1414,58 @@ the EOF and the disconnect with `SendError` only when the SSH connection has alr
 `<close-session/>` the device may end it first — and that is the close having happened, not a
 failure; any other failure is returned, carrying what the device said (`"disconnect"` in
 `CleanupFailed` when it follows data after the close).
+
+**`check_device` is the tool for after a timeout.** A request that timed out says the device has
+a problem, and not which. `connect` does not say it either: the TCP connection, the handshake, the
+login and the channel share `Timeouts::connect` and the name `ssh-connect`. `check_device` takes
+the steps of a connection one by one and reports on each. The crate never runs it by itself and
+decides nothing from it.
+
+| `CheckStep` | What it is | `Display` |
+|---|---|---|
+| `Tcp` | the TCP connection: the device is reachable | `the TCP connection` |
+| `Ssh` | the SSH handshake and the host key check: it is the pinned device | `the SSH handshake and host key` |
+| `Login` | the password login | `the login` |
+| `Netconf` | the channel and the `netconf` subsystem | `the NETCONF subsystem` |
+| `Hello` | the hello exchange: the NETCONF service answers | `the hello` |
+| `Request` | one request and its reply: `<close-session/>`, answered with `<ok/>` | `the request` |
+
+- **What it costs the device:** one connection, one login and one NETCONF session, opened and
+  closed. No configuration is read, no command is run, and no policy is needed. `observe_host_key`
+  is lighter still: it stops before the login.
+- **One clock:** the whole check runs within `Timeouts::connect`, counted from its start, and
+  never past `total`. A step that runs out of it is the step the check stopped at, with the
+  `Timeout` `connect` or the session would have returned.
+- **Always a report:** once the connection is started, the result is `Ok(DeviceCheck)`, whether
+  every step answered or one stopped. `Err` is only what `connect` refuses before anything is
+  connected — a missing `host_key`, `SshPolicy::Custom`, `Timeouts` outside their frames, a host
+  or username that cannot be right. Then nothing was checked.
+- **Nothing is left behind:** the connection is ended when the check is over, however it ended.
+- **What it holds:** `steps()` are the steps that answered, each with the time it took;
+  `stopped()` is the step that did not, with the error — the device's own words in it, redacted,
+  since no policy is bound. `fingerprint()` is there once the handshake has shown the key, also
+  when the check stopped on it; `capabilities()` and `session_id()` once the hello has come;
+  `banner()` when the check ran to its end.
+
+The report is always whole, and is read at three levels:
+
+| Level | How | What |
+|---|---|---|
+| One word | `verdict()` | `Verdict`, below |
+| One line | `summary()` | `<verdict> — every step answered, in <elapsed> of <limit>`, or `<verdict> — stopped at <step> after <elapsed> of <limit>: <error>`; times as seconds with three decimals, `1.204s` |
+| Everything | `Display`, or the accessors | the summary, then one line for each step that answered (`<step>: <time>`), the step that stopped (`<step>: stopped after <time>`), and `host key`, `session id`, `capabilities` and `banner` when they are there |
+
+| `Verdict` | When | `Display` |
+|---|---|---|
+| `Ok` | every step answered, in less than a tenth of `limit()` | `ok` |
+| `Slow` | every step answered, in less than half of it | `a bit slow` |
+| `VerySlow` | every step answered, in half of it or more | `very slow` |
+| `Dead` | the TCP connection came up, and a later step did not answer or was refused — the summary says which, and why | `dead` |
+| `NoContact` | no TCP connection | `no contact` |
+
+The bounds follow the limit the check was given, not fixed seconds: with `connect` at 30 seconds,
+`Ok` is under 3 and `Slow` under 15. A wrong password is `Dead` too — the device did not let the
+check through — and `stopped()` holds the `AuthRejected` that says so.
 
 **`observe_host_key` solves a real ordering trap.** A consumer must not send a password
 to a device it has not verified — but cannot verify the device without having seen its host key.

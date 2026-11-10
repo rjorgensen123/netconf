@@ -703,3 +703,146 @@ async fn a_clean_close_hands_over_what_the_device_said_over_ssh() {
     // no secret, and reads as it was sent.
     assert_eq!(end.ssh.banner.as_deref(), Some(BANNER));
 }
+
+/// **`check_device` takes a connection step by step and reports on each** (0.7.0).
+/// Against a device that answers, every step is there with its time, and the
+/// report holds what the device showed on the way.
+#[tokio::test]
+async fn a_device_check_reports_every_step_of_a_device_that_answers() {
+    use netconf::russh_transport::{CheckStep, Verdict, check_device};
+    let opts = start(Device::ClosesCleanly, Timeouts::default()).await;
+    let check = tokio::time::timeout(Duration::from_secs(20), check_device(&opts))
+        .await
+        .expect("the check outlived its limit")
+        .map_err(|e| e.to_string())
+        .expect("the check was started");
+
+    assert_eq!(check.verdict(), Verdict::Ok, "{check}");
+    assert!(check.stopped().is_none(), "{check}");
+    let steps: Vec<CheckStep> = check.steps().iter().map(|(step, _)| *step).collect();
+    assert_eq!(
+        steps,
+        [
+            CheckStep::Tcp,
+            CheckStep::Ssh,
+            CheckStep::Login,
+            CheckStep::Netconf,
+            CheckStep::Hello,
+            CheckStep::Request,
+        ]
+    );
+    assert_eq!(check.limit(), opts.timeouts.connect);
+    assert!(check.elapsed() < check.limit());
+    assert_eq!(check.fingerprint(), opts.host_key.as_deref());
+    assert_eq!(check.session_id(), Some(9));
+    assert!(!check.capabilities().is_empty());
+    assert_eq!(check.banner(), Some(BANNER));
+    // One word, one line, and everything.
+    assert!(check.summary().starts_with("ok — every step answered"));
+    let full = check.to_string();
+    assert!(full.contains("the login: "), "{full}");
+    assert!(full.contains("session id: 9"), "{full}");
+}
+
+/// **A check that stops says where, and why** (0.7.0). The steps before it are
+/// there, and the error is the one `connect` would have returned.
+#[tokio::test]
+async fn a_device_check_says_where_it_stopped_and_why() {
+    use netconf::russh_transport::{CheckStep, Verdict, check_device};
+
+    let opts = start(Device::RejectsPassword, Timeouts::default()).await;
+    let check = check_device(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .unwrap();
+    assert_eq!(check.verdict(), Verdict::Dead, "{check}");
+    match check.stopped() {
+        Some((CheckStep::Login, NetconfError::Transport(TransportError::AuthRejected { .. }))) => {}
+        other => panic!("expected the login to stop it, got {other:?}"),
+    }
+    let steps: Vec<CheckStep> = check.steps().iter().map(|(step, _)| *step).collect();
+    assert_eq!(steps, [CheckStep::Tcp, CheckStep::Ssh]);
+    assert!(check.fingerprint().is_some());
+    assert!(
+        check.summary().starts_with("dead — stopped at the login"),
+        "{}",
+        check.summary()
+    );
+
+    let opts = start(Device::NoNetconf, Timeouts::default()).await;
+    let check = check_device(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .unwrap();
+    match check.stopped() {
+        Some((
+            CheckStep::Netconf,
+            NetconfError::Transport(TransportError::SubsystemUnavailable { .. }),
+        )) => {}
+        other => panic!("expected the subsystem to stop it, got {other:?}"),
+    }
+}
+
+/// **A login that never answers stops the check at the login, within its limit**
+/// (0.7.0). `connect` says `Timeout { op: "ssh-connect" }` for it, as it does for a
+/// device that is not there at all; the check says which step it was.
+#[tokio::test]
+async fn a_device_check_names_the_step_that_ran_out_of_time() {
+    use netconf::russh_transport::{CheckStep, Verdict, check_device};
+    let limit = Duration::from_secs(2);
+    let opts = start(
+        Device::NeverAnswersLogin,
+        Timeouts {
+            connect: limit,
+            ..Timeouts::default()
+        },
+    )
+    .await;
+    let started = Instant::now();
+    let check = tokio::time::timeout(Duration::from_secs(20), check_device(&opts))
+        .await
+        .expect("the check outlived its limit")
+        .map_err(|e| e.to_string())
+        .unwrap();
+    assert!(started.elapsed() < limit + Duration::from_secs(3));
+    assert_eq!(check.verdict(), Verdict::Dead, "{check}");
+    match check.stopped() {
+        Some((
+            CheckStep::Login,
+            NetconfError::Timeout {
+                op: "ssh-connect", ..
+            },
+        )) => {}
+        other => panic!("expected the login to run out of time, got {other:?}"),
+    }
+}
+
+/// **No TCP connection is `NoContact`, and what `connect` refuses outright is no
+/// report** (0.7.0): with nothing listening the check stops at its first step, and
+/// without a pinned host key nothing is checked at all.
+#[tokio::test]
+async fn a_device_check_tells_no_contact_from_a_check_that_never_started() {
+    use netconf::russh_transport::{CheckStep, Verdict, check_device};
+    // A port nothing listens on: bound, then let go.
+    let port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let mut opts = start(Device::ClosesCleanly, Timeouts::default()).await;
+    opts.port = port;
+    let check = check_device(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .unwrap();
+    assert_eq!(check.verdict(), Verdict::NoContact, "{check}");
+    assert!(matches!(check.stopped(), Some((CheckStep::Tcp, _))));
+    assert!(check.steps().is_empty());
+    assert!(
+        check
+            .summary()
+            .starts_with("no contact — stopped at the TCP connection")
+    );
+
+    opts.host_key = None;
+    assert!(check_device(&opts).await.is_err());
+}

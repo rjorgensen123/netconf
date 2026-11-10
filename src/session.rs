@@ -457,7 +457,8 @@ impl<T: NetconfTransport> NetconfSession<T> {
         Some(NetconfError::protocol(format!(
             "the session is out of step, and sends nothing more — {unanswered}. Its \
              answer may still come, and a new request would read it as its own. Close \
-             the session, and read the device's state on a new one"
+             the session, check that the device answers, and read its state on a new \
+             one"
         )))
     }
 

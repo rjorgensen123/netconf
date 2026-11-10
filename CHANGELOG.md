@@ -26,6 +26,11 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-10 — `NetconfSession::commit_history` gives the device's commits as data
   (`CommitRecord`), so a consumer can tell whether a commit that got no answer took effect.
   `NetconfSession::unanswered` says which request got no answer.
+- 2026-11-10 — `russh_transport::check_device` checks that a device is there and answers NETCONF.
+  It takes a connection step by step — TCP, SSH and host key, login, NETCONF subsystem, hello, one
+  request — and reports how far it got and how long each step took. The report (`DeviceCheck`) is
+  read as one word (`Verdict`), one line, or in full. It is the tool for after a timeout:
+  `connect` reports a timeout in any of its first steps under one name.
 
 ### Changed
 

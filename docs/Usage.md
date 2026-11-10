@@ -156,6 +156,39 @@ If you are already connected:
 let seen: Option<String> = session.transport().observed_host_key();
 ```
 
+### Is the device there, and does it answer?
+
+A timeout tells you the device has a problem, and not which one. `check_device` takes a
+connection step by step — TCP, the SSH handshake and host key, the login, the NETCONF subsystem,
+the hello, and one request — and tells you how far it got and how long each step took. Run it
+when a request has timed out, before you open anything new towards the device.
+
+```rust
+use netconf::russh_transport::{Verdict, check_device};
+
+// The same options as a connection. `connect` is the time the whole check gets,
+// so a short one makes a quick check.
+let check = check_device(&opts).await?;
+
+match check.verdict() {
+    Verdict::Ok | Verdict::Slow => { /* go on */ }
+    Verdict::VerySlow => { /* it answers, barely */ }
+    Verdict::Dead | Verdict::NoContact => { /* leave it, and tell someone */ }
+    _ => {}
+}
+println!("{}", check.summary()); // one line: the verdict, the time, where it stopped and why
+println!("{check}");             // everything: each step with its time, and what the device showed
+```
+
+Read as much of the report as you need: one word (`verdict()`), one line (`summary()`), or all of
+it (`steps()`, `stopped()`, `fingerprint()`, `capabilities()`, `session_id()`, `banner()`). The
+verdict's bounds follow the time limit you give: `Ok` is under a tenth of it, `Slow` under half.
+
+It costs the device one connection, one login and one NETCONF session, opened and closed. It
+reads no configuration and runs no command, and it needs no policy. If even a login is too much,
+`observe_host_key` stops before it. netconf never runs the check by itself: when to run it, and
+what to do with the answer, is yours to decide.
+
 ---
 
 ## Binding a policy
@@ -552,7 +585,9 @@ The session sends one request at a time, so it sends nothing more after that: a 
 read the late answer as its own. Every call is refused with a `Protocol` error that says which
 request is unanswered, and `session.unanswered()` says the same.
 
-netconf reports what happened; what to do is yours to decide. The steps it gives you:
+netconf reports what happened; what to do is yours to decide. The steps it gives you: close the
+session, check that the device answers (`check_device`, above), and read what it holds on a new
+session.
 
 ```rust
 # use netconf::{ConnectOptions, NetconfError, NetconfSession, NetconfTransport};

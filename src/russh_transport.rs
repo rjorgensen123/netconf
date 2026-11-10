@@ -522,7 +522,9 @@ async fn open_ssh(
     handler: ClientHandler,
     connect_by: std::time::Instant,
     deadline: std::time::Instant,
+    progress: &mut Progress,
 ) -> Result<Result<(russh::client::Handle<ClientHandler>, Tether), russh::Error>, NetconfError> {
+    progress.begin();
     let tcp = in_connect_phase(
         tokio::net::TcpStream::connect((host, port)),
         connect_by,
@@ -534,6 +536,7 @@ async fn open_ssh(
         Ok(held) => held,
         Err(e) => return Ok(Err(e.into())),
     };
+    progress.done(CheckStep::Tcp);
     let handle = in_connect_phase(
         russh::client::connect_stream(config, tcp, handler),
         connect_by,
@@ -613,6 +616,290 @@ impl RusshTransport {
     /// seen it.
     pub fn observed_host_key(&self) -> Option<String> {
         self.observed_host_key.clone()
+    }
+
+    /// [`connect`](NetconfTransport::connect), recording each step it completes and
+    /// the time it took (0.7.0). `connect` discards the record; [`check_device`]
+    /// reads it.
+    async fn connect_steps(
+        opts: &ConnectOptions,
+        progress: &mut Progress,
+    ) -> Result<Self, NetconfError> {
+        // First, before the host and username go into the log events below.
+        check_target(&opts.host, Some(opts.username.as_str()))?;
+
+        // A legacy SSH policy is ALWAYS per device, never global, and every use should
+        // be traceable. So we log which policy this connection actually runs with —
+        // `LegacyJunos` and `Custom` at `warn`, because they are a deliberate weakening
+        // that someone should be able to see afterwards. Never the password.
+        let policy_name = match &opts.ssh_policy {
+            SshPolicy::Modern => "modern",
+            SshPolicy::LegacyJunos => "legacy-junos",
+            SshPolicy::Custom { .. } => "custom",
+        };
+        let legacy_allowed = !matches!(opts.ssh_policy, SshPolicy::Modern);
+        let host_key_mode = if opts.host_key.is_some() {
+            "pinned"
+        } else {
+            "enrollment"
+        };
+
+        // `Custom` promises «full manual control» in the API, but the names have to be
+        // resolved against russh's typed constants, and that mapping is not built. We
+        // cannot deliver what the API promises — and then we must **refuse**, not
+        // quietly do something else. The previous choice, falling back to legacy, did
+        // the opposite of what a consumer tightening things would expect.
+        // BLIND TRUST-ON-FIRST-USE IS CLOSED.
+        //
+        // `connect()` authenticates — it **sends the network password**. Without a
+        // pinned host key we do not know who answers at that address, and then the
+        // password must not move. `check_server_key` used to accept any key when
+        // `host_key` was `None`, and the password went out regardless.
+        //
+        // *Observing* a device is a different operation, and has its own path:
+        // `observe_host_key()` runs key exchange and disconnects without
+        // authenticating. It takes no credential parameter at all, so a password
+        // cannot leak from it.
+        if opts.host_key.is_none() {
+            return Err(NetconfError::Transport(TransportError::Io(
+                "no pinned host key — refusing to authenticate against an unverified \
+                 device. Use observe_host_key() to fetch the fingerprint for approval first."
+                    .into(),
+            )));
+        }
+
+        if matches!(opts.ssh_policy, SshPolicy::Custom { .. }) {
+            return Err(NetconfError::Transport(TransportError::Io(
+                CUSTOM_REFUSED.into(),
+            )));
+        }
+
+        // Logged after the refusals above, so a connect that is refused does not
+        // spend the device's one legacy warning on nothing.
+        if !legacy_allowed {
+            tracing::info!(
+                event = "ssh_connect",
+                host = %opts.host,
+                port = opts.port,
+                username = %opts.username,
+                ssh_policy = policy_name,
+                host_key = host_key_mode,
+                "connecting to a device over SSH"
+            );
+        } else if warn_legacy_once(&opts.host) {
+            // The first time for this device: the full warning.
+            tracing::warn!(
+                event = "ssh_connect",
+                legacy = true,
+                host = %opts.host,
+                port = opts.port,
+                username = %opts.username,
+                ssh_policy = policy_name,
+                host_key = host_key_mode,
+                "LEGACY: connecting with an ssh policy that permits algorithms outside \
+                 today's recommendations — a per-device opt-in, and not recommended"
+            );
+        } else {
+            // Afterwards: still tagged `legacy`, and the word is still in the message,
+            // but without the noise.
+            tracing::info!(
+                event = "ssh_connect",
+                legacy = true,
+                host = %opts.host,
+                port = opts.port,
+                username = %opts.username,
+                ssh_policy = policy_name,
+                host_key = host_key_mode,
+                "LEGACY: connecting to a device with an ssh policy outside the current recommendation (see first warning)"
+            );
+        }
+
+        // The session TTL, fail-closed: the range is validated BEFORE anything
+        // connects, and the clock starts HERE — when connecting, not at the first
+        // RPC.
+        opts.timeouts
+            .validate()
+            .map_err(|m| NetconfError::Transport(TransportError::Io(m)))?;
+        let started = std::time::Instant::now();
+        let deadline = started + opts.timeouts.total;
+        // The connection phase starts on the same clock. Every wait until `connect`
+        // returns ends by `connect_by`, and never past `deadline`: see
+        // `in_connect_phase`. `connect` is not capped by `validate`, so one too large
+        // to add simply leaves the deadline as the bound.
+        let connect_by = started
+            .checked_add(opts.timeouts.connect)
+            .unwrap_or(deadline);
+
+        let mut config = russh::client::Config {
+            // Not what bounds any wait: `in_connect_phase` bounds each one while
+            // connecting, and `send` and `recv` bound theirs after that. russh's
+            // inactivity clock RESETS on activity and is set once for the session's
+            // whole life, so it is not the lifetime limit either — that is
+            // `deadline` above. It stays at the TTL: set to `connect`, it would end
+            // an established session that sat idle for that long.
+            inactivity_timeout: Some(opts.timeouts.total),
+            ..Default::default()
+        };
+        config.preferred = preferred_for(&opts.ssh_policy);
+        let config = Arc::new(config);
+
+        let observed = Arc::new(StdMutex::new(None));
+        let said: Said = Arc::default();
+        let handler = ClientHandler {
+            pinned: opts.host_key.clone(),
+            observed: observed.clone(),
+            said: said.clone(),
+        };
+
+        // The TCP connection, the handshake and the host key check. From here until
+        // `connect` returns `Ok`, every way out — a phase running out, a refusal, an
+        // error — drops `tether`, and the device sees the connection end.
+        let (mut handle, tether) = open_ssh(
+            &opts.host, opts.port, config, handler, connect_by, deadline, progress,
+        )
+        .await?
+        // Classify: a host key pin mismatch becomes HostKey, a key exchange or
+        // algorithm failure becomes Negotiation.
+        .map_err(|e| {
+            // `check_server_key` has already put the fingerprint here if it got
+            // as far as seeing the key. We read it BEFORE building the error, so
+            // it travels out with it.
+            let seen = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let err = classify_connect_err(e, seen);
+            tracing::warn!(
+                event = "ssh_connect_failed",
+                host = %opts.host,
+                port = opts.port,
+                ssh_policy = policy_name,
+                error = %err,
+                "SSH connection failed"
+            );
+            err
+        })?;
+        progress.done(CheckStep::Ssh);
+        progress.fingerprint = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
+
+        // Password authentication. The cleartext is taken transiently from the
+        // SecretString right before use. Our copy is wrapped in `Zeroizing` so it is
+        // cleared on drop; russh makes its own owned `String` internally, which is
+        // outside our control.
+        let Auth::Password(secret) = &opts.auth;
+        let password = zeroize::Zeroizing::new(secret.expose_str(|s| s.to_string()));
+        // A failure here and below may be the device ending the connection; what it
+        // said over SSH goes with it (0.5.13).
+        let authed = in_connect_phase(
+            handle.authenticate_password(opts.username.as_str(), password.as_str()),
+            connect_by,
+            deadline,
+            "ssh-connect",
+        )
+        .await?
+        .map_err(|e| ended(e, &said))?;
+        if let russh::client::AuthResult::Failure {
+            remaining_methods,
+            partial_success,
+        } = &authed
+        {
+            // The device's own words, not ours. See `TransportError::AuthRejected`.
+            let methods: Vec<String> = remaining_methods.iter().map(String::from).collect();
+            let named = methods.join(", ");
+            let rejected = TransportError::AuthRejected {
+                username: opts.username.clone(),
+                remaining_methods: methods,
+                partial_success: *partial_success,
+            };
+            tracing::warn!(
+                event = "ssh_auth_failed",
+                host = %opts.host,
+                username = %opts.username,
+                partial_success = *partial_success,
+                remaining_methods = %named,
+                "{rejected}"
+            );
+            return Err(NetconfError::Transport(rejected));
+        }
+        progress.done(CheckStep::Login);
+
+        let mut channel = in_connect_phase(
+            handle.channel_open_session(),
+            connect_by,
+            deadline,
+            "ssh-connect",
+        )
+        .await?
+        .map_err(|e| ended(e, &said))?;
+        // The `netconf` subsystem on the SSH session (RFC 6242). The port is SSH's own
+        // and lives in `opts.port`; it does not belong here. The request is queued,
+        // not answered: the device's answer is read here, and the session is
+        // established only once it is a yes.
+        let mut stderr = String::new();
+        let pending = in_connect_phase(
+            async {
+                channel
+                    .request_subsystem(true, "netconf")
+                    .await
+                    .map_err(|e| ended(e, &said))?;
+                await_subsystem(&mut channel, &mut stderr, &said).await
+            },
+            connect_by,
+            deadline,
+            "ssh-subsystem",
+        )
+        .await??;
+        progress.done(CheckStep::Netconf);
+
+        let observed_host_key = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        tracing::info!(
+            event = "ssh_session_established",
+            host = %opts.host,
+            username = %opts.username,
+            ssh_policy = policy_name,
+            "SSH session up, NETCONF subsystem opened"
+        );
+        // Established: from here the session ends the connection, through `close`.
+        tether.keep();
+        Ok(RusshTransport {
+            handle,
+            channel,
+            observed_host_key,
+            stderr,
+            pending,
+            said,
+            eof: false,
+            closed: false,
+            timeouts: opts.timeouts,
+            budget: ReplyBudget::PerRpc,
+            deadline,
+        })
+    }
+}
+
+/// How far a connection has come, and how long each step took (0.7.0) — see
+/// [`check_device`].
+#[derive(Default)]
+struct Progress {
+    /// When the step in progress began. `None` until the connection is started:
+    /// what `connect` refuses before that has checked nothing.
+    mark: Option<std::time::Instant>,
+    /// The steps completed, in order, each with the time it took.
+    steps: Vec<(CheckStep, std::time::Duration)>,
+    /// The fingerprint of the host key the device presented, once the handshake
+    /// has gone through.
+    fingerprint: Option<String>,
+}
+
+impl Progress {
+    /// The connection is started: the first step is in progress from now.
+    fn begin(&mut self) {
+        self.mark = Some(std::time::Instant::now());
+    }
+
+    /// `step` is completed; the next one is in progress from now.
+    fn done(&mut self, step: CheckStep) {
+        let now = std::time::Instant::now();
+        let took = self.mark.map_or_else(Default::default, |mark| now - mark);
+        self.steps.push((step, took));
+        self.mark = Some(now);
     }
 }
 
@@ -793,247 +1080,7 @@ fn preferred_for(policy: &SshPolicy) -> russh::Preferred {
 #[async_trait]
 impl NetconfTransport for RusshTransport {
     async fn connect(opts: &ConnectOptions) -> Result<Self, NetconfError> {
-        // First, before the host and username go into the log events below.
-        check_target(&opts.host, Some(opts.username.as_str()))?;
-
-        // A legacy SSH policy is ALWAYS per device, never global, and every use should
-        // be traceable. So we log which policy this connection actually runs with —
-        // `LegacyJunos` and `Custom` at `warn`, because they are a deliberate weakening
-        // that someone should be able to see afterwards. Never the password.
-        let policy_name = match &opts.ssh_policy {
-            SshPolicy::Modern => "modern",
-            SshPolicy::LegacyJunos => "legacy-junos",
-            SshPolicy::Custom { .. } => "custom",
-        };
-        let legacy_allowed = !matches!(opts.ssh_policy, SshPolicy::Modern);
-        let host_key_mode = if opts.host_key.is_some() {
-            "pinned"
-        } else {
-            "enrollment"
-        };
-
-        // `Custom` promises «full manual control» in the API, but the names have to be
-        // resolved against russh's typed constants, and that mapping is not built. We
-        // cannot deliver what the API promises — and then we must **refuse**, not
-        // quietly do something else. The previous choice, falling back to legacy, did
-        // the opposite of what a consumer tightening things would expect.
-        // BLIND TRUST-ON-FIRST-USE IS CLOSED.
-        //
-        // `connect()` authenticates — it **sends the network password**. Without a
-        // pinned host key we do not know who answers at that address, and then the
-        // password must not move. `check_server_key` used to accept any key when
-        // `host_key` was `None`, and the password went out regardless.
-        //
-        // *Observing* a device is a different operation, and has its own path:
-        // `observe_host_key()` runs key exchange and disconnects without
-        // authenticating. It takes no credential parameter at all, so a password
-        // cannot leak from it.
-        if opts.host_key.is_none() {
-            return Err(NetconfError::Transport(TransportError::Io(
-                "no pinned host key — refusing to authenticate against an unverified \
-                 device. Use observe_host_key() to fetch the fingerprint for approval first."
-                    .into(),
-            )));
-        }
-
-        if matches!(opts.ssh_policy, SshPolicy::Custom { .. }) {
-            return Err(NetconfError::Transport(TransportError::Io(
-                CUSTOM_REFUSED.into(),
-            )));
-        }
-
-        // Logged after the refusals above, so a connect that is refused does not
-        // spend the device's one legacy warning on nothing.
-        if !legacy_allowed {
-            tracing::info!(
-                event = "ssh_connect",
-                host = %opts.host,
-                port = opts.port,
-                username = %opts.username,
-                ssh_policy = policy_name,
-                host_key = host_key_mode,
-                "connecting to a device over SSH"
-            );
-        } else if warn_legacy_once(&opts.host) {
-            // The first time for this device: the full warning.
-            tracing::warn!(
-                event = "ssh_connect",
-                legacy = true,
-                host = %opts.host,
-                port = opts.port,
-                username = %opts.username,
-                ssh_policy = policy_name,
-                host_key = host_key_mode,
-                "LEGACY: connecting with an ssh policy that permits algorithms outside \
-                 today's recommendations — a per-device opt-in, and not recommended"
-            );
-        } else {
-            // Afterwards: still tagged `legacy`, and the word is still in the message,
-            // but without the noise.
-            tracing::info!(
-                event = "ssh_connect",
-                legacy = true,
-                host = %opts.host,
-                port = opts.port,
-                username = %opts.username,
-                ssh_policy = policy_name,
-                host_key = host_key_mode,
-                "LEGACY: connecting to a device with an ssh policy outside the current recommendation (see first warning)"
-            );
-        }
-
-        // The session TTL, fail-closed: the range is validated BEFORE anything
-        // connects, and the clock starts HERE — when connecting, not at the first
-        // RPC.
-        opts.timeouts
-            .validate()
-            .map_err(|m| NetconfError::Transport(TransportError::Io(m)))?;
-        let started = std::time::Instant::now();
-        let deadline = started + opts.timeouts.total;
-        // The connection phase starts on the same clock. Every wait until `connect`
-        // returns ends by `connect_by`, and never past `deadline`: see
-        // `in_connect_phase`. `connect` is not capped by `validate`, so one too large
-        // to add simply leaves the deadline as the bound.
-        let connect_by = started
-            .checked_add(opts.timeouts.connect)
-            .unwrap_or(deadline);
-
-        let mut config = russh::client::Config {
-            // Not what bounds any wait: `in_connect_phase` bounds each one while
-            // connecting, and `send` and `recv` bound theirs after that. russh's
-            // inactivity clock RESETS on activity and is set once for the session's
-            // whole life, so it is not the lifetime limit either — that is
-            // `deadline` above. It stays at the TTL: set to `connect`, it would end
-            // an established session that sat idle for that long.
-            inactivity_timeout: Some(opts.timeouts.total),
-            ..Default::default()
-        };
-        config.preferred = preferred_for(&opts.ssh_policy);
-        let config = Arc::new(config);
-
-        let observed = Arc::new(StdMutex::new(None));
-        let said: Said = Arc::default();
-        let handler = ClientHandler {
-            pinned: opts.host_key.clone(),
-            observed: observed.clone(),
-            said: said.clone(),
-        };
-
-        // The TCP connection, the handshake and the host key check. From here until
-        // `connect` returns `Ok`, every way out — a phase running out, a refusal, an
-        // error — drops `tether`, and the device sees the connection end.
-        let (mut handle, tether) =
-            open_ssh(&opts.host, opts.port, config, handler, connect_by, deadline)
-                .await?
-                // Classify: a host key pin mismatch becomes HostKey, a key exchange or
-                // algorithm failure becomes Negotiation.
-                .map_err(|e| {
-                    // `check_server_key` has already put the fingerprint here if it got
-                    // as far as seeing the key. We read it BEFORE building the error, so
-                    // it travels out with it.
-                    let seen = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
-                    let err = classify_connect_err(e, seen);
-                    tracing::warn!(
-                        event = "ssh_connect_failed",
-                        host = %opts.host,
-                        port = opts.port,
-                        ssh_policy = policy_name,
-                        error = %err,
-                        "SSH connection failed"
-                    );
-                    err
-                })?;
-
-        // Password authentication. The cleartext is taken transiently from the
-        // SecretString right before use. Our copy is wrapped in `Zeroizing` so it is
-        // cleared on drop; russh makes its own owned `String` internally, which is
-        // outside our control.
-        let Auth::Password(secret) = &opts.auth;
-        let password = zeroize::Zeroizing::new(secret.expose_str(|s| s.to_string()));
-        // A failure here and below may be the device ending the connection; what it
-        // said over SSH goes with it (0.5.13).
-        let authed = in_connect_phase(
-            handle.authenticate_password(opts.username.as_str(), password.as_str()),
-            connect_by,
-            deadline,
-            "ssh-connect",
-        )
-        .await?
-        .map_err(|e| ended(e, &said))?;
-        if let russh::client::AuthResult::Failure {
-            remaining_methods,
-            partial_success,
-        } = &authed
-        {
-            // The device's own words, not ours. See `TransportError::AuthRejected`.
-            let methods: Vec<String> = remaining_methods.iter().map(String::from).collect();
-            let named = methods.join(", ");
-            let rejected = TransportError::AuthRejected {
-                username: opts.username.clone(),
-                remaining_methods: methods,
-                partial_success: *partial_success,
-            };
-            tracing::warn!(
-                event = "ssh_auth_failed",
-                host = %opts.host,
-                username = %opts.username,
-                partial_success = *partial_success,
-                remaining_methods = %named,
-                "{rejected}"
-            );
-            return Err(NetconfError::Transport(rejected));
-        }
-
-        let mut channel = in_connect_phase(
-            handle.channel_open_session(),
-            connect_by,
-            deadline,
-            "ssh-connect",
-        )
-        .await?
-        .map_err(|e| ended(e, &said))?;
-        // The `netconf` subsystem on the SSH session (RFC 6242). The port is SSH's own
-        // and lives in `opts.port`; it does not belong here. The request is queued,
-        // not answered: the device's answer is read here, and the session is
-        // established only once it is a yes.
-        let mut stderr = String::new();
-        let pending = in_connect_phase(
-            async {
-                channel
-                    .request_subsystem(true, "netconf")
-                    .await
-                    .map_err(|e| ended(e, &said))?;
-                await_subsystem(&mut channel, &mut stderr, &said).await
-            },
-            connect_by,
-            deadline,
-            "ssh-subsystem",
-        )
-        .await??;
-
-        let observed_host_key = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        tracing::info!(
-            event = "ssh_session_established",
-            host = %opts.host,
-            username = %opts.username,
-            ssh_policy = policy_name,
-            "SSH session up, NETCONF subsystem opened"
-        );
-        // Established: from here the session ends the connection, through `close`.
-        tether.keep();
-        Ok(RusshTransport {
-            handle,
-            channel,
-            observed_host_key,
-            stderr,
-            pending,
-            said,
-            eof: false,
-            closed: false,
-            timeouts: opts.timeouts,
-            budget: ReplyBudget::PerRpc,
-            deadline,
-        })
+        Self::connect_steps(opts, &mut Progress::default()).await
     }
 
     fn reply_budget(&mut self, budget: ReplyBudget) {
@@ -1287,21 +1334,29 @@ pub async fn observe_host_key(
 
     // Every way out of the probe drops `tether`, and the device sees the connection
     // end at once — when it gives up, and when it has what it came for.
-    let (handle, tether) = open_ssh(host, port, Arc::new(config), handler, connect_by, deadline)
-        .await?
-        .map_err(|e| {
-            let seen = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            let err = classify_connect_err(e, seen);
-            tracing::warn!(
-                event = "ssh_host_key_probe_failed",
-                host = %host,
-                port,
-                ssh_policy = policy_name,
-                error = %err,
-                "could not observe host key"
-            );
-            err
-        })?;
+    let (handle, tether) = open_ssh(
+        host,
+        port,
+        Arc::new(config),
+        handler,
+        connect_by,
+        deadline,
+        &mut Progress::default(),
+    )
+    .await?
+    .map_err(|e| {
+        let seen = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let err = classify_connect_err(e, seen);
+        tracing::warn!(
+            event = "ssh_host_key_probe_failed",
+            host = %host,
+            port,
+            ssh_policy = policy_name,
+            error = %err,
+            "could not observe host key"
+        );
+        err
+    })?;
 
     let fp = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
     // Disconnect at once. We have what we came for, and an open unauthenticated
@@ -1322,6 +1377,324 @@ pub async fn observe_host_key(
         "host key observed — the consumer must have a human approve it"
     );
     Ok(fp)
+}
+
+/// A step of [`check_device`], in the order they are taken (0.7.0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CheckStep {
+    /// The TCP connection: the device is reachable.
+    Tcp,
+    /// The SSH handshake and the host key check: it is the device that was pinned.
+    Ssh,
+    /// The login: the device lets the user in.
+    Login,
+    /// The channel and the `netconf` subsystem: NETCONF over SSH is there.
+    Netconf,
+    /// The hello exchange: the NETCONF service answers.
+    Hello,
+    /// One request and its reply — `<close-session/>`, answered with `<ok/>`: the
+    /// device handles a request.
+    Request,
+}
+
+impl std::fmt::Display for CheckStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CheckStep::Tcp => "the TCP connection",
+            CheckStep::Ssh => "the SSH handshake and host key",
+            CheckStep::Login => "the login",
+            CheckStep::Netconf => "the NETCONF subsystem",
+            CheckStep::Hello => "the hello",
+            CheckStep::Request => "the request",
+        })
+    }
+}
+
+/// What a [`DeviceCheck`] comes to, in one word (0.7.0) — see
+/// [`DeviceCheck::verdict`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Verdict {
+    /// Every step answered, in less than a tenth of the time the check was given.
+    Ok,
+    /// Every step answered, in less than half of the time.
+    Slow,
+    /// Every step answered, and it took half of the time or more.
+    VerySlow,
+    /// The device was reached, and a step after that did not answer or was refused.
+    Dead,
+    /// No TCP connection: the device, or the network to it, is not there.
+    NoContact,
+}
+
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Verdict::Ok => "ok",
+            Verdict::Slow => "a bit slow",
+            Verdict::VerySlow => "very slow",
+            Verdict::Dead => "dead",
+            Verdict::NoContact => "no contact",
+        })
+    }
+}
+
+/// What [`check_device`] found (0.7.0): every step it took with the time it took,
+/// where it stopped and why, and what the device showed on the way.
+///
+/// The report is always whole. How much of it to read is the consumer's choice:
+///
+/// - **One word:** [`verdict`](Self::verdict).
+/// - **One line:** [`summary`](Self::summary) — the verdict, the time, and where
+///   and why it stopped.
+/// - **Everything:** `Display` writes the summary and a line for each step and
+///   each thing the device showed; the same is there as data in
+///   [`steps`](Self::steps), [`stopped`](Self::stopped) and the rest.
+#[derive(Debug)]
+pub struct DeviceCheck {
+    limit: std::time::Duration,
+    steps: Vec<(CheckStep, std::time::Duration)>,
+    stopped: Option<(CheckStep, std::time::Duration, NetconfError)>,
+    fingerprint: Option<String>,
+    capabilities: Vec<String>,
+    session_id: Option<u64>,
+    banner: Option<String>,
+}
+
+impl DeviceCheck {
+    /// The check in one word. Every step answered: `Ok` in less than a tenth of
+    /// [`limit`](Self::limit), `Slow` in less than half of it, `VerySlow` otherwise.
+    /// A step stopped: `NoContact` when it was the TCP connection, `Dead` when it
+    /// was any step after it.
+    ///
+    /// The bounds follow the time limit the check was given, not fixed seconds: a
+    /// consumer that wants «slow» to mean something else gives another limit.
+    pub fn verdict(&self) -> Verdict {
+        match &self.stopped {
+            Some((CheckStep::Tcp, ..)) => Verdict::NoContact,
+            Some(_) => Verdict::Dead,
+            None => {
+                let elapsed = self.elapsed();
+                if elapsed * 10 < self.limit {
+                    Verdict::Ok
+                } else if elapsed * 2 < self.limit {
+                    Verdict::Slow
+                } else {
+                    Verdict::VerySlow
+                }
+            }
+        }
+    }
+
+    /// The check in one line: the verdict and the time it took, and when a step
+    /// stopped, which one and the error it stopped with.
+    pub fn summary(&self) -> String {
+        let seconds = |d: std::time::Duration| format!("{:.3}s", d.as_secs_f64());
+        let verdict = self.verdict();
+        let limit = seconds(self.limit);
+        match &self.stopped {
+            None => format!(
+                "{verdict} — every step answered, in {} of {limit}",
+                seconds(self.elapsed())
+            ),
+            Some((step, _, error)) => format!(
+                "{verdict} — stopped at {step} after {} of {limit}: {error}",
+                seconds(self.elapsed())
+            ),
+        }
+    }
+
+    /// The time the whole check took, a step that stopped included.
+    pub fn elapsed(&self) -> std::time::Duration {
+        let stopped = self.stopped.as_ref().map_or_else(Default::default, |s| s.1);
+        self.steps
+            .iter()
+            .map(|(_, took)| *took)
+            .sum::<std::time::Duration>()
+            + stopped
+    }
+
+    /// The time the check was given: `Timeouts::connect` of the options it ran
+    /// with.
+    pub fn limit(&self) -> std::time::Duration {
+        self.limit
+    }
+
+    /// The steps that answered, in the order they were taken, each with the time it
+    /// took.
+    pub fn steps(&self) -> &[(CheckStep, std::time::Duration)] {
+        &self.steps
+    }
+
+    /// The step that did not answer or was refused, with the error it stopped with
+    /// — the error `connect` or the session would have returned, the device's own
+    /// words in it, redacted. `None` when every step answered.
+    pub fn stopped(&self) -> Option<(CheckStep, &NetconfError)> {
+        self.stopped.as_ref().map(|(step, _, error)| (*step, error))
+    }
+
+    /// The fingerprint of the host key the device presented, when the handshake
+    /// got far enough to see it.
+    pub fn fingerprint(&self) -> Option<&str> {
+        self.fingerprint.as_deref()
+    }
+
+    /// The capabilities of the device's hello. Empty when the check stopped before
+    /// it.
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
+    /// The session id of the device's hello, when it sent one.
+    pub fn session_id(&self) -> Option<u64> {
+        self.session_id
+    }
+
+    /// The banner the device showed before the login, when the check ran to its
+    /// end and the device showed one. Redacted, as everything the device says is
+    /// before a policy is bound.
+    pub fn banner(&self) -> Option<&str> {
+        self.banner.as_deref()
+    }
+}
+
+impl std::fmt::Display for DeviceCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.summary())?;
+        for (step, took) in &self.steps {
+            write!(f, "\n  {step}: {:.3}s", took.as_secs_f64())?;
+        }
+        if let Some((step, took, _)) = &self.stopped {
+            write!(f, "\n  {step}: stopped after {:.3}s", took.as_secs_f64())?;
+        }
+        if let Some(fingerprint) = &self.fingerprint {
+            write!(f, "\n  host key: {}", printable(fingerprint))?;
+        }
+        if let Some(id) = self.session_id {
+            write!(f, "\n  session id: {id}")?;
+        }
+        if !self.capabilities.is_empty() {
+            write!(f, "\n  capabilities: {}", self.capabilities.join(" "))?;
+        }
+        if let Some(banner) = &self.banner {
+            write!(f, "\n  banner: {}", printable(banner))?;
+        }
+        Ok(())
+    }
+}
+
+/// Check that a device is there and answers NETCONF (0.7.0), and say how far a
+/// connection gets and how long each step takes.
+///
+/// **It is the tool for after a timeout.** A request that timed out says the device
+/// has a problem, and not which: gone from the network, a login that hangs, a
+/// NETCONF service that does not answer. A `Timeout` from `connect` does not say it
+/// either — the TCP connection, the handshake, the login and the channel share one
+/// time limit and one name. This function takes the steps one by one and reports on
+/// each. The crate never runs it by itself, and decides nothing from it: the
+/// consumer does.
+///
+/// It takes what a connection takes, and does what one does: the TCP connection,
+/// the SSH handshake with the host key check, the login, the `netconf` subsystem,
+/// the hello exchange, and one request — `<close-session/>`, which the device
+/// answers with `<ok/>`. That is one connection, one login and one NETCONF session,
+/// opened and closed: no configuration is read and no command is run, and no policy
+/// is needed. Lighter still is [`observe_host_key`], which stops before the login.
+///
+/// **One clock.** The whole check runs within `Timeouts::connect`, counted from
+/// when it starts, and never past `total`; a short limit makes a quick check. A
+/// step that runs out of it is the step the check stopped at.
+///
+/// **Always a report.** Once the connection is started, what comes back is a
+/// [`DeviceCheck`], whether every step answered or one stopped — the step, and the
+/// error `connect` would have returned, are in it. `Err` is only what `connect`
+/// refuses before anything is connected — no pinned host key, `SshPolicy::Custom`,
+/// time limits out of range, a host or username that cannot be right: then nothing
+/// was checked.
+///
+/// **Nothing is left behind.** The connection is ended when the check is over,
+/// however it ended.
+pub async fn check_device(opts: &ConnectOptions) -> Result<DeviceCheck, NetconfError> {
+    use crate::session::{NetconfSession, redact_content};
+
+    let limit = opts.timeouts.connect;
+    let mut progress = Progress::default();
+    let mut check = DeviceCheck {
+        limit,
+        steps: Vec::new(),
+        stopped: None,
+        fingerprint: None,
+        capabilities: Vec::new(),
+        session_id: None,
+        banner: None,
+    };
+    // What is left of the one clock, for the steps after `connect`.
+    let started = std::time::Instant::now();
+    let left = || limit.saturating_sub(started.elapsed());
+    // The step in progress stopped with `error`: the report as it stands.
+    let stop = |mut check: DeviceCheck, mut progress: Progress, step, error: NetconfError| {
+        let took = progress
+            .mark
+            .map_or_else(Default::default, |mark| mark.elapsed());
+        check.steps = std::mem::take(&mut progress.steps);
+        // The key the device presented: from a handshake that went through, or from
+        // the error of one that was refused for it.
+        if check.fingerprint.is_none() {
+            check.fingerprint = match &error {
+                NetconfError::Transport(TransportError::HostKey { observed, .. }) => {
+                    observed.clone()
+                }
+                _ => progress.fingerprint.take(),
+            };
+        }
+        check.stopped = Some((step, took, error));
+        check
+    };
+
+    let transport = match RusshTransport::connect_steps(opts, &mut progress).await {
+        Ok(transport) => transport,
+        // Refused before anything was connected: nothing was checked.
+        Err(e) if progress.mark.is_none() => return Err(e),
+        Err(e) => {
+            // The step after the last one that answered.
+            let step = match progress.steps.last() {
+                None => CheckStep::Tcp,
+                Some((CheckStep::Tcp, _)) => CheckStep::Ssh,
+                Some((CheckStep::Ssh, _)) => CheckStep::Login,
+                Some(_) => CheckStep::Netconf,
+            };
+            // No policy is bound, so what the device said is redacted.
+            return Ok(stop(check, progress, step, redact_content(e)));
+        }
+    };
+    check.fingerprint = transport.observed_host_key();
+
+    let session = match timeout(left(), NetconfSession::establish(transport, true)).await {
+        Ok(Ok(session)) => session,
+        Ok(Err(e)) => return Ok(stop(check, progress, CheckStep::Hello, e)),
+        Err(_) => {
+            let e = NetconfError::timeout("rpc-recv");
+            return Ok(stop(check, progress, CheckStep::Hello, e));
+        }
+    };
+    progress.done(CheckStep::Hello);
+    check.capabilities = session.capabilities().to_vec();
+    check.session_id = session.session_id();
+
+    match timeout(left(), session.close()).await {
+        Ok(Ok(end)) => {
+            progress.done(CheckStep::Request);
+            check.banner = end.ssh.banner;
+            check.steps = progress.steps;
+            Ok(check)
+        }
+        Ok(Err(e)) => Ok(stop(check, progress, CheckStep::Request, e)),
+        Err(_) => {
+            let e = NetconfError::timeout("rpc-recv");
+            Ok(stop(check, progress, CheckStep::Request, e))
+        }
+    }
 }
 
 #[cfg(test)]
