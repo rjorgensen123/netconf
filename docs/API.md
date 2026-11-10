@@ -1,7 +1,7 @@
-# netconf — API contract (v0.6.0)
+# netconf — API contract (v0.7.0)
 
-**The version is a floor: v0.6.0 is the LOWEST netconf this contract describes.** Every netconf
-from 0.6.0 onwards has what is written here. 0.6.0 is the first release on crates.io, so the
+**The version is a floor: v0.7.0 is the LOWEST netconf this contract describes.** Every netconf
+from 0.7.0 onwards has what is written here. 0.7.0 is where the public surface last changed, so the
 contract starts there and describes nothing older. The number is raised only when the public surface
 itself changes — to the crate version at that moment — and stands still while it does not, however
 many releases pass in between. A contract *newer* than the crate it describes would promise
@@ -719,7 +719,8 @@ impl ConfigPolicy {
  pub const fn all_deny() -> Self; // nothing — what a session without a policy has
  pub fn grant(self, scope: Scope, access: Access) -> Self;
  pub fn allow(self, pattern: &str, m: Match, ops: &[Op]) -> Self;
- pub fn check(&self, changes: &[Change]) -> Result<(), Violation>; // first violation
+ pub fn check(&self, changes: &[Change]) -> Result<(), Violation>; // first violation; sees paths, not verbs
+ pub fn check_set_payload(&self, payload: &str) -> Result<(), String>; // a whole set payload, as the session judges it
  // Introspection: netconf ANSWERS what a filter permits —
  // a consumer can build a dynamic rule system and still show what applies.
  pub fn rules(&self) -> &[Rule];
@@ -748,20 +749,30 @@ pub const KNOWN_TOP_LEVEL_HIERARCHIES: &[&str];
 pub fn is_known_top_level(token: &str) -> bool;
 pub fn verb_class(verb: &str) -> Option<Op>; // None = unknown → deny
 pub fn parse_set_payload(payload: &str) -> Result<Vec<Change>, ParseError>;
-pub enum ParseError { UnknownVerb(String), EmptyPath(String), UnbalancedQuote(String), Comment(String), SingleQuote(String), ControlCharacter { line: usize, character: char } } // #[non_exhaustive]
+pub enum ParseError { UnknownVerb(String), EmptyPath(String), UnbalancedQuote(String), Comment(String), SingleQuote(String), Hash(String), Target(String), ControlCharacter { line: usize, character: char } } // #[non_exhaustive]
 ```
 
 ### Parsing a set payload
 
 `parse_set_payload` reads one statement per line, `<verb> <path> [value]`, and rejects the
 **whole** payload on an unknown verb (`edit` included), an empty path, an unbalanced quote, a
-single quote or a `/*` comment outside a string, or a control character other than a tab. We never silently skip a statement we do not understand — it would otherwise reach the
+single quote or a `/*` comment outside a string, a `#` inside a word, a `rename` or `copy` target
+that cannot be read, or a control character other than a tab. We never silently skip a statement we do not understand — it would otherwise reach the
 device unchecked, and that is the bypass surface itself.
 
 | Class | Verbs |
 |---|---|
-| `Op::Set` | `set` · `insert` · `copy` · `replace` · `annotate` · `activate` · `protect` |
-| `Op::Delete` | `delete` · `deactivate` · `unprotect` · `wildcard delete` · `rename` |
+| `Op::Set` | `set` · `insert` · `copy` · `annotate` · `activate` · `protect` |
+| `Op::Delete` | `delete` · `deactivate` · `unprotect` · `wildcard delete` · `rename` · `replace` |
+
+- **A `Change` is an operation and a path**, and does not say which verb wrote it. The rules that
+  hang on the verb — `wildcard delete`, `replace`, `rename`, `copy` — are judged on the line, by
+  `check_set_payload`, which is what the session runs before a load. `check` on the changes sees
+  the paths alone.
+- **`wildcard delete` and `replace` take a pattern**, and the filter cannot read what a pattern
+  matches. A line with either is refused under every policy but `all_free(Rwd)`: what is to be
+  deleted is named, path by path. `replace` removes what its pattern matched, so its class is
+  `Delete`.
 
 - **Lines** end with `\n` or `\r\n`: where `str::lines` ends a line, and the two that XML turns
   into a newline before the device reads the payload. Any other control character — a carriage return that does not end a
@@ -778,23 +789,31 @@ device unchecked, and that is the bypass surface itself.
   is an ordinary character.
 - **Comments:** a line that begins with `#` is skipped whole. A `#` outside a quoted
   string makes the rest of its line a comment, and the line is judged without it: `delete
-  protocols # x` is `delete protocols`, and the floor refuses it. Inside `"…"`, `#` is text. `load_configuration` sends a set payload without
+  protocols # x` is `delete protocols`, and the floor refuses it. Inside `"…"`, `#` is text. A `#` begins a comment at
+  the start of a line or after whitespace; one inside a word — `description Uplink#2` — is `Hash`,
+  and the value goes in a quoted string. `load_configuration` sends a set payload without
   its `#` comments, so the device reads what the policy judged. A `/*` that begins a
   token outside a quoted string is `Comment`: a comment is not sent to a device, it goes
   in a quoted string. Inside `"…"`, or inside a token (`a/*b`), it is ordinary text.
 - **`rename` and `copy`** have a filter of their own: `<path> to <tail>`, both sides there, or the line is `EmptyPath`. The words after
   `to` replace as many words at the end of the path, as Junos names the new identifier on the
   same level — `rename interfaces ge-0/0/0 unit 10 to unit 20` writes `interfaces ge-0/0/0 unit
-  20`, and as many words as the path has, or more, are the whole target. `rename` is a `Delete`
+  20`. The target is a name on the path's own level: the words after `to` are fewer than the
+  path's, and all but the last are the path's own. Anything else, and more than one `to`, is
+  `Target`; a quoted `"to"` is a name, not the keyword. `rename` is a `Delete`
   of the path and a `Set` of the target; `copy` a `Set` of the target, its source untouched. The
-  floor and the rules judge both. `load_configuration` then reads the candidate configuration in
+  floor and the rules judge both, and since both write everything under the target, a `Subtree`
+  rule for `Set` must cover everything under it: a `Node` rule for the target alone is not
+  enough. `load_configuration` then reads the candidate configuration in
   set format, and when a target is there already, or a line before it writes it, the payload is
-  refused as `Policy` and nothing is sent: a rename or a copy creates, it does not overwrite.
+  refused as `Policy` and nothing is sent: a rename or a copy creates, it does not overwrite. A
+  reply without `<configuration-set>` is `Protocol`, and a candidate line the filter cannot read
+  refuses the payload: a candidate that was not read is no empty candidate.
 - **`edit` is not a verb**: it makes later lines relative to a new context, and the
   filter reads every line as a full path. It is `UnknownVerb`, with a message saying so.
 - **Case:** verbs are lowercase only — `SET` is `UnknownVerb`.
 
-A line-carrying `ParseError` (`EmptyPath`, `UnbalancedQuote`, `Comment`, `SingleQuote`) holds the line
+A line-carrying `ParseError` (`EmptyPath`, `UnbalancedQuote`, `Comment`, `SingleQuote`, `Hash`, `Target`) holds the line
 **already redacted** with `redact_secrets`, because the text ends up in `NetconfError::Policy`
 and from there in the consumer's log. `UnknownVerb` holds the unrecognised word, redacted the same
 way: `$9$hunter2 x` is `unknown verb «$9$[SENSITIVE: …]» (denied, fail-closed)`. A word with nothing to redact —
@@ -814,6 +833,8 @@ way: `$9$hunter2 x` is `unknown verb «$9$[SENSITIVE: …]» (denied, fail-close
 | `UnknownVerb` for `edit`, `top`, `up`, `exit` | `«edit» moves the context later lines are read in, and the filter cannot follow it — write every line with its full path (denied, fail-closed)` |
 | `Comment` | `a /* comment cannot be sent to a device — a comment goes in a quoted string (denied, fail-closed): «line»` |
 | `SingleQuote` | `single quote outside a string — only " quotes a value (denied, fail-closed): «line»` |
+| `Hash` | `a # inside a word — a comment begins at the start of a line or after a space, and a value with # in it goes in a quoted string (denied, fail-closed): «line»` |
+| `Target` | ``the target of a rename or a copy cannot be read — one `to`, then the new name on the same level as the old, as in `unit 0 to unit 1` (denied, fail-closed): «line»`` |
 | `ControlCharacter` | `a control character or line separator, U+<hex>, on line <n> — a line ends with a newline or CRLF, and only a tab may appear in it besides printable text (denied, fail-closed)` |
 
 ### Rules and matching
@@ -885,6 +906,19 @@ release:
 - `all-deny: nothing is permitted`
 - `read-only: no change is permitted, whatever is granted`
 
+`check_set_payload` returns the reason alone, and besides those above:
+
+- `could not parse payload: <ParseError>`
+- `` `wildcard delete` deletes what its pattern matches, and the policy cannot read a pattern — name
+  each path to delete, or bind the deliberate ConfigPolicy::all_free(Rwd) (denied, fail-closed)``
+- `` `replace` rewrites what its pattern matches, and the policy cannot read a pattern — it requires
+  the deliberate ConfigPolicy::all_free(Rwd) (denied, fail-closed)``
+- `a rename or a copy writes everything under its target «<path>», and no rule lets everything
+  under it be set — a rule for the node alone is not enough (denied, fail-closed)`
+
+A line with a pattern is judged as any line first, so the floor and the policy's own refusals
+answer before these two.
+
 In the session these arrive as `NetconfError::Policy`, as do `could not parse payload: <ParseError>`
 and the refusals for a missing policy, for a policy that permits no change, for
 `rollback(n > 0)` without `all_free(Rwd)`, for `Text`/`Xml` without `all_free(Rwd)` — `policy
@@ -892,7 +926,9 @@ enforcement is only implemented for Format::Set (got <format>); raw Text/Xml loa
 deliberate ConfigPolicy::all_free(Rwd)` — and for a `rename` or `copy` whose target is there
 already: `the target «<path>» of a rename or copy is there already in the candidate configuration
 — a rename or a copy creates, it does not overwrite (denied, fail-closed)`, or `…, written by a
-line before it — …`.
+line before it — …`; and when the candidate holds a line the filter cannot read: `a line of the
+candidate configuration cannot be read as a set line, so whether the target «<path>» of a rename
+or copy is there already is not known (denied, fail-closed)`.
 The session's own gate comes first, so `read-only: no change is permitted …`,
 `all-free: Ro does not allow …` and the policy's `all-deny: nothing is permitted` are reached
 only through `check` and `check_command` directly; through a helper the session's texts are what

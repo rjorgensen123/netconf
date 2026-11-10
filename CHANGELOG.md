@@ -14,6 +14,15 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-10 — russh 0.65, with the security fixes that came with it (GHSA-4p9f-7p9m-5vfg,
   GHSA-fw5c-8223-6h42, GHSA-9wfm-jcj8-jfv9, GHSA-vp5q-ff62-jwqv). The lockfile moves tokio to
   1.54.1, crypto-bigint to 0.7.11 and ctutils to 0.4.8, for RUSTSEC-2026-0386, -0387 and -0385.
+- 2026-11-10 — The set filter refuses what it cannot read: `wildcard delete` and `replace` outside
+  `all_free(Rwd)`, a `#` inside a word (`ParseError::Hash`), and a `rename` or `copy` whose target
+  is not a sibling after one `to` (`ParseError::Target`), is not covered by a `Subtree` rule for
+  `Set`, or cannot be checked against the candidate. `replace` is in the `Delete` class.
+
+### Added
+
+- 2026-11-10 — `ConfigPolicy::check_set_payload` checks a whole set payload as the session does.
+  `check` sees operations and paths, not verbs.
 
 ### Changed
 
@@ -24,6 +33,8 @@ Every notable change to this crate is recorded here. The format follows
   The dependencies alone would need 1.89. The code changes that come with it are mechanical:
   nested `if let` written as let chains, and the formatting rustfmt gives edition 2024. The
   behaviour is the same.
+- 2026-11-10 — The contract floor in `docs/API.md` is 0.7.0: the public surface changed in this
+  release.
 
 ## [0.6.1] — 2026-10-05
 

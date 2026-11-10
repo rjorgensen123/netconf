@@ -358,7 +358,7 @@ let policy = ConfigPolicy::all_free(Access::Rwd);
 configure your way into. Only `all_free` has no floor.
 
 **Unknown input rejects the whole payload** — an unknown verb, an empty path, an unbalanced or
-single quote, a `/*` comment, a control character. A line that is not understood would otherwise go
+single quote, a `/*` comment, a `#` inside a word, a control character. A line that is not understood would otherwise go
 **unchecked** to the device, and that is the road around the whole filter.
 
 **Ask the policy what it permits.** `policy.describe()` gives a summary for a log or an operator,
@@ -369,10 +369,14 @@ connect:
 
 ```rust
 fn check(payload: &str, policy: &ConfigPolicy) -> Result<(), String> {
-    let changes = netconf::policy::parse_set_payload(payload).map_err(|e| e.to_string())?;
-    policy.check(&changes).map_err(|v| v.reason)
+    policy.check_set_payload(payload)
 }
 ```
+
+`check_set_payload` judges every line with its verb, as the session does. `parse_set_payload`
+and `check` are there for looking at the changes themselves; a change is an operation and a path,
+so `check` cannot apply the rules that hang on the verb — `wildcard delete`, `replace`, `rename`
+and `copy`.
 
 `policy.check_command(cmd)` does the same for a command.
 

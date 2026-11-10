@@ -99,18 +99,33 @@ Every Junos set-format verb is known and classified, verified against both class
 
 | Class | Verbs |
 |---|---|
-| `Op::Set` | `set`, `insert`, `copy`, `replace`, `annotate`, `activate`, `protect` |
-| `Op::Delete` | `delete`, `wildcard delete`, `deactivate`, `unprotect`, `rename` |
+| `Op::Set` | `set`, `insert`, `copy`, `annotate`, `activate`, `protect` |
+| `Op::Delete` | `delete`, `wildcard delete`, `deactivate`, `unprotect`, `rename`, `replace` |
 
 `deactivate` counts as deletion, since it removes the effect, and `unprotect` too, since it is the
 precondition for deleting something protected.
 
+**`wildcard delete` and `replace` take a pattern, and the filter cannot read a pattern.** It cannot
+know what `wildcard delete interfaces ge-.*` removes, so it does not guess: a line with either verb
+is refused under every policy except `all_free(Rwd)`. Name what you delete, path by path — two
+`delete` lines cost nothing a program does not already pay.
+
 `rename <path> to <name>` deletes its source and writes its target; `copy <path> to <name>` writes
 its target. The words after `to` replace as many words at the end of the path:
-`rename interfaces ge-0/0/0 unit 0 to unit 1` writes `interfaces ge-0/0/0 unit 1`. Neither may
-write a target that is there already: before the payload is sent, the candidate configuration is
-read, and a target found there — or written by an earlier line of the same payload — refuses the
-whole payload. A rename or a copy creates; it does not overwrite.
+`rename interfaces ge-0/0/0 unit 0 to unit 1` writes `interfaces ge-0/0/0 unit 1`. The target is
+always a sibling: one `to`, then the new name on the same level as the old. A target somewhere
+else, a second `to`, or a quoted `"to"` in its place refuses the payload.
+
+Both write **everything under the target**, so the policy must let everything under it be set: a
+`Subtree` rule for `Set` has to cover it. A `Node` rule for the target alone is not enough — it
+would let a `copy` write what a `set` of the same lines is refused. The built-in scopes grant
+node and subtree together, so `Scope::LogicalUnits` still copies one unit to another.
+
+Neither may write a target that is there already: before the payload is sent, the candidate
+configuration is read, and a target found there — or written by an earlier line of the same
+payload — refuses the whole payload. A rename or a copy creates; it does not overwrite. If the
+candidate cannot be read — no `<configuration-set>` in the reply, or a line the filter cannot
+read — the payload is refused too: no answer is not a «no».
 
 `edit`, `top`, `up` and `exit` are not verbs here. They move the context the following lines are
 read in, and the filter reads every line as a full path. Write every line with its full path.
@@ -172,6 +187,8 @@ If the parser meets any of these, **the whole payload is rejected**, not just th
 - an unbalanced quote
 - a `'` outside a quoted string
 - a `/*` comment outside a quoted string
+- a `#` inside a word, outside a quoted string
+- a `rename` or `copy` whose target cannot be read
 - a control character other than a tab, or the Unicode line and paragraph separators U+2028 and
   U+2029
 
@@ -187,7 +204,8 @@ the policy decides on a path nobody wrote. Inside a `"…"` string it is an ordi
 
 A `#` outside a quoted string makes the rest of its line a comment, and a line that begins with `#`
 is a comment whole. The payload is sent **without** its comments, so the device reads exactly what
-the policy judged.
+the policy judged. A comment begins at the start of a line or after a space. A `#` inside a word
+— `description Uplink#2` — is refused rather than cut: write `description "Uplink#2"`.
 
 That sounds strict, and it is meant to. The alternative is skipping the line you did not
 understand — and then it goes **unchecked** to the box. That is not a gap in the filter; it is the

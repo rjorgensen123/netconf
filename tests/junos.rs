@@ -1535,3 +1535,73 @@ async fn a_whole_logical_system_needs_every_read_grant() {
         Err(NetconfError::Policy(_))
     ));
 }
+
+/// **A candidate that was not read refuses a rename or a copy** (0.7.0). A reply
+/// without `<configuration-set>` is no empty candidate, text in `CDATA` is text, and
+/// a candidate line the filter cannot read gives no answer.
+#[tokio::test]
+async fn a_copy_is_refused_when_the_candidate_cannot_be_read() {
+    let copy = "copy interfaces ge-0/0/0 unit 10 to unit 20";
+    let reply = |body: &str| {
+        eom(&format!(
+            "<rpc-reply xmlns=\"{BASE_1_0}\">{body}</rpc-reply>"
+        ))
+    };
+
+    let (mut s, log) = session(vec![reply("<output>no candidate here</output>")]).await;
+    let e = s
+        .load_configuration(copy, LoadAction::Merge, Format::Set)
+        .await
+        .unwrap_err();
+    assert!(matches!(&e, NetconfError::Protocol { .. }), "{e}");
+    assert!(!sent_str(&log).contains("<load-configuration"));
+
+    let (mut s, log) = session(vec![reply(
+        "<configuration-set><![CDATA[set interfaces ge-0/0/0 unit 20 description x\n]]>\
+         </configuration-set>",
+    )])
+    .await;
+    let e = s
+        .load_configuration(copy, LoadAction::Merge, Format::Set)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, NetconfError::Policy(m) if m.contains("there already")),
+        "{e}"
+    );
+    assert!(!sent_str(&log).contains("<load-configuration"));
+
+    let (mut s, log) = session(vec![reply(
+        "<configuration-set>set interfaces ge-0/0/0 description it's\n</configuration-set>",
+    )])
+    .await;
+    let e = s
+        .load_configuration(copy, LoadAction::Merge, Format::Set)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, NetconfError::Policy(m) if m.contains("cannot be read")),
+        "{e}"
+    );
+    assert!(!sent_str(&log).contains("<load-configuration"));
+}
+
+/// **The session refuses a `wildcard delete` before anything is sent** (0.7.0).
+#[tokio::test]
+async fn a_wildcard_delete_is_refused_by_the_session() {
+    let (mut s, log) = session_without_policy(vec![]).await;
+    s.set_policy(ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rwd));
+    let e = s
+        .load_configuration(
+            "wildcard delete interfaces ge-0/0/0 unit .*",
+            LoadAction::Merge,
+            Format::Set,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, NetconfError::Policy(m) if m.contains("wildcard delete")),
+        "{e}"
+    );
+    assert!(!sent_str(&log).contains("<load-configuration"));
+}

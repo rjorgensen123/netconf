@@ -33,13 +33,14 @@
 /// An operation on a configuration path — an access class; see [`verb_class`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    /// The add-or-modify class: `set`, `insert`, `copy`, `replace`, `annotate`,
-    /// `activate`, `protect`. Requires at least `Rw`.
+    /// The add-or-modify class: `set`, `insert`, `copy`, `annotate`, `activate`,
+    /// `protect`. Requires at least `Rw`.
     Set,
     /// The remove class: `delete`, `deactivate`, `wildcard delete`, `unprotect`,
-    /// `rename`. Requires `Rwd`. `deactivate` removes the *effect* of configuration
-    /// and so counts as a removal; `unprotect` is a precondition for deleting
-    /// protected configuration; `rename` removes its source (0.5.13).
+    /// `rename`, `replace`. Requires `Rwd`. `deactivate` removes the *effect* of
+    /// configuration and so counts as a removal; `unprotect` is a precondition for
+    /// deleting protected configuration; `rename` removes its source (0.5.13);
+    /// `replace` removes what its pattern matched (0.7.0; `Set` before).
     Delete,
 }
 
@@ -55,12 +56,15 @@ pub enum Op {
 /// `rename` and `copy` have a filter of their own in [`parse_set_payload`]
 /// (0.5.13): `rename` is a `Delete` of its source and a `Set` of its target, `copy`
 /// a `Set` of its target; the class here is the stricter of what each does.
+///
+/// `replace` and `wildcard delete` take a pattern, and the filter cannot read what a
+/// pattern matches (0.7.0): a line with either is refused under every policy but
+/// `all_free(Rwd)` — see [`ConfigPolicy::check_set_payload`]. `replace` removes the
+/// text its pattern matched, so its class is `Delete` (`Set` before).
 pub fn verb_class(verb: &str) -> Option<Op> {
     match verb {
-        "set" | "insert" | "copy" | "replace" | "annotate" | "activate" | "protect" => {
-            Some(Op::Set)
-        }
-        "delete" | "deactivate" | "unprotect" | "rename" => Some(Op::Delete),
+        "set" | "insert" | "copy" | "annotate" | "activate" | "protect" => Some(Op::Set),
+        "delete" | "deactivate" | "unprotect" | "rename" | "replace" => Some(Op::Delete),
         _ => None,
     }
 }
@@ -884,6 +888,11 @@ impl ConfigPolicy {
 
     /// Check every change against the policy. `Ok(())` if all are permitted, otherwise
     /// the **first** violation. Fail-closed.
+    ///
+    /// A [`Change`] is an operation and a path, and does not say which verb wrote it.
+    /// The rules that hang on the verb — `wildcard delete`, `replace`, `rename` and
+    /// `copy` — are therefore not judged here (0.7.0): a set payload is checked whole
+    /// with [`check_set_payload`](Self::check_set_payload), as the session checks it.
     pub fn check(&self, changes: &[Change]) -> Result<(), Violation> {
         for c in changes {
             self.check_one(c)?;
@@ -891,33 +900,116 @@ impl ConfigPolicy {
         Ok(())
     }
 
-    /// Check a set payload as [`parse_set_lines`] read it, line by line: `rename` and
-    /// `copy` through their own filters, every other line's changes as
-    /// [`check`](Self::check) does (0.5.13).
+    /// Check a whole set payload, as the session checks it before a load (0.7.0):
+    /// the payload is parsed as [`parse_set_payload`] parses it, and every line is
+    /// judged with its verb. `Err` carries the reason, as
+    /// [`NetconfError::Policy`](crate::NetconfError::Policy) carries it from
+    /// `load_configuration`.
+    ///
+    /// It is what a consumer calls to refuse a payload before a device is touched.
+    /// [`check`](Self::check) on the changes of [`parse_set_payload`] sees the paths
+    /// and not the verbs, and so cannot apply these rules:
+    ///
+    /// - `wildcard delete` and `replace` take a pattern, and the filter cannot read
+    ///   what a pattern matches. Both are refused under every policy but
+    ///   `all_free(Rwd)`; what is to be deleted is named, path by path.
+    /// - `rename` and `copy` write everything under their target. The target must be
+    ///   one the policy lets be set, and a `Subtree` rule for `Set` must cover
+    ///   everything under it: a rule for the node alone is not enough.
+    ///
+    /// One thing needs the device and is not checked here: that the target of a
+    /// `rename` or a `copy` is not there already. `load_configuration` reads the
+    /// candidate for it.
+    pub fn check_set_payload(&self, payload: &str) -> Result<(), String> {
+        let lines =
+            parse_set_lines(payload).map_err(|e| format!("could not parse payload: {e}"))?;
+        self.check_lines(&lines).map_err(|v| v.reason)
+    }
+
+    /// Check a set payload as [`parse_set_lines`] read it, line by line, each with
+    /// its verb (0.5.13) — see [`check_set_payload`](Self::check_set_payload).
     pub(crate) fn check_lines(&self, lines: &[SetLine]) -> Result<(), Violation> {
         for line in lines {
             match &line.verb {
-                SetVerb::Rename { .. } => self.check_rename(line)?,
-                SetVerb::Copy { .. } => self.check_copy(line)?,
+                SetVerb::Rename { target } | SetVerb::Copy { target } => {
+                    self.check_written(line, target)?
+                }
+                SetVerb::WildcardDelete => self.check_unreadable(
+                    line,
+                    "`wildcard delete` deletes what its pattern matches, and the policy \
+                     cannot read a pattern — name each path to delete, or bind the \
+                     deliberate ConfigPolicy::all_free(Rwd) (denied, fail-closed)",
+                )?,
+                SetVerb::Replace => self.check_unreadable(
+                    line,
+                    "`replace` rewrites what its pattern matches, and the policy cannot \
+                     read a pattern — it requires the deliberate \
+                     ConfigPolicy::all_free(Rwd) (denied, fail-closed)",
+                )?,
                 SetVerb::Other => self.check(&line.changes)?,
             }
         }
         Ok(())
     }
 
-    /// `rename`: its source must be one the policy lets be deleted, and its target
-    /// one it lets be written (0.5.13). That the target is not there already is
-    /// checked against the device before the line is sent.
-    fn check_rename(&self, line: &SetLine) -> Result<(), Violation> {
-        self.check(&line.changes)
+    /// A line whose verb takes a pattern (0.7.0): permitted under `all_free(Rwd)`
+    /// alone. Under any other policy the line's change is judged first, so the floor
+    /// and the policy's own refusals answer as they do for any line, and what they
+    /// would have let through is refused with `reason`.
+    fn check_unreadable(&self, line: &SetLine, reason: &str) -> Result<(), Violation> {
+        if self.is_all_free_rwd() {
+            return Ok(());
+        }
+        self.check(&line.changes)?;
+        Err(Violation {
+            // `parse_set_lines` gives such a line exactly one change.
+            change: line.changes.first().cloned().unwrap_or(Change {
+                op: Op::Delete,
+                path: Vec::new(),
+            }),
+            reason: reason.to_string(),
+        })
     }
 
-    /// `copy`: its target must be one the policy lets be written; the source is
-    /// neither changed nor removed (0.5.13). That the target is not there already
-    /// is checked against the device before the line is sent: a copy creates, it
-    /// does not overwrite.
-    fn check_copy(&self, line: &SetLine) -> Result<(), Violation> {
-        self.check(&line.changes)
+    /// `rename` and `copy` (0.5.13): the source of a `rename` must be one the policy
+    /// lets be deleted, and the target of either one it lets be set. Both write
+    /// everything under the target, so under rules a `Subtree` rule for `Set` must
+    /// cover everything under it as well (0.7.0): a `Node` rule for the target alone
+    /// let a `copy` write what a `set` of the same paths was refused. That the target
+    /// is not there already is checked against the device before the line is sent: a
+    /// rename or a copy creates, it does not overwrite.
+    fn check_written(&self, line: &SetLine, target: &[String]) -> Result<(), Violation> {
+        self.check(&line.changes)?;
+        // All-free enforces the access level alone, which `check` has done.
+        if self.mode != Mode::Rules {
+            return Ok(());
+        }
+        let covers = |path: &[String]| {
+            self.rules.iter().any(|r| {
+                r.m == Match::Subtree
+                    && r.ops.contains(&Op::Set)
+                    && r.pattern.len() <= path.len()
+                    && prefix_matches(&r.pattern, path)
+            })
+        };
+        // Under a nested configuration, its inner path as at the top level, or the
+        // path as written — as `check_one` reads a rule.
+        let nested = target.len() > 2 && is_nested_configuration(&target[0]);
+        if covers(target) || (nested && covers(&target[2..])) {
+            return Ok(());
+        }
+        Err(Violation {
+            change: Change {
+                op: Op::Set,
+                path: target.to_vec(),
+            },
+            reason: format!(
+                "a rename or a copy writes everything under its target «{}», and no rule \
+                 lets everything under it be set — a rule for the node alone is not enough \
+                 (denied, fail-closed)",
+                crate::redact::redact_secrets(&target.join(" "))
+            ),
+        })
     }
 
     fn check_one(&self, c: &Change) -> Result<(), Violation> {
@@ -1152,7 +1244,8 @@ fn matches_pattern(pattern: &[Pat], m: Match, path: &[String]) -> bool {
 /// against — and what is actually sent to the device must never diverge.
 ///
 /// **Note:** the variants that carry a configuration line (`EmptyPath`,
-/// `UnbalancedQuote`, `SingleQuote`, `Comment`) are **already redacted** with
+/// `UnbalancedQuote`, `SingleQuote`, `Comment`, `Hash`, `Target`) are **already
+/// redacted** with
 /// [`crate::redact::redact_secrets`] when they are constructed in
 /// [`parse_set_payload`], because the error text ends up in `NetconfError::Policy`
 /// and from there in the consumer's log. `UnknownVerb` carries the word, redacted the
@@ -1216,6 +1309,17 @@ pub enum ParseError {
     /// four tokens — and the policy then decides on a path nobody wrote. Inside a
     /// `"…"` string it is just a character, so `"Roger's link"` is unaffected.
     SingleQuote(String),
+    /// A `#` inside a word, outside a quoted string (0.7.0). A comment begins at the
+    /// start of a line or after whitespace; a value with a `#` in it goes in a
+    /// quoted string, as `"Uplink#2"`.
+    ///
+    /// The line used to be cut at the `#`: `description Uplink#2` was judged, and
+    /// sent, as `description Uplink`, and nothing said so.
+    Hash(String),
+    /// A `rename` or a `copy` whose target cannot be read (0.7.0): more than one
+    /// `to`, or what follows `to` is not a name on the source's own level — as
+    /// `unit 0 to unit 1` is, and `unit 0 to family inet` is not.
+    Target(String),
     /// A control character other than a tab in a line of the payload (0.5.7), or the
     /// Unicode line separator U+2028 or paragraph separator U+2029 (0.5.11): `line`
     /// is its line number, counted from 1 as `str::lines` counts, and `character` the
@@ -1266,6 +1370,18 @@ impl std::fmt::Display for ParseError {
                 f,
                 "single quote outside a string — only \" quotes a value (denied, fail-closed): «{l}»"
             ),
+            ParseError::Hash(l) => write!(
+                f,
+                "a # inside a word — a comment begins at the start of a line or after a \
+                 space, and a value with # in it goes in a quoted string (denied, \
+                 fail-closed): «{l}»"
+            ),
+            ParseError::Target(l) => write!(
+                f,
+                "the target of a rename or a copy cannot be read — one `to`, then the new \
+                 name on the same level as the old, as in `unit 0 to unit 1` (denied, \
+                 fail-closed): «{l}»"
+            ),
             ParseError::ControlCharacter { line, character } => write!(
                 f,
                 "a control character or line separator, U+{:04X}, on line {line} — a line ends \
@@ -1284,8 +1400,9 @@ impl std::error::Error for ParseError {}
 /// (plus the two-token verb `wildcard delete`).
 ///
 /// **Fail-closed:** an unknown verb (`edit` included), an empty path, an unbalanced
-/// quote, a single quote or a `/*` comment outside a string, or a control character
-/// other than a tab, causes the WHOLE payload to be refused ([`ParseError`]). A line
+/// quote, a single quote or a `/*` comment outside a string, a `#` inside a word, a
+/// `rename` or `copy` target that cannot be read, or a control character other than
+/// a tab, causes the WHOLE payload to be refused ([`ParseError`]). A line
 /// we do not understand is never silently skipped, because it would then reach the
 /// device without having passed the policy check — which is exactly the bypass
 /// surface.
@@ -1297,9 +1414,14 @@ impl std::error::Error for ParseError {}
 ///
 /// A `#` outside a quoted string makes the rest of its line a comment, and the line
 /// is read without it (0.5.13): `delete protocols # x` is `delete protocols`. A line
-/// that begins with `#` is a comment whole. Inside `"…"`, `#` is text. What
-/// `load_configuration` sends is the payload without its comments, so the device
-/// reads what the policy judged.
+/// that begins with `#` is a comment whole. Inside `"…"`, `#` is text. A `#` begins
+/// a comment at the start of a line or after whitespace; one inside a word is
+/// [`ParseError::Hash`] (0.7.0). What `load_configuration` sends is the payload
+/// without its comments, so the device reads what the policy judged.
+///
+/// The changes say what each line does to which path, and not which verb wrote it.
+/// A payload is judged whole, verbs included, by
+/// [`ConfigPolicy::check_set_payload`] (0.7.0).
 pub fn parse_set_payload(payload: &str) -> Result<Vec<Change>, ParseError> {
     Ok(parse_set_lines(payload)?
         .into_iter()
@@ -1314,6 +1436,12 @@ pub(crate) enum SetVerb {
     Rename { target: Vec<String> },
     /// `copy <path> to <tail>`: a `Set` of the target.
     Copy { target: Vec<String> },
+    /// `wildcard delete <path> <pattern>`: a `Delete` of what the pattern matches
+    /// (0.7.0; `Other` before).
+    WildcardDelete,
+    /// `replace pattern <pattern> with <text>`: what the pattern matches is rewritten
+    /// (0.7.0; `Other` before).
+    Replace,
     /// Every other verb.
     Other,
 }
@@ -1330,7 +1458,7 @@ impl SetLine {
     pub(crate) fn target(&self) -> Option<&[String]> {
         match &self.verb {
             SetVerb::Rename { target } | SetVerb::Copy { target } => Some(target),
-            SetVerb::Other => None,
+            SetVerb::WildcardDelete | SetVerb::Replace | SetVerb::Other => None,
         }
     }
 }
@@ -1339,10 +1467,26 @@ impl SetLine {
 /// the same level as the old one: `rename interfaces ge-0/0/0 unit 0 to unit 1`
 /// writes `interfaces ge-0/0/0 unit 1`, `rename interfaces ge-0/0/0 to ge-0/0/1`
 /// writes `interfaces ge-0/0/1`. The words after `to` replace as many words at the
-/// end of the source; as many as the source has, or more, are the whole path.
-fn written_by(source: &[String], to: &[String]) -> Vec<String> {
-    let keep = source.len().saturating_sub(to.len());
-    source[..keep].iter().chain(to).cloned().collect()
+/// end of the source.
+///
+/// Only a target on the source's own level is read (0.7.0): the words after `to` are
+/// fewer than the source's, and all but the last of them are the source's own, so
+/// `unit 0 to unit 1` names a sibling and nothing else. `None` for anything else —
+/// as many words as the source or more used to be taken for the whole path, which
+/// put the target in whatever tree the line named.
+fn written_by(source: &[String], to: &[String]) -> Option<Vec<String>> {
+    let (new_name, same) = to.split_last()?;
+    let keep = source
+        .len()
+        .checked_sub(to.len())
+        .filter(|keep| *keep > 0)?;
+    (source[keep..source.len() - 1] == *same).then(|| {
+        source[..source.len() - 1]
+            .iter()
+            .chain(std::iter::once(new_name))
+            .cloned()
+            .collect()
+    })
 }
 
 /// [`parse_set_payload`], line by line, with what each line's verb does.
@@ -1368,24 +1512,43 @@ pub(crate) fn parse_set_lines(payload: &str) -> Result<Vec<SetLine>, ParseError>
         // `/*` comment is refused, in `tokenize`, wherever it stands outside a quoted
         // string: skipping a line that opened one used to mean it went to the device
         // unchecked.
-        let line = uncommented(line.trim());
+        //
+        // A `#` begins a comment at the start of a line or after whitespace. One
+        // inside a word is refused (0.7.0): it used to cut the word there, and
+        // `description Uplink#2` went to the device as `description Uplink`.
+        let redacted = |line: &str| crate::redact::redact_secrets(line);
+        let line = line.trim();
+        let line = uncommented(line).ok_or_else(|| ParseError::Hash(redacted(line)))?;
         if line.is_empty() {
             continue;
         }
-        let mut toks = tokenize(line)?;
+        let marked = tokenize_marked(line)?;
+        // The unquoted `to` words of the line: `rename` and `copy` are split at the
+        // one there is. A quoted `"to"` is a name, as any quoted word is (0.7.0).
+        let keywords: Vec<usize> = marked
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, (word, quoted))| word == "to" && !quoted)
+            .map(|(i, _)| i - 1)
+            .collect();
+        let mut toks: Vec<String> = marked.into_iter().map(|(word, _)| word).collect();
         if toks.is_empty() {
             continue;
         }
         let verb = toks.remove(0);
         // `rename` and `copy` have a filter of their own (0.5.13): `<path> to <tail>`,
-        // both sides there, or the line is refused.
+        // both sides there, or the line is refused. One `to`, and a target on the
+        // source's own level (0.7.0): the first of several used to be the split, and
+        // a tail as long as the source was read as a path of its own.
         if verb == "rename" || verb == "copy" {
-            let to = toks.iter().position(|t| t == "to");
-            let (source, tail) = match to {
-                Some(i) if i > 0 && i + 1 < toks.len() => (&toks[..i], &toks[i + 1..]),
-                _ => return Err(ParseError::EmptyPath(crate::redact::redact_secrets(line))),
+            let (source, tail) = match keywords[..] {
+                [i] if i > 0 && i + 1 < toks.len() => (&toks[..i], &toks[i + 1..]),
+                [] | [_] => return Err(ParseError::EmptyPath(redacted(line))),
+                _ => return Err(ParseError::Target(redacted(line))),
             };
-            let target = written_by(source, tail);
+            let target =
+                written_by(source, tail).ok_or_else(|| ParseError::Target(redacted(line)))?;
             let set = Change {
                 op: Op::Set,
                 path: target.clone(),
@@ -1414,11 +1577,13 @@ pub(crate) fn parse_set_lines(payload: &str) -> Result<Vec<SetLine>, ParseError>
         // verb belongs is the first word on the line. A word `Display` gives a hint
         // for — `edit`, `SET` — holds nothing to redact and comes through as written.
         // The two-token verb `wildcard delete <path>`: remove class, highest risk.
-        let op = if verb == "wildcard" {
+        // It and `replace` take a pattern, and the line says so (0.7.0), since the
+        // change alone — an operation and a path — does not.
+        let (op, set_verb) = if verb == "wildcard" {
             match toks.first().map(String::as_str) {
                 Some("delete") => {
                     toks.remove(0);
-                    Op::Delete
+                    (Op::Delete, SetVerb::WildcardDelete)
                 }
                 other => {
                     return Err(ParseError::UnknownVerb(crate::redact::redact_secrets(
@@ -1427,14 +1592,20 @@ pub(crate) fn parse_set_lines(payload: &str) -> Result<Vec<SetLine>, ParseError>
                 }
             }
         } else {
-            verb_class(&verb)
-                .ok_or_else(|| ParseError::UnknownVerb(crate::redact::redact_secrets(&verb)))?
+            let op = verb_class(&verb)
+                .ok_or_else(|| ParseError::UnknownVerb(crate::redact::redact_secrets(&verb)))?;
+            let set_verb = if verb == "replace" {
+                SetVerb::Replace
+            } else {
+                SetVerb::Other
+            };
+            (op, set_verb)
         };
         if toks.is_empty() {
             return Err(ParseError::EmptyPath(crate::redact::redact_secrets(line)));
         }
         out.push(SetLine {
-            verb: SetVerb::Other,
+            verb: set_verb,
             changes: vec![Change { op, path: toks }],
         });
     }
@@ -1443,30 +1614,49 @@ pub(crate) fn parse_set_lines(payload: &str) -> Result<Vec<SetLine>, ParseError>
 
 /// Whether `path` is in a configuration given in set format — a line of it, read
 /// as a payload line is, begins with it (0.5.13).
-pub(crate) fn set_text_has(text: &str, path: &[String]) -> bool {
-    text.lines().any(|line| {
-        tokenize(uncommented(line.trim()))
-            .is_ok_and(|toks| toks.len() > path.len() && toks[1..].starts_with(path))
-    })
+///
+/// `None` when a line of the configuration cannot be read as a payload line is
+/// (0.7.0): the answer is then not known, and the caller refuses. Such a line used
+/// to be passed over, so a target standing on it alone read as not there.
+pub(crate) fn set_text_has(text: &str, path: &[String]) -> Option<bool> {
+    let mut found = false;
+    for line in text.lines() {
+        let toks = tokenize(uncommented(line.trim())?).ok()?;
+        found |= toks.len() > path.len() && toks[1..].starts_with(path);
+    }
+    Some(found)
 }
 
-/// `line` without its comment: from a `#` outside a quoted string to the end of the
-/// line, and the whitespace in front of it (0.5.13).
-fn uncommented(line: &str) -> &str {
+/// `line` without its comment: from a `#` that begins one to the end of the line,
+/// and the whitespace in front of it (0.5.13). A `#` begins a comment at the start
+/// of the line and after whitespace, outside a quoted string.
+///
+/// `None` when a `#` stands inside a word, outside a string (0.7.0): it is neither
+/// a comment as one is written nor a value the filter may cut. The line used to be
+/// cut there.
+fn uncommented(line: &str) -> Option<&str> {
     let mut quoting = Quoting::default();
+    let mut after_space = true;
     for (i, c) in line.char_indices() {
-        if let Read::Outside('#') = quoting.read(c) {
-            return line[..i].trim_end();
+        match quoting.read(c) {
+            Read::Outside('#') if after_space => return Some(line[..i].trim_end()),
+            Read::Outside('#') => return None,
+            Read::Outside(c) => after_space = c.is_whitespace(),
+            _ => after_space = false,
         }
     }
-    line
+    Some(line)
 }
 
 /// A set payload as [`parse_set_payload`] reads it: every line without its `#`
 /// comment (0.5.13). It is what goes to the device, so the device reads what the
-/// policy judged.
+/// policy judged. It is called on a payload [`parse_set_payload`] has read, so every
+/// line has a reading; one that had none would go as it stands.
 pub(crate) fn without_comments(payload: &str) -> String {
-    let mut out: Vec<&str> = payload.lines().map(uncommented).collect();
+    let mut out: Vec<&str> = payload
+        .lines()
+        .map(|line| uncommented(line).unwrap_or(line))
+        .collect();
     if payload.ends_with('\n') {
         out.push("");
     }
@@ -1530,6 +1720,16 @@ impl Quoting {
 /// outside a string gives [`ParseError::SingleQuote`] — both fail-closed, never
 /// silent. Only `"` quotes.
 fn tokenize(line: &str) -> Result<Vec<String>, ParseError> {
+    Ok(tokenize_marked(line)?
+        .into_iter()
+        .map(|(word, _)| word)
+        .collect())
+}
+
+/// [`tokenize`], with whether each token held a quoted section (0.7.0). The quotes
+/// are gone from the token, and a keyword is a keyword only as a bare word: `"to"`
+/// in a `rename` is a name.
+fn tokenize_marked(line: &str) -> Result<Vec<(String, bool)>, ParseError> {
     let mut toks = Vec::new();
     let mut cur = String::new();
     let mut quoting = Quoting::default();
@@ -1557,7 +1757,7 @@ fn tokenize(line: &str) -> Result<Vec<String>, ParseError> {
             }
             Read::Outside(ws) if ws.is_whitespace() => {
                 if !cur.is_empty() || quoted {
-                    toks.push(std::mem::take(&mut cur));
+                    toks.push((std::mem::take(&mut cur), quoted));
                     quoted = false;
                 }
             }
@@ -1573,7 +1773,7 @@ fn tokenize(line: &str) -> Result<Vec<String>, ParseError> {
         )));
     }
     if !cur.is_empty() || quoted {
-        toks.push(cur);
+        toks.push((cur, quoted));
     }
     Ok(toks)
 }

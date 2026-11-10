@@ -1305,3 +1305,142 @@ fn a_logical_system_is_judged_as_the_top_level() {
             .is_ok()
     );
 }
+
+/// **`wildcard delete` and `replace` take a pattern, and are refused outside
+/// `all_free(Rwd)`** (0.7.0): the filter cannot read what a pattern matches, so
+/// what is deleted is named, path by path.
+#[test]
+fn a_verb_that_takes_a_pattern_needs_all_free_rwd() {
+    // Every unit may be deleted by name. A pattern over them may not.
+    let units = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rwd);
+    assert!(
+        units
+            .check_set_payload("delete interfaces ge-0/0/0 unit 5")
+            .is_ok()
+    );
+    let e = units
+        .check_set_payload("wildcard delete interfaces ge-0/0/0 unit .*")
+        .unwrap_err();
+    assert!(e.contains("wildcard delete"), "{e}");
+    // The pattern that went past the floor: every interface, under a grant for one.
+    let broad =
+        ConfigPolicy::with_default_floor().allow("interfaces *", Match::Node, &[Op::Delete]);
+    assert!(
+        broad
+            .check_set_payload("delete interfaces ge-0/0/0")
+            .is_ok()
+    );
+    assert!(
+        broad
+            .check_set_payload("wildcard delete interfaces .*")
+            .is_err()
+    );
+    // `replace` is in the remove class, and refused under rules that let all be set
+    // and deleted.
+    assert_eq!(netconf::policy::verb_class("replace"), Some(Op::Delete));
+    let all = ConfigPolicy::new(&[]).allow("*", Match::Subtree, &[Op::Set, Op::Delete]);
+    let replace = "replace pattern ge-0/0/0 with ge-0/0/1";
+    let e = all.check_set_payload(replace).unwrap_err();
+    assert!(e.contains("replace"), "{e}");
+    for line in [replace, "wildcard delete interfaces .*"] {
+        assert!(
+            ConfigPolicy::all_free(Access::Rw)
+                .check_set_payload(line)
+                .is_err(),
+            "{line}"
+        );
+        assert!(
+            ConfigPolicy::all_free(Access::Rwd)
+                .check_set_payload(line)
+                .is_ok(),
+            "{line}"
+        );
+    }
+}
+
+/// **A `#` inside a word refuses the payload** (0.7.0). The line used to be cut
+/// there, and the device got another value than the one written.
+#[test]
+fn a_hash_inside_a_word_refuses_the_payload() {
+    assert!(matches!(
+        parse_set_payload("set interfaces ge-0/0/0 description Uplink#2"),
+        Err(ParseError::Hash(_))
+    ));
+    let quoted = parse_set_payload("set interfaces ge-0/0/0 description \"Uplink#2\"").unwrap();
+    assert_eq!(quoted[0].path.last().map(String::as_str), Some("Uplink#2"));
+}
+
+/// **A `rename` or a `copy` writes everything under its target** (0.7.0), so a
+/// rule for the target node alone does not permit one: a `Subtree` rule for `Set`
+/// has to cover what is under it.
+#[test]
+fn a_rename_or_copy_needs_a_rule_for_everything_under_its_target() {
+    let node_only = ConfigPolicy::with_default_floor()
+        .allow("interfaces * unit *", Match::Node, &[Op::Set, Op::Delete])
+        .allow(
+            "interfaces * unit * description",
+            Match::Subtree,
+            &[Op::Set],
+        );
+    assert!(
+        node_only
+            .check_set_payload("set interfaces ge-0/0/0 unit 20 family inet address 10.0.0.1/24")
+            .is_err()
+    );
+    for verb in ["copy", "rename"] {
+        let e = node_only
+            .check_set_payload(&format!("{verb} interfaces ge-0/0/0 unit 10 to unit 20"))
+            .unwrap_err();
+        assert!(e.contains("everything under its target"), "{verb}: {e}");
+    }
+    // The scope that grants units grants what is under them.
+    let units = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rwd);
+    for verb in ["copy", "rename"] {
+        assert!(
+            units
+                .check_set_payload(&format!("{verb} interfaces ge-0/0/0 unit 10 to unit 20"))
+                .is_ok(),
+            "{verb}"
+        );
+    }
+}
+
+/// **The target of a `rename` or a `copy` is a name on the source's own level,
+/// after one `to`** (0.7.0).
+#[test]
+fn a_rename_or_copy_target_is_a_sibling_after_one_to() {
+    for line in [
+        // Another tree: as many words as the source, or more, were the whole path.
+        "copy interfaces ge-0/0/0 unit 10 to interfaces ge-0/0/1 unit 10",
+        "copy interfaces ge-0/0/0 unit 10 to system login user admin class super-user",
+        // Another keyword on the same level.
+        "copy interfaces ge-0/0/0 unit 10 to family 20",
+        // Two `to`.
+        "rename interfaces ge-0/0/0 unit 10 to unit 20 to unit 30",
+    ] {
+        assert!(
+            matches!(parse_set_payload(line), Err(ParseError::Target(_))),
+            "{line}"
+        );
+    }
+    // A quoted `"to"` is a name, so this line has no `to` at all.
+    assert!(matches!(
+        parse_set_payload("rename interfaces ge-0/0/0 unit 10 \"to\" unit 20"),
+        Err(ParseError::EmptyPath(_))
+    ));
+}
+
+/// **`check_set_payload` answers as the session does** (0.7.0): the payload parsed,
+/// then every line judged.
+#[test]
+fn check_set_payload_parses_and_judges() {
+    let p = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rw);
+    assert!(
+        p.check_set_payload("set interfaces ge-0/0/0 unit 5 description x")
+            .is_ok()
+    );
+    let e = p.check_set_payload("set system host-name r1").unwrap_err();
+    assert!(e.contains("default-deny"), "{e}");
+    let e = p.check_set_payload("edit interfaces").unwrap_err();
+    assert!(e.contains("could not parse payload"), "{e}");
+}

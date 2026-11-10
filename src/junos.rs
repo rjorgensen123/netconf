@@ -86,6 +86,11 @@ impl<T: NetconfTransport> NetconfSession<T> {
     ///   `copy` line's target must not be in the candidate configuration already,
     ///   nor be written by a line before it (0.5.13): the candidate is read first,
     ///   and if it is there the payload is refused as `Policy` and nothing is sent.
+    ///   A candidate that cannot be read refuses it too (0.7.0). The lines are judged
+    ///   with their verbs, as
+    ///   [`check_set_payload`](crate::ConfigPolicy::check_set_payload) judges them:
+    ///   `wildcard delete` and `replace` need `all_free(Rwd)`, and a `rename` or a
+    ///   `copy` a rule for everything under its target (0.7.0).
     /// - **`Text` and `Xml`** cannot be parsed and checked, so they are refused
     ///   UNLESS the policy is `all_free(Rwd)`: full control as an explicit choice,
     ///   never as a gap.
@@ -481,7 +486,17 @@ impl<T: NetconfTransport> NetconfSession<T> {
                 .iter()
                 .flat_map(|l| &l.changes)
                 .any(|c| c.op == crate::policy::Op::Set && c.path.starts_with(target));
-            if written_before || crate::policy::set_text_has(&candidate, target) {
+            // A candidate with a line the filter cannot read gives no answer, and no
+            // answer is a refusal (0.7.0): it used to read as «not there».
+            let Some(there) = crate::policy::set_text_has(&candidate, target) else {
+                return Err(NetconfError::Policy(format!(
+                    "a line of the candidate configuration cannot be read as a set line, \
+                     so whether the target «{}» of a rename or copy is there already is \
+                     not known (denied, fail-closed)",
+                    crate::redact::redact_secrets(&target.join(" "))
+                )));
+            };
+            if written_before || there {
                 return Err(NetconfError::Policy(format!(
                     "the target «{}» of a rename or copy is there already{} — a rename or a \
                      copy creates, it does not overwrite (denied, fail-closed)",
@@ -987,19 +1002,37 @@ fn no_control(text: &str, refuse: &dyn Fn(String) -> NetconfError) -> Result<(),
 
 /// The text of the `<configuration-set>` in a `get-configuration` reply in set
 /// format (0.5.13).
+///
+/// A reply without the element is `Protocol`, carrying the reply (0.7.0), as a
+/// compare reply without `<configuration-output>` is: it used to read as an empty
+/// candidate, and a target in a candidate the device never showed read as not there.
+/// An element that is there and empty is an empty candidate. Text in a `CDATA`
+/// section is text (0.7.0; it was skipped).
 fn configuration_set(xml: &str) -> Result<String, NetconfError> {
     let mut reader = Reader::from_str(xml);
-    let (mut inside, mut out) = (false, String::new());
+    let (mut inside, mut seen, mut out) = (false, false, String::new());
     let broken =
         |e: String| NetconfError::protocol_with(format!("candidate: {}", printable(&e)), xml);
     loop {
         match reader.read_event().map_err(|e| broken(e.to_string()))? {
-            Event::Eof => return Ok(out),
-            Event::Start(e) if e.local_name().as_ref() == b"configuration-set" => inside = true,
+            Event::Eof if seen => return Ok(out),
+            Event::Eof => {
+                return Err(NetconfError::protocol_with(
+                    "candidate: the reply holds no <configuration-set>, so the candidate \
+                     configuration was not read",
+                    xml,
+                ));
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"configuration-set" => {
+                (inside, seen) = (true, true)
+            }
+            // An empty candidate: `<configuration-set/>`.
+            Event::Empty(e) if e.local_name().as_ref() == b"configuration-set" => seen = true,
             Event::End(e) if e.local_name().as_ref() == b"configuration-set" => inside = false,
             Event::Text(t) if inside => {
                 out.push_str(&t.xml10_content().map_err(|e| broken(e.to_string()))?)
             }
+            Event::CData(t) if inside => out.push_str(&String::from_utf8_lossy(&t)),
             Event::GeneralRef(r) if inside => out.push_str(
                 &crate::rpc::resolve_entity(&r, &|t: &str| t.to_string())
                     .map_err(|e| broken(e.to_string()))?,
