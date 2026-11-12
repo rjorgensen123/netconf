@@ -64,8 +64,15 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// [`unlock`](Self::unlock) goes through: the cleanup after a failed change
     /// discards the candidate only under the session's own lock. A lock taken with
     /// the raw [`rpc`](crate::NetconfSession::rpc) is not seen.
+    ///
+    /// **A lock is a change** (0.7.0; it passed as a read): it shuts everyone else
+    /// out of the candidate, so a policy that permits no change refuses it —
+    /// `read_only`, `all_free(Ro)`, rules without a change grant. So are
+    /// [`unlock`](Self::unlock), [`discard_changes`](Self::discard_changes) and
+    /// [`rollback`](Self::rollback) to 0, which throw away what is in the shared
+    /// candidate, others' work included.
     pub async fn lock(&mut self) -> Result<String, NetconfError> {
-        self.permit(Action::Read)?;
+        self.permit(Action::Change)?;
         let reply = self
             .rpc("<lock><target><candidate/></target></lock>")
             .await?;
@@ -76,7 +83,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// Unlock the candidate database. Returns the device's `<rpc-reply>` (0.5.13) —
     /// see [`lock`](Self::lock).
     pub async fn unlock(&mut self) -> Result<String, NetconfError> {
-        self.permit(Action::Read)?;
+        self.permit(Action::Change)?;
         let reply = self
             .rpc("<unlock><target><candidate/></target></unlock>")
             .await?;
@@ -205,6 +212,23 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// A commit changes the device, so a policy that permits no change refuses it
     /// before anything is sent (0.5.11): no policy bound, `all_deny`, `read_only`,
     /// `all_free(Ro)`, or rules without a change grant.
+    ///
+    /// **What a bare `commit` does not give you.** It puts the WHOLE candidate into
+    /// operation, and the candidate is shared: what someone else has left there
+    /// uncommitted goes with it, and so does anything loaded with the raw
+    /// [`rpc`](crate::NetconfSession::rpc). The policy read what this session
+    /// loaded, not what this commit puts into operation. Called on its own, it
+    ///
+    /// - shows you nothing of what goes into operation — there is no diff;
+    /// - holds no lock, so the candidate can change between your load and your
+    ///   commit;
+    /// - checks nothing against what you approved.
+    ///
+    /// That is yours to choose. To know what a commit carries, read
+    /// [`compare`](Self::compare) first; to have it held to what you approved, use
+    /// [`prepare_change`](Self::prepare_change) and
+    /// [`confirm_commit`](Self::confirm_commit), which lock, give you the diff, and
+    /// commit only when the candidate still is what you saw.
     ///
     /// **When a confirmed commit made on this session is waiting to be confirmed**,
     /// this is the commit that confirms it, and it first checks that the device is
@@ -447,30 +471,32 @@ impl<T: NetconfTransport> NetconfSession<T> {
 
     /// Roll the candidate back to rollback `n`; 0 is the last committed configuration.
     ///
-    /// Rollback 0 discards the candidate's changes and changes nothing on the device.
+    /// Rollback 0 discards the candidate's changes: nothing in operation changes, but
+    /// what anyone had in the shared candidate is gone, so it is a change (0.7.0; it
+    /// passed as a read) — see [`lock`](Self::lock).
     /// Rollback to a **previous** configuration loads it into the candidate whole, and
     /// the filter cannot read what it changes — so, like a `Text` or `Xml` load, it
     /// requires the deliberate `all_free(Rwd)` (0.5.11).
     ///
     /// Returns the device's `<rpc-reply>` (0.5.13) — see [`lock`](Self::lock).
     pub async fn rollback(&mut self, n: u32) -> Result<String, NetconfError> {
-        if n == 0 {
-            self.permit(Action::Read)?;
-        } else if !self.permit(Action::Change)?.is_all_free_rwd() {
+        if n > 0 && !self.permit(Action::Change)?.is_all_free_rwd() {
             return Err(NetconfError::Policy(format!(
                 "rollback {n} loads a previous configuration whole, which the policy cannot \
                  check; like a Text or Xml load it requires the deliberate \
                  ConfigPolicy::all_free(Rwd)"
             )));
         }
+        self.permit(Action::Change)?;
         let inner = format!("<load-configuration rollback=\"{n}\"/>");
         self.rpc(&inner).await
     }
 
     /// Discard every uncommitted change in the candidate. Returns the device's
-    /// `<rpc-reply>` (0.5.13) — see [`lock`](Self::lock).
+    /// `<rpc-reply>` (0.5.13) — see [`lock`](Self::lock). The candidate is shared,
+    /// so this is a change (0.7.0; it passed as a read).
     pub async fn discard_changes(&mut self) -> Result<String, NetconfError> {
-        self.permit(Action::Read)?;
+        self.permit(Action::Change)?;
         self.rpc("<discard-changes/>").await
     }
 

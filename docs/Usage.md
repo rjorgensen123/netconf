@@ -343,6 +343,16 @@ session.unlock().await?;
 Use `prepare_change` and `confirm_commit` when you can: the ordering is easy to get wrong by hand,
 and the mistake is silent. Note that `load_configuration` takes the action before the format.
 
+**What you give up with a bare `commit`.** It puts the whole candidate into operation, and the
+candidate is shared. Whatever someone else has left there uncommitted goes with your change, and
+the policy never read it: the policy reads what you load, not what the commit makes live. On its
+own, `commit` shows you no diff, holds no lock and checks nothing against what you approved.
+`prepare_change` and `confirm_commit` give you all three. If you commit by hand, lock first and
+read `compare()` before you commit, as above.
+
+`lock`, `unlock`, `discard_changes` and `rollback(0)` are changes: they need a policy that permits
+a change, since the candidate is everyone's.
+
 - `compare()` returns the diff text alone, empty when there is no change.
 - `rollback(0)` discards the candidate's changes. `rollback(n)` for `n > 0` loads an older
   configuration whole, which the filter cannot read, and requires `all_free(Rwd)`.

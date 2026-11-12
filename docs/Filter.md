@@ -176,11 +176,18 @@ choice of full control, not something a rule adds up to.
 against the policy before anything is sent. `Format::Text` and `Format::Xml` cannot be read into
 changes, so they are refused unless the policy is `all_free(Rwd)`. `rollback(n)` with `n > 0` loads
 a previous configuration whole, which the filter cannot read either, and has the same rule;
-`rollback(0)` discards the candidate's changes and changes nothing.
+`rollback(0)` discards the candidate's changes.
 
-**A policy that can change nothing commits nothing.** `load_configuration`, `prepare_change`,
-`commit` and `commit_confirmed` are refused before anything is sent under a policy with no change
-grant — `read_only`, `all_free(Ro)`, or rules that permit no operation.
+**A policy that can change nothing commits nothing, and does not touch the candidate.**
+`load_configuration`, `prepare_change`, `commit` and `commit_confirmed` are refused before anything
+is sent under a policy with no change grant — `read_only`, `all_free(Ro)`, or rules that permit no
+operation. So are `lock`, `unlock`, `discard_changes` and `rollback(0)`: the candidate is shared,
+so a lock shuts others out of it, and a discard throws away what they had in it.
+
+**The filter reads what you load, not what a commit puts into operation.** `commit` takes the
+whole candidate, and what someone else left there goes with it. `prepare_change` and
+`confirm_commit` lock, show you the diff and commit only what you saw; a bare `commit` is yours to
+choose, and `compare` says what it would carry.
 
 ### Unknown input is rejected — the whole payload
 
@@ -265,7 +272,8 @@ let policy = ConfigPolicy::with_default_floor().allow_command("request system st
 ```
 
 A grant is a prefix of whole words, compared as written. An empty grant grants nothing.
-`read_only` refuses every command but `show` whatever is granted; `all_free(Rwd)` runs every
+`read_only` and `all_free(Ro)` refuse every command but `show` whatever is granted; under
+`all_free(Rw)` a command beyond `show` needs its grant; `all_free(Rwd)` runs every
 command that is written as one: on one line, in printable ASCII, with its quotes closed. That
 policy is the access, not the format — a line break in a command is a second command to the
 device, whoever sent it.

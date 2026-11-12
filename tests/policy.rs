@@ -1548,3 +1548,23 @@ fn new_takes_a_floor_of_the_callers_own_and_the_rest_of_the_filter_holds() {
     // The device's secrets are redacted.
     assert!(!bare.secrets_allowed());
 }
+
+/// **`all_free(Ro)` runs no command beyond `show`, whatever is granted** (0.7.0),
+/// as `read_only` does. It says it allows no change, and let a granted `request`
+/// through all the same. `all_free(Rw)` is as it was: a command beyond `show`
+/// needs its grant.
+#[test]
+fn all_free_ro_runs_no_command_beyond_show_whatever_is_granted() {
+    let grant = "request system reboot";
+    for policy in [
+        ConfigPolicy::all_free(Access::Ro).allow_command(grant),
+        ConfigPolicy::read_only().allow_command(grant),
+    ] {
+        let e = policy.check_command(grant).unwrap_err();
+        assert!(e.contains("is refused whatever is granted"), "{e}");
+        policy.check_command("show version").unwrap();
+    }
+    let rw = ConfigPolicy::all_free(Access::Rw);
+    assert!(rw.check_command(grant).is_err());
+    rw.allow_command(grant).check_command(grant).unwrap();
+}

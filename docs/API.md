@@ -265,9 +265,10 @@ convention: each call replaces the policy, nothing enforces a single call. Every
 helper (§4, §5) passes it before anything goes on the wire: without a bound policy
 nothing is permitted — no read, no `show`, no command, no change — exactly as under
 `ConfigPolicy::all_deny()`, and a policy that can change nothing (`read_only`, `all_free(Ro)`,
-rules without a change grant) refuses `load_configuration`, `commit`, `commit_confirmed` and a
-`rollback` to a previous configuration, which loads one whole and so needs `all_free(Rwd)` like a
-`Text` load; `rollback(0)` only discards. The refusals are `NetconfError::Policy`: `no policy
+rules without a change grant) refuses `load_configuration`, `commit`, `commit_confirmed`, `lock`,
+`unlock`, `discard_changes` and `rollback` — the candidate is shared, so a lock shuts others out
+of it and a discard, or `rollback(0)`, throws away what they had in it. A `rollback` to a previous
+configuration loads one whole and so needs `all_free(Rwd)` like a `Text` load. The refusals are `NetconfError::Policy`: `no policy
 bound to the session — nothing is permitted, as under ConfigPolicy::all_deny() …`, `all-deny:
 nothing is permitted …`, `the policy bound to this session permits no change …`.
 
@@ -520,10 +521,20 @@ answers comes back. Warnings in a reply that succeeds are in `take_warnings()`. 
 
 **Every helper passes the session's policy first** — see `set_policy` in §2: no
 policy or `all_deny` refuses all of them before anything is sent; `load_configuration`, `prepare_change`,
-`commit`, `commit_confirmed` and `rollback(n > 0)` also need a policy that permits a change, and
+`commit`, `commit_confirmed`, `lock`, `unlock`, `discard_changes` and `rollback` also need a policy
+that permits a change, and
 `rollback(n > 0)` needs `all_free(Rwd)`: `rollback <n> loads a previous configuration whole, which
 the policy cannot check; like a Text or Xml load it requires the deliberate
 ConfigPolicy::all_free(Rwd)`.
+
+**What a bare `commit` does not give you.** `commit` puts the **whole candidate** into operation,
+and the candidate is shared: what someone else has left there uncommitted goes with it, and so does
+anything loaded with the raw `rpc`. The policy read what this session loaded, not what the commit
+puts into operation. Called on its own it shows nothing of what goes into operation, holds no lock
+— the candidate can change between a load and the commit — and checks nothing against what was
+approved. That is the consumer's to choose. `compare` shows what a commit would carry;
+`prepare_change` and `confirm_commit` (§5) lock, hand over the diff, and commit only when the
+candidate still is what was seen.
 
 **A confirmed commit is confirmed only into the state it was made in**. After
 `commit_confirmed` has been answered, the session reads `<get-commit-information/>` and keeps the
@@ -660,7 +671,7 @@ configuration, the two keywords matched as prefixes on the refusal side like
 <name>] [merge] [<tree>]` is a configuration read and judged as `show configuration <tree>` is,
 `ephemeral-configuration`, `instance` and `merge` matched as prefixes. Any other command needs an `allow_command` grant whose words are the
 command's first words, compared as written, or `all_free(Rwd)`;
-`read_only` refuses it whatever is granted; a blank grant grants nothing. An
+`read_only` and `all_free(Ro)` refuse it whatever is granted; a blank grant grants nothing. An
 empty command is refused.
 
 The other refusals read: `operational command outside the rule set: only `show ...` is allowed by
@@ -1023,7 +1034,8 @@ change …`.
 `all_free(access)` enforces **only the access level**, on any path — no scope rules and **no
 floor**. For reading, every `all_free` level opens every tree, `Ro` included; for commands beyond
 `show`, only `all_free(Rwd)` does: what the command does is then not checked, how it is written
-still is (§4) — `all_free` is the access, not the format. Nothing is
+still is (§4) — `all_free` is the access, not the format. `all_free(Ro)` runs no command beyond
+`show` whatever is granted, as `read_only`; under `all_free(Rw)` one needs its `allow_command` grant. Nothing is
 redacted under it. **It turns the filter off:** netconf then runs without the feature
 it exists for, and the floor, the read gate and the redaction hold for every policy but this one.
 It exists for consumers that need "read/write/delete everything", and must be chosen deliberately.

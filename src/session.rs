@@ -111,8 +111,8 @@ impl<T: NetconfTransport> NetconfSession<T> {
         if action == Action::Change && !policy.permits_any_change() {
             return Err(NetconfError::Policy(
                 "the policy bound to this session permits no change — no load, no \
-                 commit, no rollback; it has no change grant, or is read_only or \
-                 all_free(Ro)"
+                 commit, no rollback, no lock and no discard; it has no change grant, \
+                 or is read_only or all_free(Ro)"
                     .into(),
             ));
         }
@@ -688,11 +688,13 @@ pub struct SessionEnd {
 /// What a typed helper is about to do, for [`NetconfSession::permit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
-    /// A read, or a step of the change flow that changes nothing on the device:
-    /// lock, unlock, discard, commit check, compare.
+    /// A read, or a step that changes nothing on the device or in its candidate:
+    /// a configuration read, a command, commit check, compare.
     Read,
     /// A step that changes the device or its candidate: load, commit, commit
-    /// confirmed, rollback to a previous configuration.
+    /// confirmed, rollback — and lock, unlock and discard (0.7.0; they passed as
+    /// reads), since the candidate is shared: a lock shuts others out of it, and a
+    /// discard throws away what they had in it.
     Change,
 }
 

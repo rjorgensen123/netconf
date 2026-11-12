@@ -455,7 +455,12 @@ async fn all_deny_refuses_every_helper() {
 /// `commit_confirmed` and `load_configuration` before anything is sent, while
 /// `show` and reads go through. Rollback to a previous configuration loads it
 /// whole, which the filter cannot read, so it requires `all_free(Rwd)` like a
-/// `Text` load; rollback 0 only discards.
+/// `Text` load.
+///
+/// **And it does not touch the candidate** (0.7.0): `lock`, `unlock`,
+/// `discard_changes` and `rollback(0)` are refused too. They passed as reads,
+/// though the candidate is shared: a lock shuts others out of it, and a discard
+/// throws away what they had in it.
 #[tokio::test]
 async fn a_policy_that_changes_nothing_commits_nothing() {
     for policy in [
@@ -463,8 +468,7 @@ async fn a_policy_that_changes_nothing_commits_nothing() {
         ConfigPolicy::all_free(Access::Ro),
         ConfigPolicy::with_default_floor(),
     ] {
-        // The second reply answers the second request, so it carries no message-id.
-        let (mut s, log) = session_without_policy(vec![text_reply("x"), ok_reply_any()]).await;
+        let (mut s, log) = session_without_policy(vec![text_reply("x")]).await;
         let what = policy.describe();
         s.set_policy(policy);
         s.command("show version")
@@ -477,6 +481,10 @@ async fn a_policy_that_changes_nothing_commits_nothing() {
                 s.commit_confirmed(5, None).await.map(|_| ()),
             ),
             ("rollback 1", s.rollback(1).await.map(|_| ())),
+            ("rollback 0", s.rollback(0).await.map(|_| ())),
+            ("lock", s.lock().await.map(|_| ())),
+            ("unlock", s.unlock().await.map(|_| ())),
+            ("discard", s.discard_changes().await.map(|_| ())),
             (
                 "load",
                 s.load_configuration(
@@ -496,13 +504,24 @@ async fn a_policy_that_changes_nothing_commits_nothing() {
                 other => panic!("{what}, {step}: expected a Policy refusal, got {other:?}"),
             }
         }
-        s.rollback(0)
-            .await
-            .unwrap_or_else(|e| panic!("{what}: rollback 0 discards: {e:?}"));
+        // The `show` is the one request that went out.
         let sent = sent_str(&log);
-        assert!(!sent.contains("<commit-configuration"), "{what}: {sent}");
-        assert!(!sent.contains("rollback=\"1\""), "{what}: {sent}");
+        assert_eq!(sent.matches("<rpc ").count(), 1, "{what}: {sent}");
+        assert!(sent.contains("<command"), "{what}: {sent}");
     }
+    // With a change grant the candidate may be locked, discarded and unlocked.
+    let (mut s, log) = session(vec![
+        ok_reply_any(),
+        ok_reply_any(),
+        ok_reply_any(),
+        ok_reply_any(),
+    ])
+    .await;
+    s.lock().await.expect("lock");
+    s.discard_changes().await.expect("discard");
+    s.rollback(0).await.expect("rollback 0");
+    s.unlock().await.expect("unlock");
+    assert_eq!(sent_str(&log).matches("<rpc ").count(), 4);
     // With a change grant the commit goes through, and rollback 1 still needs all_free(Rwd).
     let (mut s, _l) = session(vec![ok_reply()]).await;
     s.commit(None).await.unwrap();

@@ -33,6 +33,9 @@ Every notable change to this crate is recorded here. The format follows
   elements, an end tag that closes the `<rpc>` it is sent in, `]]>]]>` in end-of-message framing —
   or none, or not well-formed, is refused as `Protocol` before anything is sent. It was sent as
   written, and the answer to the second request was read as the answer to the next one.
+- 2026-11-12 — `lock`, `unlock`, `discard_changes` and `rollback(0)` are changes, not reads: a
+  policy that permits no change refuses them. `all_free(Ro)` runs no command beyond `show`,
+  whatever is granted, as `read_only` does.
 - 2026-11-12 — `all_free(Rwd)` is the access, not the format: a command is checked for how it is
   written under every policy. A line break or another control character, a character outside
   ASCII, a quote left open, an empty pipe and an empty command are refused under `all_free(Rwd)`
@@ -91,6 +94,8 @@ Every notable change to this crate is recorded here. The format follows
   holds while it logs in. The Getting started block in the README is split in two.
 - 2026-11-12 — A connect refused for its `Timeouts` no longer spends the device's one legacy
   warning.
+- 2026-11-12 — The docs say what a bare `commit` does not give: it puts the whole shared
+  candidate into operation, with no diff, no lock and no check against what was approved.
 - 2026-11-12 — CI builds with the Rust version in `Cargo.toml`, builds the documentation, and
   checks the checksum of cargo-deny before running it.
 - 2026-11-12 — The README and the guide say that `ConfigPolicy::new` takes a floor of the

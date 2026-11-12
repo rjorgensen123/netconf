@@ -667,8 +667,10 @@ impl ConfigPolicy {
                      (denied, fail-closed)"
                 ));
             }
-            // Read-only permits no command beyond `show`, whatever is granted.
-            if self.mode == Mode::ReadOnly {
+            // Read-only permits no command beyond `show`, whatever is granted — and
+            // so does `all_free(Ro)` (0.7.0), which says it allows no change and let
+            // a granted `request` through all the same.
+            if matches!(self.mode, Mode::ReadOnly | Mode::AllFree(Access::Ro)) {
                 return Err(format!(
                     "read-only: only `show ...` is permitted — `{first}` is refused whatever \
                      is granted (denied, fail-closed)"
