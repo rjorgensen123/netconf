@@ -9,8 +9,9 @@
 //! The crate is deliberately narrow. A YANG model layer and a multi-vendor
 //! abstraction are non-goals. Device authentication is a **transient password**,
 //! accepted **only** as a `krypto::SecretString` — secrets cross this boundary as
-//! secret types and nothing else, so a password can never end up in ordinary heap
-//! as a `String`, a `&str` or an owned `Vec<u8>`. SSH keys are not used.
+//! secret types and nothing else. The SSH layer needs the password as text for the
+//! login: with the `russh-transport` feature one transient copy is made there and
+//! wiped after use, and russh holds its own while it logs in. SSH keys are not used.
 //!
 //! ```no_run
 //! # async fn ex<T: netconf::NetconfTransport>(t: T) -> Result<(), netconf::NetconfError> {

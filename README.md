@@ -14,8 +14,9 @@ change network equipment **without being trusted to do it responsibly.**
 - **License:** MIT or Apache-2.0, at your choice
 - **Transport:** pluggable. A mock transport is built in; real SSH lives behind the
   `russh-transport` feature
-- **Secrets:** the device password is taken *only* as a `krypto` secret type and never
-  becomes an ordinary `String`
+- **Secrets:** the device password is taken *only* as a `krypto` secret type. The SSH layer
+  needs it as text for the login: one transient copy is made there and wiped after use, and
+  the SSH library holds its own while it logs in
 - **Safety:** `#![forbid(unsafe_code)]`
 
 ## Status
@@ -76,9 +77,13 @@ That is the whole idea. Everything else here exists to make it hold.
 ```toml
 [dependencies]
 netconf = "0.6"
+```
 
-# Real SSH against a device. Without this feature the crate builds without russh
-# or tokio, which is what the offline tests use.
+Real SSH against a device is behind a feature. Without it the crate builds without russh or
+tokio, which is what the offline tests use:
+
+```toml
+[dependencies]
 netconf = { version = "0.6", features = ["russh-transport"] }
 ```
 

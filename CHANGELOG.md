@@ -78,6 +78,9 @@ Every notable change to this crate is recorded here. The format follows
   blocks with a label the filter does not know are redacted as before.
 - 2026-11-12 — The README and `docs/Filter.md` say what the raw `session.rpc` is: the one call
   outside the policy. The protection covers what is done through the crate's functions.
+- 2026-11-12 — The README and the crate documentation say how the password is handled: it does
+  become text once, a transient copy for the SSH login, wiped after use, beside the one russh
+  holds while it logs in. The Getting started block in the README is split in two.
 - 2026-11-12 — **Breaking:** `NetconfError::Timeout` and `SshMessages` have a new field, `stderr`.
   `Closed::detail` no longer holds the stderr text: it is in `ssh.stderr`.
 - 2026-11-12 — A redacted statement keeps the closing tags after it on the line:
