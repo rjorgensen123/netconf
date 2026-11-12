@@ -89,6 +89,8 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-12 — The README and the crate documentation say how the password is handled: it does
   become text once, a transient copy for the SSH login, wiped after use, beside the one russh
   holds while it logs in. The Getting started block in the README is split in two.
+- 2026-11-12 — A connect refused for its `Timeouts` no longer spends the device's one legacy
+  warning.
 - 2026-11-12 — **Breaking:** `NetconfError::Timeout` and `SshMessages` have a new field, `stderr`.
   `Closed::detail` no longer holds the stderr text: it is in `ssh.stderr`.
 - 2026-11-12 — A redacted statement keeps the closing tags after it on the line:

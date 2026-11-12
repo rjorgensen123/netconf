@@ -308,6 +308,9 @@ async fn start(device: Device, timeouts: Timeouts) -> ConnectOptions {
 /// test in this file.
 static EVENTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
+/// The level of every `ssh_connect` event, with its `username`, in order.
+static SSH_CONNECT_LEVELS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
 /// Every `netconf_subsystem_stderr` event, with all its fields as text, from every
 /// test in this file: the event has no `username`.
 static STDERR_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -374,6 +377,12 @@ impl tracing::Subscriber for Capture {
         event.record(&mut fields);
         if fields.event.as_deref() == Some("netconf_subsystem_stderr") {
             STDERR_EVENTS.lock().unwrap().push(fields.all.clone());
+        }
+        if let (Some("ssh_connect"), Some(username)) = (fields.event.as_deref(), &fields.username) {
+            SSH_CONNECT_LEVELS
+                .lock()
+                .unwrap()
+                .push((username.clone(), event.metadata().level().to_string()));
         }
         if let (Some(event), Some(username)) = (fields.event, fields.username) {
             EVENTS.lock().unwrap().push((event, username));
@@ -1171,4 +1180,47 @@ async fn a_device_that_keeps_writing_on_stderr_does_not_hold_a_read() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// **A connect refused for its `Timeouts` does not spend the legacy warning**
+/// (0.7.0). A device gets the full warning once. The `Timeouts` were checked after
+/// it was logged, so a refused connect took it, and the first real connection to
+/// the device went out without it.
+#[tokio::test]
+async fn a_connect_refused_for_its_timeouts_does_not_spend_the_legacy_warning() {
+    capture_events();
+    let levels = || -> Vec<String> {
+        SSH_CONNECT_LEVELS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(user, _)| user == "legacy-warning")
+            .map(|(_, level)| level.clone())
+            .collect()
+    };
+    // No test connects here under a legacy policy, and nothing listens on the port.
+    let mut opts = ConnectOptions {
+        host: "127.0.0.2".into(),
+        port: 1,
+        username: "legacy-warning".into(),
+        auth: Auth::Password(krypto::SecretString::from_string("test-password".into()).unwrap()),
+        ssh_policy: SshPolicy::LegacyJunos,
+        timeouts: Timeouts {
+            total: Duration::from_secs(3600),
+            ..Timeouts::default()
+        },
+        platform_hint: None,
+        host_key: Some("SHA256:not-reached".into()),
+    };
+    assert!(RusshTransport::connect(&opts).await.is_err());
+    assert!(levels().is_empty(), "{:?}", levels());
+
+    opts.timeouts = Timeouts {
+        connect: Duration::from_secs(2),
+        ..Timeouts::default()
+    };
+    assert!(RusshTransport::connect(&opts).await.is_err());
+    assert_eq!(levels(), ["WARN"]);
+    assert!(RusshTransport::connect(&opts).await.is_err());
+    assert_eq!(levels(), ["WARN", "INFO"]);
 }

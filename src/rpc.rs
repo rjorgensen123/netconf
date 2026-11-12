@@ -822,7 +822,7 @@ pub(crate) fn reply_message_id_raw(xml: &str) -> Option<String> {
                 if local_eq(e.local_name().as_ref(), b"rpc-reply") =>
             {
                 for attr in e.attributes().flatten() {
-                    if attr.key.local_name().as_ref() == b"message-id" {
+                    if local_eq(attr.key.local_name().as_ref(), b"message-id") {
                         return Some(String::from_utf8_lossy(&attr.value).into_owned());
                     }
                 }
@@ -994,6 +994,16 @@ fn set_field(de: &mut DeviceError, open: &OpenField, v: String) {
     *slot = Some(v);
 }
 
-fn local_eq(name: &[u8], want: &[u8]) -> bool {
+/// Whether the local name of an element or an attribute — its name without a
+/// namespace prefix — is `want`.
+///
+/// It is one comparison, and it is a function on purpose. Every place that asks
+/// what an element or an attribute is asks it here, so the rule for comparing
+/// names stands in one place: the name is compared whole, as bytes, and a
+/// namespace is not looked at. Written out at each of those places it would be the
+/// same line many times over, and a change to the rule would have to reach every
+/// one of them — the kind of code that is one day right in all places but one.
+/// Five places had it written out (0.7.0), and use this now.
+pub(crate) fn local_eq(name: &[u8], want: &[u8]) -> bool {
     name == want
 }

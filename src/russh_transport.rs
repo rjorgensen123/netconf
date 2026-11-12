@@ -753,17 +753,7 @@ impl RusshTransport {
             SshPolicy::Custom { .. } => "custom",
         };
         let legacy_allowed = !matches!(opts.ssh_policy, SshPolicy::Modern);
-        let host_key_mode = if opts.host_key.is_some() {
-            "pinned"
-        } else {
-            "enrollment"
-        };
 
-        // `Custom` promises «full manual control» in the API, but the names have to be
-        // resolved against russh's typed constants, and that mapping is not built. We
-        // cannot deliver what the API promises — and then we must **refuse**, not
-        // quietly do something else. The previous choice, falling back to legacy, did
-        // the opposite of what a consumer tightening things would expect.
         // BLIND TRUST-ON-FIRST-USE IS CLOSED.
         //
         // `connect()` authenticates — it **sends the network password**. Without a
@@ -783,14 +773,27 @@ impl RusshTransport {
             )));
         }
 
+        // `Custom` promises «full manual control» in the API, but the names have to be
+        // resolved against russh's typed constants, and that mapping is not built. We
+        // cannot deliver what the API promises — and then we must **refuse**, not
+        // quietly do something else. The previous choice, falling back to legacy, did
+        // the opposite of what a consumer tightening things would expect.
         if matches!(opts.ssh_policy, SshPolicy::Custom { .. }) {
             return Err(NetconfError::Transport(TransportError::Io(
                 CUSTOM_REFUSED.into(),
             )));
         }
 
+        // The session TTL, fail-closed: the range is validated BEFORE anything
+        // connects — and before the logging below (0.7.0; it came after it, and a
+        // connect refused for its `Timeouts` spent the legacy warning).
+        opts.timeouts
+            .validate()
+            .map_err(|m| NetconfError::Transport(TransportError::Io(m)))?;
+
         // Logged after the refusals above, so a connect that is refused does not
-        // spend the device's one legacy warning on nothing.
+        // spend the device's one legacy warning on nothing. A connect that gets
+        // here has a pinned host key: without one it was refused above.
         if !legacy_allowed {
             tracing::info!(
                 event = "ssh_connect",
@@ -798,7 +801,7 @@ impl RusshTransport {
                 port = opts.port,
                 username = %opts.username,
                 ssh_policy = policy_name,
-                host_key = host_key_mode,
+                host_key = "pinned",
                 "connecting to a device over SSH"
             );
         } else if warn_legacy_once(&opts.host) {
@@ -810,7 +813,7 @@ impl RusshTransport {
                 port = opts.port,
                 username = %opts.username,
                 ssh_policy = policy_name,
-                host_key = host_key_mode,
+                host_key = "pinned",
                 "LEGACY: connecting with an ssh policy that permits algorithms outside \
                  today's recommendations — a per-device opt-in, and not recommended"
             );
@@ -824,17 +827,13 @@ impl RusshTransport {
                 port = opts.port,
                 username = %opts.username,
                 ssh_policy = policy_name,
-                host_key = host_key_mode,
+                host_key = "pinned",
                 "LEGACY: connecting to a device with an ssh policy outside the current recommendation (see first warning)"
             );
         }
 
-        // The session TTL, fail-closed: the range is validated BEFORE anything
-        // connects, and the clock starts HERE — when connecting, not at the first
-        // RPC.
-        opts.timeouts
-            .validate()
-            .map_err(|m| NetconfError::Transport(TransportError::Io(m)))?;
+        // The clock of the session TTL starts HERE — when connecting, not at the
+        // first RPC.
         let started = std::time::Instant::now();
         let deadline = started + opts.timeouts.total;
         // The connection phase starts on the same clock. Every wait until `connect`

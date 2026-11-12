@@ -1392,8 +1392,8 @@ made printable in its text as well; under a policy that lets secrets through it 
 them, as the reply would, and `redact_secrets` is the filter for such a log line. russh's text is
 redacted where the transport takes it in, in the errors and in the events. The
 `ssh_connect` event is logged
-after the refusals for a missing pin and for `Custom`, so a refused connect does not spend the
-device's one legacy warning.
+after the refusals for a missing pin, for `Custom` and for `Timeouts` outside their frames, so a
+refused connect does not spend the device's one legacy warning.
 
 ---
 

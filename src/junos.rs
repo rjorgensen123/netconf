@@ -8,6 +8,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::{ConfirmedCheck, DeviceChanged, NetconfError};
+use crate::rpc::local_eq;
 use crate::session::{Action, NetconfSession};
 use crate::transport::{NetconfTransport, ReplyBudget};
 use crate::wire::printable;
@@ -733,7 +734,7 @@ fn date_time_seconds(e: &BytesStart<'_>) -> Option<String> {
     let attr = e
         .attributes()
         .flatten()
-        .find(|a| a.key.local_name().as_ref() == b"seconds")?;
+        .find(|a| local_eq(a.key.local_name().as_ref(), b"seconds"))?;
     let text = String::from_utf8_lossy(&attr.value).into_owned();
     Some(match crate::wire::strict_u64(&text) {
         Some(n) => n.to_string(),
@@ -1130,12 +1131,16 @@ fn configuration_set(xml: &str) -> Result<String, NetconfError> {
                     xml,
                 ));
             }
-            Event::Start(e) if e.local_name().as_ref() == b"configuration-set" => {
+            Event::Start(e) if local_eq(e.local_name().as_ref(), b"configuration-set") => {
                 (inside, seen) = (true, true)
             }
             // An empty candidate: `<configuration-set/>`.
-            Event::Empty(e) if e.local_name().as_ref() == b"configuration-set" => seen = true,
-            Event::End(e) if e.local_name().as_ref() == b"configuration-set" => inside = false,
+            Event::Empty(e) if local_eq(e.local_name().as_ref(), b"configuration-set") => {
+                seen = true
+            }
+            Event::End(e) if local_eq(e.local_name().as_ref(), b"configuration-set") => {
+                inside = false
+            }
             Event::Text(t) if inside => {
                 out.push_str(&t.xml10_content().map_err(|e| broken(e.to_string()))?)
             }
