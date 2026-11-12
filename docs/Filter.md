@@ -38,7 +38,7 @@ There are four kinds of policy:
 
 | Policy | Permits |
 |---|---|
-| `ConfigPolicy::with_default_floor()` | the ordinary policy: reads and `show`, plus whatever you grant, under the floor. `ConfigPolicy::new(&[...])` is the same with a floor of your own |
+| `ConfigPolicy::with_default_floor()` | the ordinary policy: reads and `show`, plus whatever you grant, under the floor. `ConfigPolicy::new(&[...])` is the same with a floor of your own: the list you give is the whole floor, and an empty list is no floor |
 | `ConfigPolicy::read_only()` | reads and `show`, and **no change and no other command, whatever is granted** — `allow_command` and change grants have no effect on it |
 | `ConfigPolicy::all_free(access)` | the access level alone, on any path — no rules, no floor, nothing redacted. The filter is off, deliberately |
 | `ConfigPolicy::all_deny()` | nothing at all — what a session without a policy has |

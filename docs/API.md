@@ -794,7 +794,7 @@ impl Access { pub fn permits(self, op: Op) -> bool; } // Ro→none · Rw→Set �
 
 pub struct ConfigPolicy;
 impl ConfigPolicy {
- pub fn new(protected_roots: &[&str]) -> Self;
+ pub fn new(protected_roots: &[&str]) -> Self; // a floor of the caller's own: the list is the whole floor, and an empty one is none; the rest of the filter holds
  pub fn with_default_floor() -> Self; // the ordinary policy: sensitive trees need allow_read
  pub fn read_only() -> Self; // show and reads as the ordinary policy; no command and no change, whatever is granted
  pub fn all_free(access: Access) -> Self;

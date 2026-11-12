@@ -349,6 +349,15 @@ pub struct ConfigPolicy {
 impl ConfigPolicy {
     /// A new policy with the given floor of protected top-level trees, and no allow
     /// rules yet.
+    ///
+    /// **The floor is the caller's own.** The list given is the whole floor: it
+    /// takes the place of [`DEFAULT_PROTECTED_ROOTS`], and an empty list is no
+    /// floor at all. That is on purpose — a consumer that needs another floor
+    /// writes it in its own source and answers for it. Everything else the filter
+    /// does holds as under [`with_default_floor`](Self::with_default_floor):
+    /// nothing is permitted without a rule, a payload is read as strictly, the
+    /// sensitive trees need their read grants, commands are gated and the device's
+    /// secrets are redacted. For netconf's own floor, use `with_default_floor`.
     pub fn new(protected_roots: &[&str]) -> Self {
         ConfigPolicy {
             protected_roots: protected_roots.iter().map(|s| s.to_string()).collect(),

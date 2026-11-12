@@ -1506,3 +1506,45 @@ fn all_free_is_the_access_not_the_format() {
         );
     }
 }
+
+/// **`ConfigPolicy::new` takes a floor of the caller's own, on purpose.** The list
+/// given is the whole floor, so an empty one is no floor: a rule can then permit
+/// what `with_default_floor` never does. Everything else the filter does holds.
+#[test]
+fn new_takes_a_floor_of_the_callers_own_and_the_rest_of_the_filter_holds() {
+    let wide = |p: ConfigPolicy| p.allow("system", Match::Node, &[Op::Delete]);
+
+    // The floor: netconf's own refuses, the caller's own decides.
+    assert!(
+        wide(ConfigPolicy::with_default_floor())
+            .check_set_payload("delete system")
+            .is_err()
+    );
+    wide(ConfigPolicy::new(&[]))
+        .check_set_payload("delete system")
+        .expect("no floor, and a rule that permits it");
+    assert!(
+        wide(ConfigPolicy::new(&["system"]))
+            .check_set_payload("delete system")
+            .is_err()
+    );
+
+    // The rest of the filter, with no floor at all.
+    let bare = ConfigPolicy::new(&[]);
+    // Nothing is permitted without a rule.
+    assert!(bare.check_set_payload("delete system").is_err());
+    assert!(bare.check_set_payload("set system host-name x").is_err());
+    // A payload is read as strictly.
+    assert!(
+        wide(ConfigPolicy::new(&[]))
+            .check_set_payload("frobnicate system")
+            .is_err()
+    );
+    // The sensitive trees need their read grants.
+    assert!(bare.check_command("show configuration system").is_err());
+    // Commands are gated.
+    assert!(bare.check_command("request system reboot").is_err());
+    bare.check_command("show version").unwrap();
+    // The device's secrets are redacted.
+    assert!(!bare.secrets_allowed());
+}

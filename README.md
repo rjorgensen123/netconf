@@ -58,10 +58,12 @@ That is the whole idea. Everything else here exists to make it hold.
   no command, no write. Not a warning, not a default-permit with a log line — it
   refuses, as `ConfigPolicy::all_deny()` does. The consumer defines the policy it uses.
   The raw `session.rpc` is the one call outside the policy, as said above.
-- **An absolute floor.** Some things cannot be permitted at all, no matter what policy
-  a consumer writes. A consumer can only ever narrow what it is allowed to do. The one
-  exception is `all_free`, which turns the filter off — a choice made out loud, never
-  a way around.
+- **An absolute floor.** Some things cannot be permitted at all, no matter what rules a
+  consumer writes: under the ordinary policy, rules can only ever narrow what it is
+  allowed to do. Two choices set the floor aside, and both are made out loud, in the
+  consumer's own source: `ConfigPolicy::new` takes a floor of the consumer's own, and
+  `all_free` turns the filter off. Under a floor of its own the rest of the filter holds
+  as before.
 - **Fail-closed parsing.** If a request cannot be understood well enough to judge it,
   it is refused. An unparsed request is never an allowed request.
 - **Reads are gated too.** Configuration is not only dangerous to write. Sensitive

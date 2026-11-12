@@ -355,8 +355,10 @@ and the mistake is silent. Note that `load_configuration` takes the action befor
 ## Building a policy
 
 The model is **where × what**: each rule says "at this place, these operations are allowed".
-**Everything else is denied.** On top of that there is a floor no rule can override. The full
-rules are in [Filter](Filter.md).
+**Everything else is denied.** On top of that there is a floor no rule can override. The floor
+is netconf's own under `with_default_floor()` and `read_only()`; `ConfigPolicy::new(&[...])` takes
+a floor you choose yourself, and an empty list is no floor — everything else the filter does holds
+all the same. The full rules are in [Filter](Filter.md).
 
 ```rust
 use netconf::{Access, ConfigPolicy, Match, Op, Scope};
