@@ -181,7 +181,8 @@ println!("{check}");             // everything: each step with its time, and wha
 ```
 
 Read as much of the report as you need: one word (`verdict()`), one line (`summary()`), or all of
-it (`steps()`, `stopped()`, `fingerprint()`, `capabilities()`, `session_id()`, `banner()`). The
+it (`steps()`, `stopped()`, `fingerprint()`, `capabilities()`, `session_id()`, `banner()`,
+`stderr()`). The
 verdict's bounds follow the time limit you give: `Ok` is under a tenth of it, `Slow` under half.
 
 It costs the device one connection, one login and one NETCONF session, opened and closed. It
@@ -477,6 +478,26 @@ The reply a call returns holds its own warnings as well. `take_warnings` also ha
 requests a call makes inside it, which you do not see — the diff read by `prepare_change`, the
 commit history read by `commit`.
 
+**What the device writes on stderr reaches you too.** Junos puts its explanation there when
+something is wrong with the NETCONF subsystem itself. A request that fails brings it in its error:
+`Timeout` has it in `stderr`, a closed connection in `ssh.stderr`, a refused subsystem in `stderr`.
+When the request went well and the device wrote something all the same, ask for it:
+
+```rust
+if let Some(said) = session.take_stderr() {
+    tracing::warn!(%said, "the device wrote on stderr");
+}
+```
+
+Each piece is handed over once. What you do not take goes with the next error, or comes back from
+`close()` in `end.ssh.stderr`.
+
+The text is free text from the device, and netconf treats it as sensitive: it is redacted whatever
+the policy, made printable, capped at 4096 bytes a session, and never written to netconf's own
+log. The redaction takes the secrets it knows the shape of. **A secret written in a form it does
+not know passes**, so handle the text as you handle the device's replies, and think before you log
+it.
+
 **What the session knows about the device:**
 
 ```rust
@@ -514,7 +535,7 @@ an `event` field:
 | `ssh_host_key_verified`, `ssh_host_key_mismatch` | the host key matched, or did not |
 | `ssh_session_established`, `ssh_session_closed` | the session is up, or closed |
 | `ssh_host_key_probe`, `ssh_host_key_enrollment`, `ssh_host_key_observed`, `ssh_host_key_probe_failed` | `observe_host_key` |
-| `netconf_subsystem_stderr` | the device wrote on the subsystem's stderr |
+| `netconf_subsystem_stderr` | the device wrote on the subsystem's stderr — how much, never what |
 | `secrets_in_diff` | a diff carries secrets because the policy lets them through — never the content |
 
 A password is never logged. A host or username with a control character is refused before it is
@@ -571,7 +592,7 @@ verify that the framing is handled.
 | `Device` | the device said no | read `message`, `path` and `explanation()` — that is Junos answering; further errors are in `also` |
 | `Transport` | the network, SSH, the login or the host key | see below |
 | `Protocol` | the device's answer could not be read, or did not belong to the request | `received` is what the device sent |
-| `Timeout` | a time limit ran out | `op` says which; `partial` is what had arrived |
+| `Timeout` | a time limit ran out | `op` says which; `partial` is what had arrived; `stderr` is what the device wrote on stderr |
 | `CommittedThenFailed` | the commit went in, then a later step failed | the change is live; `reply` is the device's answer to the commit |
 | `CommitUnanswered` | a commit was sent and no readable answer came back | the device has not said whether it took effect — see «A request that got no answer» below |
 | `WithReplies` | an operation failed after some of its requests went through | handle `error`; `replies` are the device's answers to those |

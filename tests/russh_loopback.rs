@@ -46,7 +46,25 @@ enum Device {
     /// subsystem opens, answers `<close-session/>` with `<ok/>`, and at the
     /// client's EOF sends the subsystem's exit status and closes the channel.
     ClosesCleanly,
+    /// Writes on stderr why, then answers the subsystem request with a failure.
+    ExplainsTheRefusal,
+    /// Opens the subsystem, and at the first data it is sent writes on stderr why,
+    /// then closes the channel.
+    ExplainsAndCloses,
+    /// Opens the subsystem, and at the first data it is sent writes on stderr why,
+    /// then never answers.
+    ExplainsAndStalls,
+    /// Writes on stderr why, and never answers the subsystem request.
+    ExplainsAndNeverOpens,
+    /// A small NETCONF device like `ClosesCleanly` that writes on stderr as well:
+    /// with its hello, and again at the client's EOF.
+    Chatty,
 }
+
+/// What the devices that explain themselves write on stderr: a line to read, and
+/// one with a secret in it.
+const EXPLANATION: &str = "netconf: database locked by another session\n\
+                           authentication-key \"$9$stderr-leak\";\n";
 
 /// The banner the devices that say goodbye show before the login.
 const BANNER: &str = "Authorized use only\nmaintenance window 22:00-23:00";
@@ -64,6 +82,11 @@ impl Device {
             Device::Disconnects => "disconnects",
             Device::DataAfterEof => "data-after-eof",
             Device::ClosesCleanly => "closes-cleanly",
+            Device::ExplainsTheRefusal => "explains-the-refusal",
+            Device::ExplainsAndCloses => "explains-and-closes",
+            Device::ExplainsAndStalls => "explains-and-stalls",
+            Device::ExplainsAndNeverOpens => "explains-and-never-opens",
+            Device::Chatty => "chatty",
         }
     }
 }
@@ -80,9 +103,10 @@ impl russh::server::Handler for Handler {
 
     async fn authentication_banner(&mut self) -> Result<Option<String>, Self::Error> {
         Ok(match self.device {
-            Device::EndsTheSubsystem | Device::Disconnects | Device::ClosesCleanly => {
-                Some(BANNER.into())
-            }
+            Device::EndsTheSubsystem
+            | Device::Disconnects
+            | Device::ClosesCleanly
+            | Device::Chatty => Some(BANNER.into()),
             _ => None,
         })
     }
@@ -119,14 +143,27 @@ impl russh::server::Handler for Handler {
     ) -> Result<(), Self::Error> {
         match self.device {
             Device::NoNetconf => session.channel_failure(channel),
+            Device::ExplainsTheRefusal => {
+                session.extended_data(channel, 1, EXPLANATION.as_bytes())?;
+                session.channel_failure(channel)
+            }
+            Device::ExplainsAndNeverOpens => {
+                session.extended_data(channel, 1, EXPLANATION.as_bytes())
+            }
+            Device::ExplainsAndCloses | Device::ExplainsAndStalls => {
+                session.channel_success(channel)
+            }
             Device::NeverReads
             | Device::RejectsPassword
             | Device::NeverAnswersLogin
             | Device::EndsTheSubsystem
             | Device::Disconnects
             | Device::DataAfterEof => session.channel_success(channel),
-            Device::ClosesCleanly => {
+            Device::ClosesCleanly | Device::Chatty => {
                 session.channel_success(channel)?;
+                if let Device::Chatty = self.device {
+                    session.extended_data(channel, 1, &b"warning: chatty-hello\n"[..])?;
+                }
                 let hello = "<hello xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\">\
                              <capabilities><capability>urn:ietf:params:xml:ns:netconf:base:1.0\
                              </capability></capabilities><session-id>9</session-id></hello>]]>]]>";
@@ -140,7 +177,10 @@ impl russh::server::Handler for Handler {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Device::ClosesCleanly = self.device {
+        if let Device::ClosesCleanly | Device::Chatty = self.device {
+            if let Device::Chatty = self.device {
+                session.extended_data(channel, 1, &b"chatty-goodbye"[..])?;
+            }
             session.exit_status_request(channel, 0)?;
             session.close(channel)?;
         }
@@ -173,7 +213,16 @@ impl russh::server::Handler for Handler {
                 "going down for maintenance",
                 "en",
             )?,
-            Device::ClosesCleanly if data.windows(13).any(|w| w == b"close-session") => {
+            Device::ExplainsAndCloses => {
+                session.extended_data(channel, 1, EXPLANATION.as_bytes())?;
+                session.close(channel)?;
+            }
+            Device::ExplainsAndStalls => {
+                session.extended_data(channel, 1, EXPLANATION.as_bytes())?;
+            }
+            Device::ClosesCleanly | Device::Chatty
+                if data.windows(13).any(|w| w == b"close-session") =>
+            {
                 let ok = "<rpc-reply xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\" \
                           message-id=\"1\"><ok/></rpc-reply>]]>]]>";
                 session.data(channel, ok.as_bytes())?;
@@ -239,6 +288,10 @@ async fn start(device: Device, timeouts: Timeouts) -> ConnectOptions {
 /// test in this file.
 static EVENTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
+/// Every `netconf_subsystem_stderr` event, with all its fields as text, from every
+/// test in this file: the event has no `username`.
+static STDERR_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// The events emitted for `username`.
 fn events_for(username: &str) -> Vec<String> {
     EVENTS
@@ -278,22 +331,30 @@ impl tracing::Subscriber for Capture {
         struct Fields {
             event: Option<String>,
             username: Option<String>,
+            /// Every field, `name=value`.
+            all: String,
         }
         impl tracing::field::Visit for Fields {
             fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
                 if field.name() == "event" {
                     self.event = Some(value.to_string());
                 }
+                self.all.push_str(&format!("{}={value} ", field.name()));
             }
-            // `username = %…` arrives here, rendered through its `Display`.
+            // `username = %…` arrives here, rendered through its `Display`, and so
+            // does every field that is not a string.
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
                 if field.name() == "username" {
                     self.username = Some(format!("{value:?}"));
                 }
+                self.all.push_str(&format!("{}={value:?} ", field.name()));
             }
         }
         let mut fields = Fields::default();
         event.record(&mut fields);
+        if fields.event.as_deref() == Some("netconf_subsystem_stderr") {
+            STDERR_EVENTS.lock().unwrap().push(fields.all.clone());
+        }
         if let (Some(event), Some(username)) = (fields.event, fields.username) {
             EVENTS.lock().unwrap().push((event, username));
         }
@@ -845,4 +906,206 @@ async fn a_device_check_tells_no_contact_from_a_check_that_never_started() {
 
     opts.host_key = None;
     assert!(check_device(&opts).await.is_err());
+}
+
+/// What the devices that explain themselves wrote, as it is handed over: redacted,
+/// and printable.
+fn assert_explained(text: &str) {
+    assert!(
+        text.starts_with("netconf: database locked by another session\\nauthentication-key "),
+        "{text}"
+    );
+    assert!(!text.contains("stderr-leak"), "a secret leaked: {text}");
+}
+
+/// **What a device writes on stderr before it refuses the subsystem goes with the
+/// refusal** — redacted (0.7.0; it was made printable only).
+#[tokio::test]
+async fn a_refusal_carries_what_the_device_wrote_on_stderr() {
+    let opts = start(Device::ExplainsTheRefusal, Timeouts::default()).await;
+    let e = RusshTransport::connect(&opts)
+        .await
+        .err()
+        .expect("the device refuses the subsystem");
+    let text = e.to_string();
+    let NetconfError::Transport(TransportError::SubsystemUnavailable { stderr, ssh }) = e else {
+        panic!("expected SubsystemUnavailable, got {text}");
+    };
+    assert_explained(&stderr);
+    assert_eq!(ssh.stderr, None);
+    assert!(!text.contains("stderr-leak"), "{text}");
+}
+
+/// **A device that says why and closes the channel is `Closed`, with what it wrote
+/// on stderr in `ssh.stderr`** (0.7.0; part of `detail` before, and not redacted).
+#[tokio::test]
+async fn a_close_carries_what_the_device_wrote_on_stderr() {
+    let opts = start(Device::ExplainsAndCloses, Timeouts::default()).await;
+    let mut transport = RusshTransport::connect(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the device opens the subsystem");
+    transport.send(b"<hello/>").await.expect("the send");
+    let e = tokio::time::timeout(Duration::from_secs(20), transport.recv())
+        .await
+        .expect("the read outlived its budget")
+        .expect_err("the device closed the channel");
+    let text = e.to_string();
+    let NetconfError::Transport(TransportError::Closed { detail, ssh, .. }) = e else {
+        panic!("expected Closed, got {text}");
+    };
+    assert_eq!(detail, "the device closed the netconf subsystem");
+    assert_explained(ssh.stderr.as_deref().expect("what the device wrote"));
+    assert!(text.contains("; the device wrote on stderr: netconf: database locked"));
+    assert!(!text.contains("stderr-leak"), "{text}");
+}
+
+/// **A device that says why and then goes silent gives a timeout that carries what
+/// it wrote** (0.7.0). The error used to be the bare timeout, and the device's
+/// explanation was only in the log. It is handed over once: the next read's
+/// timeout has none of it.
+#[tokio::test]
+async fn a_timeout_carries_what_the_device_wrote_on_stderr() {
+    let opts = start(
+        Device::ExplainsAndStalls,
+        Timeouts {
+            per_rpc: Duration::from_secs(1),
+            ..Timeouts::default()
+        },
+    )
+    .await;
+    let mut transport = RusshTransport::connect(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the device opens the subsystem");
+    transport.send(b"<hello/>").await.expect("the send");
+    let e = tokio::time::timeout(Duration::from_secs(20), transport.recv())
+        .await
+        .expect("the read outlived its budget")
+        .expect_err("the device never answers");
+    let text = e.to_string();
+    let NetconfError::Timeout { op, stderr, .. } = e else {
+        panic!("expected Timeout, got {text}");
+    };
+    assert_eq!(op, "rpc-recv");
+    assert_explained(&stderr);
+    assert!(text.starts_with("timeout: rpc-recv; the device wrote on stderr: netconf: "));
+
+    match transport.recv().await {
+        Err(NetconfError::Timeout { op, stderr, .. }) => {
+            assert_eq!(op, "rpc-recv");
+            assert_eq!(stderr, "");
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+    assert_eq!(transport.take_stderr(), None);
+}
+
+/// **What a device writes on stderr while all goes well is there for the taking,
+/// once, and what it writes as the session ends comes with the close** (0.7.0). It
+/// was only in the log.
+#[tokio::test]
+async fn what_the_device_wrote_on_stderr_is_handed_over_when_nothing_failed() {
+    let opts = start(Device::Chatty, Timeouts::default()).await;
+    let transport = RusshTransport::connect(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the device opens the subsystem");
+    let mut s = netconf::NetconfSession::establish(transport, false)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the hello exchange");
+    assert_eq!(s.take_stderr().as_deref(), Some("warning: chatty-hello"));
+    assert_eq!(s.take_stderr(), None);
+
+    let end = tokio::time::timeout(Duration::from_secs(20), s.close())
+        .await
+        .expect("close outlived its budget")
+        .map_err(|e| e.to_string())
+        .expect("a clean close");
+    // The device did not end this line; the session is over, so it goes as it is.
+    assert_eq!(end.ssh.stderr.as_deref(), Some("chatty-goodbye"));
+    assert_eq!(end.ssh.exit_status, Some(0));
+}
+
+/// **The log says that a device wrote on stderr, and how much — not what** (0.7.0).
+/// The text is free text from the device: the redaction takes what it knows the
+/// shape of, and the log is no place for the rest.
+#[tokio::test]
+async fn the_log_does_not_carry_what_the_device_wrote_on_stderr() {
+    let opts = start(Device::ExplainsTheRefusal, Timeouts::default()).await;
+    let _ = RusshTransport::connect(&opts).await;
+    let events = STDERR_EVENTS.lock().unwrap().clone();
+    let bytes = format!("bytes={} ", EXPLANATION.len());
+    assert!(
+        events
+            .iter()
+            .any(|e| e.contains(&bytes) && e.contains("cut=false")),
+        "{events:?}"
+    );
+    for text in ["database locked", "stderr-leak", "chatty"] {
+        assert!(
+            !events.iter().any(|e| e.contains(text)),
+            "{text}: {events:?}"
+        );
+    }
+}
+
+/// **A device that says why and never answers the subsystem request gives a timeout
+/// that carries what it wrote** (0.7.0). The connection attempt ends there, so all
+/// of it goes with the timeout.
+#[tokio::test]
+async fn a_timeout_opening_the_subsystem_carries_what_the_device_wrote_on_stderr() {
+    let opts = start(
+        Device::ExplainsAndNeverOpens,
+        Timeouts {
+            connect: Duration::from_secs(2),
+            ..Timeouts::default()
+        },
+    )
+    .await;
+    let e = tokio::time::timeout(Duration::from_secs(20), RusshTransport::connect(&opts))
+        .await
+        .expect("connect outlived its budget")
+        .err()
+        .expect("the device never opens the subsystem");
+    let text = e.to_string();
+    let NetconfError::Timeout { op, stderr, .. } = e else {
+        panic!("expected Timeout, got {text}");
+    };
+    assert_eq!(op, "ssh-subsystem");
+    assert_explained(&stderr);
+}
+
+/// **A device check that runs to its end reports what the device wrote on stderr**
+/// (0.7.0): a device that answers every step can still be saying that something is
+/// wrong. A check that stops has the text in its error.
+#[tokio::test]
+async fn a_device_check_reports_what_the_device_wrote_on_stderr() {
+    use netconf::russh_transport::{CheckStep, check_device};
+
+    let opts = start(Device::Chatty, Timeouts::default()).await;
+    let check = check_device(&opts).await.expect("a report");
+    assert!(check.stopped().is_none(), "{check}");
+    assert_eq!(
+        check.stderr(),
+        Some("warning: chatty-hello\\nchatty-goodbye")
+    );
+    let full = check.to_string();
+    assert!(
+        full.contains("\n  stderr: warning: chatty-hello\\nchatty-goodbye"),
+        "{full}"
+    );
+
+    let opts = start(Device::ExplainsTheRefusal, Timeouts::default()).await;
+    let check = check_device(&opts).await.expect("a report");
+    let (step, error) = check.stopped().expect("the check stopped");
+    assert_eq!(step, CheckStep::Netconf);
+    let text = error.to_string();
+    assert!(
+        text.contains("the device said: netconf: database locked"),
+        "{text}"
+    );
+    assert!(!check.to_string().contains("stderr-leak"), "{check}");
+    assert_eq!(check.stderr(), None);
 }

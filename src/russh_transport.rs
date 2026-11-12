@@ -52,8 +52,7 @@ fn note(said: &StdMutex<SshMessages>, add: impl FnOnce(&mut SshMessages)) {
 /// A failure where the connection or the channel may be gone: `Closed`, carrying
 /// what the device said over SSH, when it said anything (0.5.13); otherwise `Io`
 /// with the text, as before.
-fn ended(detail: impl std::fmt::Display, said: &StdMutex<SshMessages>) -> NetconfError {
-    let ssh = said_now(said);
+fn ended(detail: impl std::fmt::Display, ssh: SshMessages) -> NetconfError {
     if ssh.is_empty() {
         return io_err(detail);
     }
@@ -260,11 +259,16 @@ const CUSTOM_REFUSED: &str = "SshPolicy::Custom is not implemented yet — use M
                               LegacyJunos. We refuse rather than negotiate with a \
                               different algorithm list than the one you asked for.";
 
-/// A cap on how much of the subsystem's stderr we keep. Enough to carry an
-/// explanation, too little for a device that floods it to fill our memory.
+/// A cap on how much of the subsystem's stderr we keep in a session. Enough to
+/// carry an explanation, too little for a device that floods it to fill our memory.
 const MAX_STDERR: usize = 4096;
 
+/// What a text handed over says when the device wrote more than is kept.
+const STDERR_CUT: &str = "[cut: the device wrote more than 4096 bytes on stderr in this session, \
+                          and the rest was not kept]";
+
 /// Append `text` to the kept stderr, never letting it grow past `cap` bytes.
+/// Whether all of it was kept.
 ///
 /// The cut lands on a character boundary. `String::truncate` panics when the
 /// length it is given falls inside a character, and `from_utf8_lossy` turns every
@@ -274,69 +278,117 @@ const MAX_STDERR: usize = 4096;
 ///
 /// A separate function so the cut can be unit-tested without SSH, like
 /// `close_outcome`.
-fn append_capped(buf: &mut String, text: &str, cap: usize) {
-    if buf.len() >= cap {
-        return;
-    }
-    let mut end = (cap - buf.len()).min(text.len());
+fn append_capped(buf: &mut String, text: &str, cap: usize) -> bool {
+    let mut end = cap.saturating_sub(buf.len()).min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     buf.push_str(&text[..end]);
+    end == text.len()
 }
 
-/// What the device wrote on stderr, as it leaves the transport: with the device's
-/// secrets redacted, then made printable (0.7.0). The text is kept as the device
-/// wrote it, and nothing of it goes out — into the log, `SubsystemUnavailable` or
-/// `close_outcome` — but through here. It used to go out made printable only, so a
-/// secret the device wrote there was in the error and in the log.
+/// What the subsystem has written on stderr in this session, and how much of it
+/// has been handed over (0.7.0).
 ///
-/// The transport has no policy to ask, so the redaction is the one a reply passes
-/// where none is bound: [`redact_secrets`](crate::redact::redact_secrets). The
-/// order matters: redacted first, as the device wrote it, and printable after.
-fn stderr_text(kept: &str) -> String {
-    printable(crate::redact::redact_secrets(kept).trim())
+/// Junos puts its explanation there when something is wrong with the subsystem
+/// itself, and that explanation is often the only thing that says WHY. We do not
+/// INTERPRET it: it is kept, and handed to whoever it concerns — in the error of
+/// the request that failed, to the session when it asks, and what is left when
+/// the transport closes. Each piece is handed over once.
+///
+/// It is free text from the device, and it is treated as sensitive:
+///
+/// - **Capped.** At most `MAX_STDERR` bytes are kept in a session. What comes after
+///   is dropped, unread; the text handed over says so, once, and so does the log.
+/// - **Redacted, whatever the policy.** The transport has no policy to ask, so the
+///   redaction is the one a reply passes where none is bound. The text is kept as
+///   the device wrote it and redacted whole each time some of it is handed over:
+///   it comes in pieces, and a piece alone can not be redacted — the name of a
+///   secret statement may be in the piece before it, and so may the `-----BEGIN`
+///   line of a private key. That is also why nothing is removed when it is handed
+///   over; `given` says how far that has come.
+/// - **In ended lines.** What makes a word a secret may come after it on its line,
+///   so a line is handed over when the device has ended it. One it has not ended
+///   waits for the end of the session, where nothing more can come.
+/// - **Printable**, after the redaction: a control character the device wrote stays
+///   visible instead of acting on a terminal or a log.
+/// - **Not logged.** The redaction takes what it knows the shape of, and a secret
+///   in a form it does not know would pass. The event says that the device wrote,
+///   and how much.
+/// - **Wiped** when the transport is dropped. The copies the redaction works on
+///   are not.
+struct Stderr {
+    kept: zeroize::Zeroizing<String>,
+    /// How far into `kept` has been handed over: always where a line begins, or
+    /// the end.
+    given: usize,
+    /// The device wrote more than is kept.
+    cut: bool,
+    /// A text handed over has said so.
+    cut_told: bool,
 }
 
-/// The text of the log line for what the device has just written on stderr: the
-/// lines it ended, from the one byte `had` of `kept` is on, where what was just
-/// written begins (0.7.0).
-///
-/// The device's text comes in pieces, and a piece alone can not be redacted: the
-/// name of a secret statement may be in the piece before it, and so may the
-/// `-----BEGIN` line of a private key; and what makes a word a secret may come
-/// after it on its line. So all that is kept is redacted, and the log line carries
-/// the lines the new piece ended. A line the device has not ended is logged when
-/// it ends. A piece the cap left no room for is not kept, and is not logged
-/// either.
-fn stderr_log_text(kept: &str, had: usize) -> String {
-    let first = kept[..had].matches('\n').count();
-    let redacted = crate::redact::redact_secrets(kept);
-    // The last part is the line not ended yet, or empty after the last line end.
-    let mut lines: Vec<&str> = redacted.split('\n').collect();
-    lines.pop();
-    let ended = lines.get(first..).unwrap_or_default();
-    printable(ended.join("\n").trim())
-}
+impl Stderr {
+    fn new() -> Self {
+        Stderr {
+            // All it will hold, so it is never moved, and never left behind unwiped.
+            kept: zeroize::Zeroizing::new(String::with_capacity(MAX_STDERR)),
+            given: 0,
+            cut: false,
+            cut_told: false,
+        }
+    }
 
-/// Keep what the subsystem wrote on stderr, capped, and log it.
-///
-/// We do not INTERPRET it — we keep it and log it, so it can travel with the error
-/// if the session breaks. `ext == 1` is stderr (RFC 4254 §5.2); other codes do not
-/// occur in practice, but we take them the same way rather than filtering them out.
-/// Wherever the text goes out — this log line, `SubsystemUnavailable`,
-/// `close_outcome` — it has the device's secrets redacted (0.7.0; see
-/// `stderr_text`) and is made printable (0.5.11): a control character the device
-/// wrote stays visible on the line instead of acting on the terminal or the log.
-fn keep_stderr(buf: &mut String, data: &[u8], ext: u32) {
-    let had = buf.len();
-    append_capped(buf, &String::from_utf8_lossy(data), MAX_STDERR);
-    tracing::warn!(
-        event = "netconf_subsystem_stderr",
-        ext,
-        text = %stderr_log_text(buf, had),
-        "the netconf subsystem wrote to stderr"
-    );
+    /// Keep what the subsystem wrote, up to the cap, and log that it wrote.
+    /// `ext == 1` is stderr (RFC 4254 §5.2); other codes do not occur in practice,
+    /// but we take them the same way rather than filtering them out.
+    ///
+    /// Past the cap nothing is done with what comes: no copy, no redaction, no
+    /// event. A device that floods stderr costs us the cap and one last event.
+    fn keep(&mut self, data: &[u8], ext: u32) {
+        if self.cut {
+            return;
+        }
+        self.cut = !append_capped(&mut self.kept, &String::from_utf8_lossy(data), MAX_STDERR);
+        tracing::warn!(
+            event = "netconf_subsystem_stderr",
+            ext,
+            bytes = data.len(),
+            cut = self.cut,
+            "the netconf subsystem wrote to stderr"
+        );
+    }
+
+    /// Hand over what has not been handed over yet: the lines the device has
+    /// ended, and at the `end` of the session the line it has not ended as well.
+    /// `None` when there is nothing, or nothing but whitespace.
+    fn take(&mut self, end: bool) -> Option<String> {
+        let upto = if end {
+            self.kept.len()
+        } else {
+            self.kept.rfind('\n').map_or(0, |n| n + 1)
+        };
+        let mut text = String::new();
+        if upto > self.given {
+            // The lines `given..upto` is made of, out of the whole text redacted:
+            // the redaction keeps every line a line.
+            let first = self.kept[..self.given].matches('\n').count();
+            let new = &self.kept[self.given..upto];
+            let count = new.matches('\n').count() + usize::from(!new.ends_with('\n'));
+            let redacted = crate::redact::redact_secrets(&self.kept);
+            let lines: Vec<&str> = redacted.split('\n').skip(first).take(count).collect();
+            text = printable(lines.join("\n").trim());
+            self.given = upto;
+        }
+        if self.cut && !self.cut_told {
+            self.cut_told = true;
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(STDERR_CUT);
+        }
+        (!text.is_empty()).then_some(text)
+    }
 }
 
 /// Wait for the device's answer to the subsystem request. `Ok` means the subsystem
@@ -361,7 +413,7 @@ fn keep_stderr(buf: &mut String, data: &[u8], ext: u32) {
 /// signal that came before it, its banner, its disconnect message.
 async fn await_subsystem(
     channel: &mut russh::Channel<russh::client::Msg>,
-    stderr: &mut String,
+    stderr: &mut Stderr,
     said: &StdMutex<SshMessages>,
 ) -> Result<Option<Bytes>, NetconfError> {
     loop {
@@ -371,7 +423,7 @@ async fn await_subsystem(
                 return Ok(Some(Bytes::copy_from_slice(&data)));
             }
             Some(russh::ChannelMsg::ExtendedData { data, ext }) => {
-                keep_stderr(stderr, &data, ext);
+                stderr.keep(&data, ext);
             }
             Some(russh::ChannelMsg::Failure)
             | Some(russh::ChannelMsg::Eof)
@@ -379,7 +431,8 @@ async fn await_subsystem(
             | None => {
                 return Err(NetconfError::Transport(
                     TransportError::SubsystemUnavailable {
-                        stderr: stderr_text(stderr),
+                        // The connection ends here, so all of it goes.
+                        stderr: stderr.take(true).unwrap_or_default(),
                         ssh: Box::new(said_now(said)),
                     },
                 ));
@@ -390,30 +443,35 @@ async fn await_subsystem(
 }
 
 /// What a closed channel means. **If the device said something — on stderr, or over
-/// SSH — THAT is the answer**: `Closed`, carrying it (0.5.13; `Io` with the stderr
-/// before, and what it said over SSH was dropped). Otherwise an empty read is the
-/// signal the layer above uses for «the peer hung up».
+/// SSH — THAT is the answer**: `Closed`, carrying it in `ssh` (0.5.13; `Io` with the
+/// stderr before, and what it said over SSH was dropped. The stderr was part of
+/// `detail` until 0.7.0). Otherwise an empty read is the signal the layer above
+/// uses for «the peer hung up».
 ///
 /// A separate function so the decision can be unit-tested without SSH, like
 /// `recv_budget`.
-fn close_outcome(stderr: &str, ssh: SshMessages) -> Result<Bytes, NetconfError> {
-    let said = stderr.trim();
-    if said.is_empty() && ssh.is_empty() {
+fn close_outcome(ssh: SshMessages) -> Result<Bytes, NetconfError> {
+    if ssh.is_empty() {
         return Ok(Bytes::new());
     }
-    let detail = if said.is_empty() {
-        "the device closed the netconf subsystem".to_string()
-    } else {
-        format!(
-            "the device closed the netconf subsystem, and said: {}",
-            stderr_text(said)
-        )
-    };
     Err(NetconfError::Transport(TransportError::Closed {
-        detail,
+        detail: "the device closed the netconf subsystem".into(),
         partial: String::new(),
         ssh: Box::new(ssh),
     }))
+}
+
+/// `e` with what the device wrote on stderr put in it, when `e` is a timeout
+/// (0.7.0).
+fn with_stderr(e: NetconfError, said: Option<String>) -> NetconfError {
+    match e {
+        NetconfError::Timeout { op, partial, .. } => NetconfError::Timeout {
+            op,
+            partial,
+            stderr: said.unwrap_or_default(),
+        },
+        other => other,
+    }
 }
 
 /// The SSH+NETCONF transport: one device, one channel.
@@ -421,10 +479,9 @@ pub struct RusshTransport {
     handle: russh::client::Handle<ClientHandler>,
     channel: russh::Channel<russh::client::Msg>,
     observed_host_key: Option<String>,
-    /// What the subsystem wrote on stderr. Junos puts its explanation there when
-    /// something is wrong with the subsystem itself, and that explanation is often
-    /// the only thing that says WHY. It used to be discarded silently.
-    stderr: String,
+    /// What the subsystem wrote on stderr, and how much of it has been handed
+    /// over. It used to be discarded silently.
+    stderr: Stderr,
     /// Data that arrived before the device answered the subsystem request, handed
     /// out by the first `recv`. See `await_subsystem`.
     pending: Option<Bytes>,
@@ -828,7 +885,7 @@ impl RusshTransport {
             "ssh-connect",
         )
         .await?
-        .map_err(|e| ended(e, &said))?;
+        .map_err(|e| ended(e, said_now(&said)))?;
         if let russh::client::AuthResult::Failure {
             remaining_methods,
             partial_success,
@@ -861,25 +918,31 @@ impl RusshTransport {
             "ssh-connect",
         )
         .await?
-        .map_err(|e| ended(e, &said))?;
+        .map_err(|e| ended(e, said_now(&said)))?;
         // The `netconf` subsystem on the SSH session (RFC 6242). The port is SSH's own
         // and lives in `opts.port`; it does not belong here. The request is queued,
         // not answered: the device's answer is read here, and the session is
         // established only once it is a yes.
-        let mut stderr = String::new();
-        let pending = in_connect_phase(
+        let mut stderr = Stderr::new();
+        let answer = in_connect_phase(
             async {
                 channel
                     .request_subsystem(true, "netconf")
                     .await
-                    .map_err(|e| ended(e, &said))?;
+                    .map_err(|e| ended(e, said_now(&said)))?;
                 await_subsystem(&mut channel, &mut stderr, &said).await
             },
             connect_by,
             deadline,
             "ssh-subsystem",
         )
-        .await??;
+        .await;
+        // A device that wrote why and then never answered: the attempt ends here,
+        // so all it wrote goes with the timeout (0.7.0).
+        let pending = match answer {
+            Ok(answer) => answer?,
+            Err(e) => return Err(with_stderr(e, stderr.take(true))),
+        };
         progress.done(CheckStep::Netconf);
 
         let observed_host_key = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -1111,6 +1174,23 @@ fn preferred_for(policy: &SshPolicy) -> russh::Preferred {
     }
 }
 
+impl RusshTransport {
+    /// What the device has said over SSH, with what it wrote on stderr and has not
+    /// been handed over yet (0.7.0): the lines it has ended, and at the `end` of
+    /// the session the rest.
+    fn said(&mut self, end: bool) -> SshMessages {
+        let mut ssh = said_now(&self.said);
+        ssh.stderr = self.stderr.take(end);
+        ssh
+    }
+
+    /// A `Timeout` for `op`, with what the device wrote on stderr (0.7.0). The
+    /// session goes on, so it is the lines the device has ended.
+    fn timed_out(&mut self, op: &'static str) -> NetconfError {
+        with_stderr(NetconfError::timeout(op), self.stderr.take(false))
+    }
+}
+
 #[async_trait]
 impl NetconfTransport for RusshTransport {
     async fn connect(opts: &ConnectOptions) -> Result<Self, NetconfError> {
@@ -1132,21 +1212,23 @@ impl NetconfTransport for RusshTransport {
             self.deadline,
             std::time::Instant::now(),
         ) else {
-            return Err(NetconfError::timeout("session-ttl"));
+            return Err(self.timed_out("session-ttl"));
         };
         // &[u8] implements AsyncRead, so russh sends it as channel data. A send that
         // fails has found the channel or the connection gone; what the device said
-        // over SSH goes with it (0.5.13).
-        timeout(budget, self.channel.data(bytes))
-            .await
-            .map_err(|_| {
-                if std::time::Instant::now() >= self.deadline {
-                    NetconfError::timeout("session-ttl")
-                } else {
-                    NetconfError::timeout("rpc-send")
-                }
-            })?
-            .map_err(|e| ended(e, &self.said))
+        // over SSH goes with it (0.5.13), and what it wrote on stderr (0.7.0).
+        match timeout(budget, self.channel.data(bytes)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(ended(e, self.said(true))),
+            Err(_) if std::time::Instant::now() >= self.deadline => {
+                Err(self.timed_out("session-ttl"))
+            }
+            Err(_) => Err(self.timed_out("rpc-send")),
+        }
+    }
+
+    fn take_stderr(&mut self) -> Option<String> {
+        self.stderr.take(false)
     }
 
     async fn recv(&mut self) -> Result<Bytes, NetconfError> {
@@ -1164,9 +1246,9 @@ impl NetconfTransport for RusshTransport {
                 // After the device's EOF, the wait for what follows it ends in the
                 // close outcome, however it ends.
                 if self.eof {
-                    return close_outcome(&self.stderr, said_now(&self.said));
+                    return close_outcome(self.said(true));
                 }
-                return Err(NetconfError::timeout("session-ttl"));
+                return Err(self.timed_out("session-ttl"));
             };
             if let Some(data) = self.pending.take() {
                 return Ok(data);
@@ -1174,12 +1256,12 @@ impl NetconfTransport for RusshTransport {
             let msg = match timeout(budget, self.channel.wait()).await {
                 Ok(msg) => msg,
                 Err(_) if self.eof => {
-                    return close_outcome(&self.stderr, said_now(&self.said));
+                    return close_outcome(self.said(true));
                 }
                 Err(_) if std::time::Instant::now() >= self.deadline => {
-                    return Err(NetconfError::timeout("session-ttl"));
+                    return Err(self.timed_out("session-ttl"));
                 }
-                Err(_) => return Err(NetconfError::timeout("rpc-recv")),
+                Err(_) => return Err(self.timed_out("rpc-recv")),
             };
             match msg {
                 Some(russh::ChannelMsg::Data { data }) => {
@@ -1190,9 +1272,9 @@ impl NetconfTransport for RusshTransport {
                 // itself, and it is often the only text that says WHY. It used to be
                 // ignored, so a device that explained itself and then hung up left the
                 // operator with «peer closed before a complete message» and nothing
-                // else. See `keep_stderr`.
+                // else. See `Stderr`.
                 Some(russh::ChannelMsg::ExtendedData { data, ext }) => {
-                    keep_stderr(&mut self.stderr, &data, ext);
+                    self.stderr.keep(&data, ext);
                     continue;
                 }
                 // The device's EOF: it sends no more data, but what follows it is
@@ -1206,7 +1288,7 @@ impl NetconfTransport for RusshTransport {
                 }
                 Some(russh::ChannelMsg::Close) | None => {
                     self.closed = true;
-                    return close_outcome(&self.stderr, said_now(&self.said));
+                    return close_outcome(self.said(true));
                 }
                 Some(other) => {
                     note_exit(&self.said, &other);
@@ -1239,7 +1321,7 @@ impl NetconfTransport for RusshTransport {
         if !self.closed {
             match self.channel.eof().await {
                 Ok(()) | Err(russh::Error::SendError) => {}
-                Err(e) => return Err(ended(e, &self.said)),
+                Err(e) => return Err(ended(e, self.said(true))),
             }
             let mut after = Vec::new();
             while let Some(budget) = recv_budget(
@@ -1251,7 +1333,7 @@ impl NetconfTransport for RusshTransport {
                     Err(_) | Ok(None) | Ok(Some(russh::ChannelMsg::Close)) => break,
                     Ok(Some(russh::ChannelMsg::Data { data })) => after.extend_from_slice(&data),
                     Ok(Some(russh::ChannelMsg::ExtendedData { data, ext })) => {
-                        keep_stderr(&mut self.stderr, &data, ext);
+                        self.stderr.keep(&data, ext);
                     }
                     Ok(Some(other)) => note_exit(&self.said, &other),
                 }
@@ -1260,7 +1342,7 @@ impl NetconfTransport for RusshTransport {
                 late = Some(NetconfError::Transport(TransportError::Closed {
                     detail: "the device sent data after the session was closed".into(),
                     partial: crate::wire::bytes_as_text(&after),
-                    ssh: Box::new(said_now(&self.said)),
+                    ssh: Box::new(self.said(true)),
                 }));
             }
         }
@@ -1270,11 +1352,11 @@ impl NetconfTransport for RusshTransport {
             .await
         {
             Ok(()) | Err(russh::Error::SendError) => None,
-            Err(e) => Some(ended(e, &self.said)),
+            Err(e) => Some(ended(e, self.said(true))),
         };
         tracing::info!(event = "ssh_session_closed", "SSH session closed");
         match (late, disconnected) {
-            (None, None) => Ok(said_now(&self.said)),
+            (None, None) => Ok(self.said(true)),
             (Some(e), None) | (None, Some(e)) => Err(e),
             (Some(e), Some(d)) => Err(NetconfError::CleanupFailed {
                 error: Box::new(e),
@@ -1494,6 +1576,7 @@ pub struct DeviceCheck {
     capabilities: Vec<String>,
     session_id: Option<u64>,
     banner: Option<String>,
+    stderr: Option<String>,
 }
 
 impl DeviceCheck {
@@ -1591,6 +1674,15 @@ impl DeviceCheck {
     pub fn banner(&self) -> Option<&str> {
         self.banner.as_deref()
     }
+
+    /// What the device wrote on the subsystem's stderr during the check, when the
+    /// check ran to its end and the device wrote something. A device that answers
+    /// every step can still be saying that something is wrong. When the check
+    /// stopped, the text is in the error of [`stopped`](Self::stopped). Redacted and
+    /// printable — see [`SshMessages::stderr`].
+    pub fn stderr(&self) -> Option<&str> {
+        self.stderr.as_deref()
+    }
 }
 
 impl std::fmt::Display for DeviceCheck {
@@ -1613,6 +1705,9 @@ impl std::fmt::Display for DeviceCheck {
         }
         if let Some(banner) = &self.banner {
             write!(f, "\n  banner: {}", printable(banner))?;
+        }
+        if let Some(stderr) = &self.stderr {
+            write!(f, "\n  stderr: {stderr}")?;
         }
         Ok(())
     }
@@ -1662,6 +1757,7 @@ pub async fn check_device(opts: &ConnectOptions) -> Result<DeviceCheck, NetconfE
         capabilities: Vec::new(),
         session_id: None,
         banner: None,
+        stderr: None,
     };
     // What is left of the one clock, for the steps after `connect`.
     let started = std::time::Instant::now();
@@ -1720,6 +1816,7 @@ pub async fn check_device(opts: &ConnectOptions) -> Result<DeviceCheck, NetconfE
         Ok(Ok(end)) => {
             progress.done(CheckStep::Request);
             check.banner = end.ssh.banner;
+            check.stderr = end.ssh.stderr;
             check.steps = progress.steps;
             Ok(check)
         }
@@ -1886,7 +1983,7 @@ mod classification_tests {
             other => panic!("expected Io, got {other:?}"),
         }
         let NetconfError::Transport(TransportError::Io(s)) =
-            super::ended(russh::Error::IO(said()), &Default::default())
+            super::ended(russh::Error::IO(said()), Default::default())
         else {
             panic!("expected Io");
         };
@@ -2069,22 +2166,35 @@ mod target_tests {
 
 #[cfg(test)]
 mod stderr_tests {
-    use super::{append_capped, close_outcome, keep_stderr, stderr_log_text, stderr_text};
+    use super::{MAX_STDERR, STDERR_CUT, Stderr, append_capped, close_outcome, ended, with_stderr};
     use crate::error::{NetconfError, SshMessages, TransportError};
     use crate::redact::REDACTED;
+
+    /// What the device wrote, as it came in `pieces`.
+    fn wrote(pieces: &[&str]) -> Stderr {
+        let mut stderr = Stderr::new();
+        for piece in pieces {
+            stderr.keep(piece.as_bytes(), 1);
+        }
+        stderr
+    }
+
+    /// What the device has said over SSH when all it did was write `text` on
+    /// stderr, at the end of the session.
+    fn said(text: &str) -> SshMessages {
+        SshMessages {
+            stderr: wrote(&[text]).take(true),
+            ..SshMessages::default()
+        }
+    }
 
     /// If the device said nothing, an empty read is the signal the layer above is
     /// waiting for: «the peer hung up». `read_message` is what turns that into an
     /// error with its own wording, and that has to keep working.
     #[test]
     fn a_silent_disconnect_is_still_an_empty_read() {
-        assert_eq!(close_outcome("", SshMessages::default()).unwrap().len(), 0);
-        assert_eq!(
-            close_outcome("   \n ", SshMessages::default())
-                .unwrap()
-                .len(),
-            0
-        );
+        assert_eq!(close_outcome(said("")).unwrap().len(), 0);
+        assert_eq!(close_outcome(said("   \n ")).unwrap().len(), 0);
     }
 
     /// What the device said over SSH is an answer too (0.5.13): an exit status alone
@@ -2095,7 +2205,7 @@ mod stderr_tests {
             exit_status: Some(1),
             ..SshMessages::default()
         };
-        match close_outcome("", ssh) {
+        match close_outcome(ssh) {
             Err(NetconfError::Transport(TransportError::Closed { detail, ssh, .. })) => {
                 assert!(detail.contains("closed the netconf subsystem"), "{detail}");
                 assert_eq!(ssh.exit_status, Some(1));
@@ -2106,112 +2216,149 @@ mod stderr_tests {
 
     /// If the device said something, THAT is the answer. Closing a channel is
     /// rarely an explanation by itself — the explanation arrived on stderr just
-    /// before, and it should reach the person instead of being discarded.
+    /// before, and it should reach the person instead of being discarded. It is in
+    /// `ssh.stderr` (0.7.0; part of `detail` before), and in the error's text.
     #[test]
     fn if_the_device_said_something_that_is_the_answer() {
-        let e =
-            close_outcome("\nnetconf: permission denied\n", SshMessages::default()).unwrap_err();
-        let NetconfError::Transport(TransportError::Closed { detail: s, .. }) = e else {
+        let e = close_outcome(said("\nnetconf: permission denied\n")).unwrap_err();
+        let text = e.to_string();
+        let NetconfError::Transport(TransportError::Closed { detail, ssh, .. }) = e else {
             panic!("expected a transport error");
         };
+        assert_eq!(ssh.stderr.as_deref(), Some("netconf: permission denied"));
+        assert_eq!(detail, "the device closed the netconf subsystem");
         assert!(
-            s.contains("permission denied"),
-            "the device's own text must appear in the error: {s}"
-        );
-        assert!(
-            s.contains("closed the netconf subsystem"),
-            "and it must say what happened: {s}"
+            text.ends_with("; the device wrote on stderr: netconf: permission denied"),
+            "{text}"
         );
     }
 
-    /// A control character the device wrote on stderr is written out as an escape
-    /// in the error, so the device's text stays on its line and shows what it holds.
+    /// A control character the device wrote on stderr is written out as an escape,
+    /// so the device's text stays on its line and shows what it holds.
     #[test]
     fn what_the_device_said_is_made_printable() {
-        let e =
-            close_outcome("bell\u{7} and\r\nmore\u{2028}x", SshMessages::default()).unwrap_err();
-        let NetconfError::Transport(TransportError::Closed { detail: s, .. }) = e else {
-            panic!("expected a transport error");
-        };
-        assert!(
-            s.ends_with("said: bell\\u{0007} and\\r\\nmore\\u{2028}x"),
-            "{s}"
+        let text = wrote(&["bell\u{7} and\r\nmore\u{2028}x"]).take(true);
+        assert_eq!(
+            text.as_deref(),
+            Some("bell\\u{0007} and\\r\\nmore\\u{2028}x")
         );
     }
 
-    /// A secret the device wrote on stderr is redacted in the error (0.7.0). The
-    /// text used to go out made printable only.
+    /// A secret the device wrote on stderr is redacted, whatever the policy: the
+    /// transport has none (0.7.0).
     #[test]
     fn what_the_device_said_has_its_secrets_redacted() {
-        let said = "error: could not load\nencrypted-password \"$9$leak\";\n";
-        let e = close_outcome(said, SshMessages::default()).unwrap_err();
-        let NetconfError::Transport(TransportError::Closed { detail: s, .. }) = e else {
-            panic!("expected a transport error");
-        };
-        assert!(!s.contains("$9$leak"), "{s}");
-        assert!(s.contains("could not load\\nencrypted-password"), "{s}");
-        assert!(s.contains(REDACTED), "{s}");
-        // The same text is what `SubsystemUnavailable` carries.
-        let text = stderr_text(said);
+        let text = wrote(&["error: could not load\nencrypted-password \"$9$leak\";\n"])
+            .take(false)
+            .unwrap();
         assert!(!text.contains("$9$leak"), "{text}");
-        assert!(text.starts_with("error: could not load\\n"), "{text}");
+        assert!(
+            text.starts_with("error: could not load\\nencrypted-password "),
+            "{text}"
+        );
+        assert!(text.contains(REDACTED), "{text}");
     }
 
-    /// The log line carries what the device has just written, redacted with what
-    /// it wrote before (0.7.0). A private key written a line at a time has its
-    /// `-----BEGIN` line in an earlier piece, and a piece read alone is no key.
+    /// Each piece is handed over once, and redacted with what the device wrote
+    /// before it (0.7.0). A private key written a line at a time has its
+    /// `-----BEGIN` line in an earlier piece, already handed over, and a line of it
+    /// read alone is no key.
     #[test]
-    fn the_log_line_is_redacted_with_what_came_before_it() {
-        let mut kept = String::new();
-        let mut lines = Vec::new();
+    fn each_piece_is_handed_over_once_redacted_with_what_came_before() {
+        let mut stderr = Stderr::new();
+        let mut given = Vec::new();
         for piece in [
             "error: bad key\n-----BEGIN PRIVATE KEY-----\n",
             "MIIEkeyBodyLineOne\n",
             "MIIEkeyBodyLineTwo\n-----END PRIVATE KEY-----\n",
-            "secret ",
-            "\"hunter2\";\n",
+            "done\n",
         ] {
-            let had = kept.len();
-            keep_stderr(&mut kept, piece.as_bytes(), 1);
-            lines.push(stderr_log_text(&kept, had));
+            stderr.keep(piece.as_bytes(), 1);
+            given.push(stderr.take(false).unwrap_or_default());
         }
-        let all = lines.join("|");
-        for secret in ["keyBodyLineOne", "keyBodyLineTwo", "hunter2"] {
-            assert!(!all.contains(secret), "{secret}: {all}");
-        }
-        assert!(lines[0].starts_with("error: bad key"), "{all}");
-        // A line is logged when the device ends it, whole.
-        assert_eq!(lines[3], "", "{all}");
-        assert!(lines[4].starts_with("secret "), "{all}");
-        assert!(lines[4].ends_with(';'), "{all}");
+        let all = given.join("|");
+        assert!(!all.contains("keyBody"), "{all}");
+        assert_eq!(given[0], "error: bad key\\n-----BEGIN PRIVATE KEY-----");
+        assert_eq!(given[1], REDACTED);
+        assert_eq!(given[3], "done");
+        // Nothing is handed over twice.
+        assert_eq!(stderr.take(false), None);
+        assert_eq!(stderr.take(true), None);
     }
 
-    /// A line the device has not ended is not logged yet (0.7.0): what makes a word
-    /// on it a secret may still come. The password in a URL is one only once the
-    /// `@` after it is there.
+    /// A line is handed over when the device has ended it (0.7.0): what makes a
+    /// word on it a secret may still come. The password in a URL is one only once
+    /// the `@` after it is there. At the end of the session nothing more can come,
+    /// and the line goes as it is.
     #[test]
-    fn a_line_is_logged_when_the_device_ends_it() {
-        let mut kept = String::new();
-        let had = kept.len();
-        keep_stderr(&mut kept, b"fetching scp://user:hunter2", 1);
-        assert_eq!(stderr_log_text(&kept, had), "");
-        let had = kept.len();
-        keep_stderr(&mut kept, b"@host/file failed\n", 1);
-        let line = stderr_log_text(&kept, had);
+    fn a_line_is_handed_over_when_the_device_ends_it() {
+        let mut stderr = wrote(&["fetching scp://user:hunter2"]);
+        assert_eq!(stderr.take(false), None);
+        stderr.keep(b"@host/file failed\nand then", 1);
+        let line = stderr.take(false).unwrap();
         assert!(!line.contains("hunter2"), "{line}");
         assert!(line.starts_with("fetching scp://user:"), "{line}");
         assert!(line.ends_with("@host/file failed"), "{line}");
+        assert_eq!(stderr.take(false), None);
+        assert_eq!(stderr.take(true).as_deref(), Some("and then"));
     }
 
-    /// A piece the cap left no room for is not kept, so it can not be redacted with
-    /// what came before it, and the log line does not carry it (0.7.0).
+    /// At most `MAX_STDERR` bytes are kept in a session, and the text handed over
+    /// says so, once, when more came (0.7.0). Past the cap nothing is done with
+    /// what the device writes.
     #[test]
-    fn a_piece_past_the_cap_is_not_logged() {
-        let mut kept = "x".repeat(super::MAX_STDERR);
-        let had = kept.len();
-        keep_stderr(&mut kept, b"secret \"hunter2\";", 1);
-        assert_eq!(kept.len(), had);
-        assert_eq!(stderr_log_text(&kept, had), "");
+    fn what_comes_past_the_cap_is_dropped_and_the_text_says_so() {
+        let mut stderr = wrote(&[&"x".repeat(MAX_STDERR - 1), "\nsecret \"hunter2\";\n"]);
+        let text = stderr.take(false).unwrap();
+        assert_eq!(text, format!("{} {STDERR_CUT}", "x".repeat(MAX_STDERR - 1)));
+        stderr.keep(b"more\n", 1);
+        assert_eq!(stderr.kept.len(), MAX_STDERR);
+        assert_eq!(stderr.take(false), None);
+        assert_eq!(stderr.take(true), None);
+
+        // The device wrote more, and all that was kept is handed over already: the
+        // note comes alone.
+        let mut stderr = wrote(&["kept\n"]);
+        assert_eq!(stderr.take(false).as_deref(), Some("kept"));
+        stderr.keep("y".repeat(MAX_STDERR).as_bytes(), 1);
+        assert_eq!(stderr.take(false).as_deref(), Some(STDERR_CUT));
+    }
+
+    /// A timeout carries what the device wrote (0.7.0), and nothing else does
+    /// through `with_stderr`.
+    #[test]
+    fn a_timeout_carries_what_the_device_wrote() {
+        let e = with_stderr(
+            NetconfError::timeout("rpc-recv"),
+            wrote(&["commit: database locked\n"]).take(false),
+        );
+        assert_eq!(
+            e.to_string(),
+            "timeout: rpc-recv; the device wrote on stderr: commit: database locked"
+        );
+        let NetconfError::Timeout { stderr, .. } = e else {
+            panic!("expected Timeout");
+        };
+        assert_eq!(stderr, "commit: database locked");
+        let other = with_stderr(NetconfError::Policy("no".into()), Some("text".into()));
+        assert!(matches!(other, NetconfError::Policy(_)), "{other:?}");
+    }
+
+    /// A send or a close that finds the connection gone is `Closed` when the
+    /// device wrote on stderr (0.7.0), as when it said something over SSH: the
+    /// text goes with it. With nothing said it is `Io`, as before.
+    #[test]
+    fn a_failure_on_a_connection_that_is_gone_carries_what_the_device_wrote() {
+        match ended("channel closed", said("netconf: shutting down\n")) {
+            NetconfError::Transport(TransportError::Closed { ssh, .. }) => {
+                assert_eq!(ssh.stderr.as_deref(), Some("netconf: shutting down"));
+            }
+            other => panic!("expected Closed, got {other:?}"),
+        }
+        assert!(matches!(
+            ended("channel closed", SshMessages::default()),
+            NetconfError::Transport(TransportError::Io(_))
+        ));
     }
 
     /// The cap never cuts inside a character. It used to cut with `truncate` at a
@@ -2223,7 +2370,7 @@ mod stderr_tests {
         // character in both.
         for text in ["øøøø", "\u{FFFD}\u{FFFD}"] {
             let mut kept = String::new();
-            append_capped(&mut kept, text, 5);
+            assert!(!append_capped(&mut kept, text, 5));
             assert!(kept.len() <= 5, "over the cap: {kept:?}");
             assert!(text.starts_with(&kept), "not a prefix: {kept:?}");
         }
@@ -2233,10 +2380,10 @@ mod stderr_tests {
     #[test]
     fn the_cap_holds_across_pieces() {
         let mut kept = String::new();
-        append_capped(&mut kept, "abc", 4);
-        append_capped(&mut kept, "def", 4);
+        assert!(append_capped(&mut kept, "abc", 4));
+        assert!(!append_capped(&mut kept, "def", 4));
         assert_eq!(kept, "abcd");
-        append_capped(&mut kept, "ghi", 4);
+        assert!(!append_capped(&mut kept, "ghi", 4));
         assert_eq!(kept, "abcd");
     }
 }

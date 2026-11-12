@@ -55,6 +55,11 @@ pub enum NetconfError {
         /// device sent it — in chunked framing with its chunk headers — redacted as a
         /// reply is (0.5.13). Empty when nothing was waiting to be completed.
         partial: String,
+        /// What the device wrote on the subsystem's stderr and had not been handed
+        /// over yet (0.7.0) — see [`SshMessages::stderr`]. A device that explains
+        /// itself and then goes silent used to leave only «timeout». Empty when it
+        /// wrote nothing.
+        stderr: String,
     },
     /// The configuration filter (`ConfigPolicy`) refused the change.
     Policy(String),
@@ -179,7 +184,7 @@ pub enum TransportError {
         stderr: String,
         /// What the device said over SSH before it refused: its login banner, the
         /// exit status or signal of the subsystem, its disconnect message
-        /// (0.5.13).
+        /// (0.5.13). Its `stderr` is `None`: that text is in the field above.
         ssh: Box<SshMessages>,
     },
     /// The device did not let the login through with the password (0.5.8). It used
@@ -208,17 +213,17 @@ pub enum TransportError {
     /// text, with the incomplete message and whatever the device said over SSH
     /// left behind.
     Closed {
-        /// What ended, in words — and what the subsystem wrote on stderr, when it
-        /// wrote something, as `Io` carried it before; with the device's secrets
-        /// redacted whatever the policy (0.7.0).
+        /// What ended, in words. What the subsystem wrote on stderr is in
+        /// `ssh.stderr` (0.7.0; it was part of this text).
         detail: String,
         /// The part of a message the session had received when it ended, as the
         /// device sent it — in chunked framing with its chunk headers — redacted as a
         /// reply is. Empty when nothing was waiting to be completed. From closing
         /// the transport, what the device sent after the session was over.
         partial: String,
-        /// What the device said over SSH: its login banner, the exit status or
-        /// signal of the subsystem, its disconnect message.
+        /// What the device said over SSH: what the subsystem wrote on stderr, its
+        /// login banner, the exit status or signal of the subsystem, its disconnect
+        /// message.
         ssh: Box<SshMessages>,
     },
 }
@@ -226,9 +231,30 @@ pub enum TransportError {
 /// What a device said over SSH, beside the NETCONF stream (0.5.13). Each part is
 /// `None` when the device did not send it. The text is held as the device sent it;
 /// `Display` on the error makes it printable, and through a session it comes with
-/// the device's secrets redacted unless the policy lets them through.
+/// the device's secrets redacted unless the policy lets them through. `stderr` is
+/// the exception: it is redacted and printable where it stands, whatever the
+/// policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SshMessages {
+    /// What the device wrote on the subsystem's stderr (0.7.0): Junos puts its
+    /// explanation there when something is wrong with the subsystem itself.
+    ///
+    /// Each piece of it is handed over once, to whoever it concerns: in the error
+    /// of the request that failed — here, in
+    /// [`Timeout`](NetconfError::Timeout), or in `SubsystemUnavailable`, which
+    /// has a field of its own for it — by
+    /// [`take_stderr`](crate::NetconfSession::take_stderr) when nothing failed,
+    /// and what is left when the session closes, in
+    /// [`SessionEnd::ssh`](crate::session::SessionEnd::ssh). A line is handed over
+    /// when the device has ended it; one it has not ended waits for the end of
+    /// the session.
+    ///
+    /// It is free text from the device, and it is treated as sensitive: redacted
+    /// with [`redact_secrets`](crate::redact::redact_secrets) whatever the policy,
+    /// made printable, never logged, and at most 4096 bytes of it are kept in a
+    /// session — the text says so when more came. **The redaction takes what it
+    /// knows the shape of**; a secret written in a form it does not know passes.
+    pub stderr: Option<String>,
     /// The banner the device showed before the login (RFC 4252 §5.4). Several
     /// banners are joined by a line break.
     pub banner: Option<String>,
@@ -437,6 +463,7 @@ impl NetconfError {
         NetconfError::Timeout {
             op,
             partial: String::new(),
+            stderr: String::new(),
         }
     }
 }
@@ -459,8 +486,18 @@ fn write_partial(f: &mut fmt::Formatter<'_>, partial: &str) -> fmt::Result {
     }
 }
 
+/// What the device wrote on stderr, when it wrote something.
+fn write_stderr(f: &mut fmt::Formatter<'_>, stderr: &str) -> fmt::Result {
+    if stderr.is_empty() {
+        Ok(())
+    } else {
+        write_content(f, "the device wrote on stderr", stderr)
+    }
+}
+
 /// Every part of `ssh` the device sent, each after a `; `.
 fn write_ssh(f: &mut fmt::Formatter<'_>, ssh: &SshMessages) -> fmt::Result {
+    write_stderr(f, ssh.stderr.as_deref().unwrap_or_default())?;
     if let Some(code) = ssh.exit_status {
         write!(f, "; the subsystem's exit status: {code}")?;
     }
@@ -499,9 +536,14 @@ impl fmt::Display for NetconfError {
                 }
             }
             NetconfError::Device(d) => write!(f, "device: {d}"),
-            NetconfError::Timeout { op, partial } => {
+            NetconfError::Timeout {
+                op,
+                partial,
+                stderr,
+            } => {
                 write!(f, "timeout: {op}")?;
-                write_partial(f, partial)
+                write_partial(f, partial)?;
+                write_stderr(f, stderr)
             }
             NetconfError::Policy(s) => write!(f, "policy: {s}"),
             NetconfError::Drift { fresh } => {

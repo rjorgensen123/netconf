@@ -34,6 +34,20 @@ pub trait NetconfTransport: Send + Sized {
     /// hands over in [`SessionEnd::ssh`](crate::session::SessionEnd::ssh).
     async fn close(self) -> Result<SshMessages, NetconfError>;
 
+    /// What the device has written on the subsystem's stderr and this transport
+    /// has not handed over yet — in an error, or here (0.7.0). `None` when there is
+    /// nothing, and for a transport that has no such channel, which is the
+    /// default. The session's
+    /// [`take_stderr`](crate::NetconfSession::take_stderr) is what a consumer
+    /// calls; see [`SshMessages::stderr`] for what the text is.
+    ///
+    /// The session hands the text on as it gets it, here and in the errors: a
+    /// transport that has such text redacts it and makes it printable itself, as
+    /// `RusshTransport` does.
+    fn take_stderr(&mut self) -> Option<String> {
+        None
+    }
+
     /// **Crate-internal, and sealed.** The session saying which time budget the
     /// request it is about to send, and the reply to it, run under (0.5.7).
     ///

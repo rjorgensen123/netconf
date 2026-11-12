@@ -98,6 +98,7 @@ pub trait NetconfTransport: Send + Sized {
  async fn send(&mut self, bytes: &[u8]) -> Result<(), NetconfError>; // already framed
  async fn recv(&mut self) -> Result<Bytes, NetconfError>; // arbitrary pieces; empty = the peer closed
  async fn close(self) -> Result<SshMessages, NetconfError>; // what the device said over SSH; empty when not SSH
+ fn take_stderr(&mut self) -> Option<String> { None } // what the device wrote on stderr, not handed over yet; redacted and printable
  #[doc(hidden)] fn reply_budget(&mut self, _budget: ReplyBudget) {} // sealed, see below
 }
 ```
@@ -249,6 +250,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
  pub fn capabilities(&self) -> &[String]; // made printable
  pub fn session_id(&self) -> Option<u64>;   // the device's <session-id> from hello; None when absent or not a number as RFC 6241 writes one
  pub fn take_warnings(&mut self) -> Vec<DeviceError>; // warnings from replies that succeeded
+ pub fn take_stderr(&mut self) -> Option<String>; // what the device wrote on the subsystem's stderr, not handed over yet (§8)
  pub fn unanswered(&self) -> Option<String>; // the request that got no answer, in words; Some = the session sends nothing more
  pub fn framing(&self) -> Framing;
  pub fn transport(&self) -> &T;
@@ -341,7 +343,9 @@ the reply to `<close-session/>` — the session ends here, and nothing could tak
 that reply holds an error — the device refusing to close — its warnings are with that error, in
 the `also` of the `Device` error in `CloseFailed`, as for any reply. `ssh`
 is what the transport's `close` returns, with the device's secrets redacted unless the policy lets
-them through: the login banner, the subsystem's exit status or signal, a disconnect message;
+them through: the login banner, the subsystem's exit status or signal, a disconnect message; and
+in `stderr`, what the device wrote on the subsystem's stderr and no error or `take_stderr` had
+handed over (§8);
 empty for a transport that is not SSH. What goes wrong is reported as for any request: a send that fails, a reply that does not
 come in time or is left incomplete (`Timeout`, or `Closed` with `partial`), a reply that cannot be
 read or is not the answer to this request (`Protocol`), and an `<rpc-error>`, the device refusing
@@ -1150,7 +1154,7 @@ pub enum NetconfError { // #[non_exhaustive]
  Transport(TransportError), // the network failed
  Protocol { detail: String, received: Option<String> }, // we spoke wrongly; received = what the device sent
  Device(Box<DeviceError>), // Junos said no — boxed
- Timeout { op: &'static str, partial: String }, // op: "ssh-connect" · "ssh-subsystem" · "rpc-recv" · "rpc-send" · "session-ttl"; partial = the incomplete message
+ Timeout { op: &'static str, partial: String, stderr: String }, // op: "ssh-connect" · "ssh-subsystem" · "rpc-recv" · "rpc-send" · "session-ttl"; partial = the incomplete message; stderr = what the device wrote on stderr, empty when nothing
  Policy(String), // our own policy stopped it — before anything was sent
  Drift { fresh: String }, // the diff changed between approval and commit; fresh = the fresh diff
  ChangedSinceConfirmed(Box<DeviceChanged>), // the device changed between a confirmed commit and its confirming commit, which was withheld
@@ -1183,6 +1187,7 @@ pub struct DeviceChanged { // what withheld a confirming commit
 pub enum ConfirmedCheck { LastCommit, Candidate }
 
 pub struct SshMessages { // what the device said over SSH; Default = nothing
+ pub stderr: Option<String>, // what the device wrote on the subsystem's stderr, not handed over before; redacted and printable
  pub banner: Option<String>, // RFC 4252 §5.4; several joined by a line break
  pub exit_status: Option<u32>, // RFC 4254 §6.10
  pub exit_signal: Option<ExitSignal>, // RFC 4254 §6.10
@@ -1224,6 +1229,39 @@ are fine — and the device did not open the `netconf` subsystem: it answered th
 failure, or closed the channel before it answered. That is a device without NETCONF over SSH (on
 Junos, `set system services netconf ssh`). `stderr` is what the device wrote there first, trimmed, with
 the device's secrets redacted (`redact_secrets`, whatever the policy) and made printable; usually empty.
+Its `ssh.stderr` is `None`: the text is in `stderr`.
+
+**What the device writes on the subsystem's stderr** is the explanation Junos gives when something
+is wrong with the subsystem itself, and often the only text that says why. It is handed to whoever
+it concerns, each piece once:
+
+| When | Where the text is |
+|---|---|
+| the device refused the subsystem | `SubsystemUnavailable::stderr` |
+| the device closed the channel or the connection, or a send found it gone | `Closed`, in `ssh.stderr` |
+| a request ran out of time | `Timeout::stderr` |
+| the request went well | `NetconfSession::take_stderr()` |
+| the session closes | `SessionEnd::ssh.stderr`, or `ssh.stderr` of the `Closed` a failed close gives |
+| `check_device` ran to its end | `DeviceCheck::stderr()`; when it stopped, the error of `stopped()` as above |
+
+What is not taken with `take_stderr` goes with the next error, or with the close. A line is handed
+over when the device has ended it; one it has not ended waits for the end of the session — a
+refusal, a closed connection, the close — where nothing more can come.
+
+It is free text from the device, and it is treated as sensitive:
+
+- **redacted** with `redact_secrets`, whatever the policy — the transport has none — and redacted
+  together with what the device wrote before it, so a private key written a line at a time is one;
+- **made printable**, after the redaction;
+- **never logged**: the `netconf_subsystem_stderr` event says that the device wrote, and how much;
+- **capped**: 4096 bytes are kept in a session. What comes after is dropped unread, and the text
+  handed over then ends in `[cut: the device wrote more than 4096 bytes on stderr in this session,
+  and the rest was not kept]`;
+- **wiped** from memory when the transport is dropped.
+
+**The redaction takes what it knows the shape of** (§7). A secret the device writes there in a form
+the filter does not know passes, to the caller the text is handed to. Treat the text as you treat
+the device's replies.
 
 `AuthRejected` means the device did not let the login through with the password. It
 carries what the device said: `remaining_methods`, the methods it accepts, in its order and by their
@@ -1237,7 +1275,9 @@ routing, not a network failure: open a new session for the next task. Error text
 **The device's content is data, beside the words**. `Protocol::received`,
 `Timeout::partial`, `Closed::partial`, `Drift::fresh`, `CommittedThenFailed::reply`,
 `WithReplies::replies`, `DeviceError::rest`, the diff of `DeviceChanged` and the texts of
-`SshMessages` hold what the device sent, as it sent it — through a session, filtered as §2 says;
+`SshMessages` hold what the device sent, as it sent it — through a session, filtered as §2 says
+(`Timeout::stderr` and `SshMessages::stderr` are redacted and printable where they stand, whatever
+the policy);
 the entries of `DeviceChanged` and `DeviceError::other` are filtered as the device wrote them and
 then made printable. The error's `Display` takes it along, made printable, so the text stands on its own:
 `; the device sent: …`, `; the incomplete message so far: …`, `; the fresh diff: …`, `; the diff
@@ -1251,7 +1291,8 @@ against rollback N: …`, and `(empty)` for an empty one. `DeviceChanged::rollba
 complete — `partial` is what had arrived of it — or with something said on the way out; from
 `RusshTransport::close`, also that the device sent data after the session was over, which is then
 in `partial` (§9). `ssh` is
-what the device said over SSH; empty when it said nothing. `SubsystemUnavailable::ssh` is the same
+what the device said over SSH, what it wrote on the subsystem's stderr included (`ssh.stderr`; it
+was part of `detail` before 0.7.0); empty when it said nothing. `SubsystemUnavailable::ssh` is the same
 for a subsystem the device would not open.
 
 **`DeviceError`** is filled from the first `<rpc-error>` that is not `severity=warning` (a warning is
@@ -1291,10 +1332,10 @@ a control character, or U+2028/U+2029, is written out as an escape (`\n`, `\r`, 
 
 | Type | Text |
 |---|---|
-| `NetconfError` | `transport: …` · `protocol: <detail>`, then `; the device sent: <received>` when it is `Some` · `device: <DeviceError>` · `timeout: <op>`, then `; the incomplete message so far: <partial>` when it is not empty · `policy: …` · `drift: a fresh show\|compare deviates from the approved one; the fresh diff: <fresh>` · `changed since the confirmed commit: <DeviceChanged>` · `committed: the commit succeeded, then this failed: <error>`, then `; the device's answer to the commit: <reply>` · `commit unanswered: a commit was sent and no readable answer came back: <error>` · `<error>; the cleanup after it failed too: <step>: <error>; …` (`CleanupFailed`, 0.5.7) · `<error>`, then `; the device's answer to <step>: <reply>` for each in `replies` (`WithReplies`, 0.5.13) · `close: <error>`, then `; the session held this <severity>: <DeviceError>` for each warning, then what the device said over SSH as for `Closed` (`CloseFailed`, 0.5.13) |
+| `NetconfError` | `transport: …` · `protocol: <detail>`, then `; the device sent: <received>` when it is `Some` · `device: <DeviceError>` · `timeout: <op>`, then `; the incomplete message so far: <partial>` when it is not empty, then `; the device wrote on stderr: <stderr>` when it is not empty · `policy: …` · `drift: a fresh show\|compare deviates from the approved one; the fresh diff: <fresh>` · `changed since the confirmed commit: <DeviceChanged>` · `committed: the commit succeeded, then this failed: <error>`, then `; the device's answer to the commit: <reply>` · `commit unanswered: a commit was sent and no readable answer came back: <error>` · `<error>; the cleanup after it failed too: <step>: <error>; …` (`CleanupFailed`, 0.5.7) · `<error>`, then `; the device's answer to <step>: <reply>` for each in `replies` (`WithReplies`, 0.5.13) · `close: <error>`, then `; the session held this <severity>: <DeviceError>` for each warning, then what the device said over SSH as for `Closed` (`CloseFailed`, 0.5.13) |
 | `DeviceChanged` | `the device's last commit is no longer the confirmed one — it was «<confirmed>», it is «<now>»; the confirming commit is withheld, and the device rolls the confirmed commit back by itself when its timeout runs out`, or `the candidate holds <n> line(s) of changes that are not the confirmed commit's; …`; then `; the diff against rollback <N>: <diff>`, `; the diff against rollback <N> could not be fetched: <error>`, or `; the confirmed commit is no longer in the device's commit history, so there is no rollback to compare with` |
 | `DeviceError` | `<tag>: <message> [path: <path>]` (`unknown` / `(no message)` when absent); for a translated tag `<tag> — <meaning> (RFC 6241, Appendix A): <message> …`; then ` [info: <info>]`, ` [app-tag: <app_tag>]` and ` [type: <error_type>]` for each that is present, and ` [<name>: <text>]` for each entry in `other`; then `; also <severity>: <DeviceError>` for each entry in `also`; then `; the reply besides its errors: <rest>` when `rest` is present |
-| `TransportError` | `io: …` · `negotiation (<detail>); peer offered: <a, b>` · `host key: <detail>; device presented: <fingerprint>`, or without the second part when `observed` is `None` · ``the device did not offer the NETCONF subsystem — NETCONF over SSH is not enabled on the device (Junos: `set system services netconf ssh`)``, then `; the device said: <stderr>` when `stderr` is not empty · `SSH password authentication rejected by the device — <methods>`, or `the device ACCEPTED the password but requires further authentication — <methods>` under `partial_success`, where `<methods>` is `the device says it accepts: <a, b>` or `the device named no other method` · `closed: <detail>`, then the incomplete message as for `Timeout`. `SubsystemUnavailable` and `Closed` then add what the device said over SSH, each part present: `; the subsystem's exit status: <n>`, `; the subsystem's exit signal: <name>[, core dumped][, the device said: <message>]`, `; the device disconnected, reason code <n>[, and said: <description>]`, `; the device's login banner: <banner>` |
+| `TransportError` | `io: …` · `negotiation (<detail>); peer offered: <a, b>` · `host key: <detail>; device presented: <fingerprint>`, or without the second part when `observed` is `None` · ``the device did not offer the NETCONF subsystem — NETCONF over SSH is not enabled on the device (Junos: `set system services netconf ssh`)``, then `; the device said: <stderr>` when `stderr` is not empty · `SSH password authentication rejected by the device — <methods>`, or `the device ACCEPTED the password but requires further authentication — <methods>` under `partial_success`, where `<methods>` is `the device says it accepts: <a, b>` or `the device named no other method` · `closed: <detail>`, then the incomplete message as for `Timeout`. `SubsystemUnavailable` and `Closed` then add what the device said over SSH, each part present: `; the device wrote on stderr: <stderr>`, `; the subsystem's exit status: <n>`, `; the subsystem's exit signal: <name>[, core dumped][, the device said: <message>]`, `; the device disconnected, reason code <n>[, and said: <description>]`, `; the device's login banner: <banner>` |
 
 ## Logging — the tracing facade
 
@@ -1310,16 +1351,14 @@ the contract:
 | `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch or a host certificate (rejected) |
 | `ssh_host_key_enrollment` / `ssh_host_key_observed` | info | no pin — fingerprint observed |
 | `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run |
-| `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr — the device's text, redacted |
+| `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr: `bytes`, how much, and `cut`, whether the cap was reached. Not the text |
 | `secrets_in_diff` | warn | the compare diff `prepare_change` fetched carries device secrets (only a fingerprint is logged); `compare()` on its own emits nothing |
 
 **The rules:** no event carries passwords, keys or unredacted config/diff content —
 `secrets_in_diff` logs only a fingerprint, and fires only under a policy that lets secrets through.
- Text the device wrote — `netconf_subsystem_stderr` — is redacted with `redact_secrets` and made
-printable before it is logged, whatever the policy: the transport has none. What the device writes
-is redacted together with what it wrote before, and the event carries the lines it has ended; a
-line is logged when the device ends it. The transport keeps 4096 bytes of it, and what comes
-after them is not logged. A legacy SSH policy is warned once per device; after
+ What the device writes on the subsystem's stderr is not logged: `netconf_subsystem_stderr` says
+that it wrote, and how much, and the text goes to the caller it concerns (§8). Once the 4096 bytes
+the transport keeps are full, the event is logged a last time with `cut = true`, and no more. A legacy SSH policy is warned once per device; after
 that its `ssh_connect` event still carries `legacy = true`, and `ssh_connect_failed` and
 `ssh_session_established` name the policy in `ssh_policy`. The tag follows the policy, not the
 negotiated algorithm. Error messages can be logged as they are: the device's text in them is
@@ -1360,6 +1399,7 @@ impl DeviceCheck {
  pub fn capabilities(&self) -> &[String]; // of its hello
  pub fn session_id(&self) -> Option<u64>; // of its hello
  pub fn banner(&self) -> Option<&str>; // shown before the login, redacted
+ pub fn stderr(&self) -> Option<&str>; // what the device wrote on the subsystem's stderr during a check that ran to its end (§8)
 }
 pub enum CheckStep { Tcp, Ssh, Login, Netconf, Hello, Request } // #[non_exhaustive]
 pub enum Verdict { Ok, Slow, VerySlow, Dead, NoContact } // #[non_exhaustive]
@@ -1398,7 +1438,7 @@ What a failure becomes (classified by russh's error types, not its message text)
 | key exchange failed otherwise | `Negotiation { offered: [] }` |
 | the password was not accepted | `AuthRejected { username, remaining_methods, partial_success }` |
 | the device refused the `netconf` subsystem, or closed the channel before answering | `SubsystemUnavailable { stderr, ssh }` |
-| the device closed the subsystem after writing to stderr, or after saying something over SSH | `Closed { detail, ssh, .. }`, `detail` carrying the stderr text, redacted |
+| the device closed the subsystem after writing to stderr, or after saying something over SSH | `Closed { detail, ssh, .. }`, `ssh.stderr` carrying the stderr text, redacted |
 | the device closed the subsystem and said nothing | an empty read; the session makes it `Closed` *(§2)* |
 | the login, the channel, the subsystem request or a send failed, after the device said something over SSH | `Closed { detail, ssh, .. }`, `detail` carrying russh's text |
 | anything else | `Io` with russh's text |
@@ -1462,7 +1502,8 @@ decides nothing from it.
   `stopped()` is the step that did not, with the error — the device's own words in it, redacted,
   since no policy is bound. `fingerprint()` is there once the handshake has shown the key, also
   when the check stopped on it; `capabilities()` and `session_id()` once the hello has come;
-  `banner()` when the check ran to its end.
+  `banner()` when the check ran to its end, and `stderr()` then, when the device wrote on the
+  subsystem's stderr; when the check stopped, that text is in the error.
 
 The report is always whole, and is read at three levels:
 
@@ -1551,4 +1592,8 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
   either — requires `all_free(Rwd)`.
 - russh 0.65 has no `hmac-md5`: a device that offers only that cannot be reached through
   `RusshTransport`.
+- What a device writes on the subsystem's stderr is free text, and the redaction takes what it
+  knows the shape of (§7). A secret written there in a form the filter does not know reaches the
+  caller the text is handed to (§8). The text is kept out of the log, capped at 4096 bytes a
+  session and wiped from memory for that reason.
 

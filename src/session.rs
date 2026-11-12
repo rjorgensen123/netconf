@@ -170,6 +170,26 @@ impl<T: NetconfTransport> NetconfSession<T> {
         std::mem::take(&mut self.warnings)
     }
 
+    /// What the device has written on the subsystem's stderr and has not been
+    /// handed over yet (0.7.0). Junos puts its explanation there when something is
+    /// wrong with the subsystem itself. `None` when there is nothing, and for a
+    /// transport that is not SSH.
+    ///
+    /// A request that fails brings the text in its error — `Timeout` and
+    /// `Closed` — and [`close`](Self::close) hands over what is left. This is for
+    /// the request that went well while the device wrote something all the same:
+    /// call it after a request to get what came during it. Each piece is handed
+    /// over once; what is not taken here goes with the next error, or with the
+    /// close.
+    ///
+    /// The text is free text from the device and is treated as sensitive: redacted
+    /// whatever the policy, made printable, never logged, and capped — see
+    /// [`SshMessages::stderr`]. **The redaction takes what it knows the shape of**;
+    /// a secret written in a form it does not know passes.
+    pub fn take_stderr(&mut self) -> Option<String> {
+        self.transport.take_stderr()
+    }
+
     /// The policy bound to this session, if any.
     pub fn policy(&self) -> Option<&crate::policy::ConfigPolicy> {
         self.policy.as_ref()
@@ -717,9 +737,10 @@ async fn read_message<T: NetconfTransport>(
 fn with_partial(e: NetconfError, decoder: &Decoder) -> NetconfError {
     let held = || bytes_as_text(decoder.buffered());
     match e {
-        NetconfError::Timeout { op, .. } => NetconfError::Timeout {
+        NetconfError::Timeout { op, stderr, .. } => NetconfError::Timeout {
             op,
             partial: held(),
+            stderr,
         },
         NetconfError::Transport(TransportError::Closed { detail, ssh, .. }) => {
             NetconfError::Transport(TransportError::Closed {
@@ -744,9 +765,17 @@ pub(crate) fn redact_content(e: NetconfError) -> NetconfError {
             detail,
             received: received.map(|r| redact(&r)),
         },
-        NetconfError::Timeout { op, partial } => NetconfError::Timeout {
+        NetconfError::Timeout {
+            op,
+            partial,
+            stderr,
+        } => NetconfError::Timeout {
             op,
             partial: redact(&partial),
+            // Redacted and made printable by the transport, like the `stderr` of
+            // `SubsystemUnavailable` below. Its lines are one line now, and a
+            // second redaction would read them as one statement.
+            stderr,
         },
         NetconfError::Drift { fresh } => NetconfError::Drift {
             fresh: redact(&fresh),
@@ -813,6 +842,7 @@ pub(crate) fn redact_content(e: NetconfError) -> NetconfError {
 /// [`redact_content`] for what the device said over SSH.
 fn redact_ssh(mut ssh: SshMessages) -> SshMessages {
     use crate::redact::redact_secrets as redact;
+    // `stderr` is redacted and printable where the transport put it.
     ssh.banner = ssh.banner.map(|b| redact(&b));
     if let Some(s) = ssh.exit_signal.as_mut() {
         s.message = redact(&s.message);

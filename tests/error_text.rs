@@ -32,6 +32,7 @@ fn timeout(op: &'static str) -> NetconfError {
     NetconfError::Timeout {
         op,
         partial: String::new(),
+        stderr: String::new(),
     }
 }
 
@@ -231,9 +232,39 @@ fn the_devices_content_is_in_the_text() {
     let s = text(NetconfError::Timeout {
         op: "rpc-recv",
         partial: "<rpc-reply><data>".into(),
+        stderr: String::new(),
     });
     assert!(
         s.ends_with("; the incomplete message so far: <rpc-reply><data>"),
+        "{s}"
+    );
+
+    // What the device wrote on stderr goes with a timeout and with a closed
+    // connection (0.7.0).
+    let s = text(NetconfError::Timeout {
+        op: "rpc-recv",
+        partial: "<rpc-reply><data>".into(),
+        stderr: "commit: database locked".into(),
+    });
+    assert_eq!(
+        s,
+        "timeout: rpc-recv; the incomplete message so far: <rpc-reply><data>; \
+         the device wrote on stderr: commit: database locked"
+    );
+    let s = text(NetconfError::Transport(TransportError::Closed {
+        detail: "the device closed the netconf subsystem".into(),
+        partial: String::new(),
+        ssh: Box::new(SshMessages {
+            stderr: Some("netconf: shutting down".into()),
+            exit_status: Some(1),
+            ..SshMessages::default()
+        }),
+    }));
+    assert!(
+        s.ends_with(
+            "closed: the device closed the netconf subsystem; the device wrote on stderr: \
+             netconf: shutting down; the subsystem's exit status: 1"
+        ),
         "{s}"
     );
 

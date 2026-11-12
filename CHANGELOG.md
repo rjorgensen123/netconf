@@ -22,11 +22,11 @@ Every notable change to this crate is recorded here. The format follows
   line: a secret statement or a `SECRET-DATA` mark in front of the marker took it with the value,
   and the key on the lines after it went out as it was.
 - 2026-11-12 — What a device writes on the subsystem's stderr is redacted before it leaves the
-  transport: in the `netconf_subsystem_stderr` event, in `SubsystemUnavailable.stderr` and in
-  `Closed.detail`, and so in the report of `check_device`. It was made printable only, so a secret
-  the device wrote there was logged. It is redacted whatever the policy, since the transport has
-  none. The event carries the lines the device has ended, redacted together with what it wrote
-  before them; what comes after the 4096 bytes the transport keeps is no longer logged.
+  transport, whatever the policy. It was made printable only.
+- 2026-11-12 — That text is no longer logged: `netconf_subsystem_stderr` says how much the device
+  wrote (`bytes`) and whether the cap was reached (`cut`). The text is capped at 4096 bytes a
+  session and wiped from memory. A secret in a form the filter does not know still reaches the
+  caller: see «Known limits» in `docs/API.md`.
 - 2026-11-12 — A character reference is read however many digits it has. `&#x0000000024;` is a `$`
   to an XML reader and was none to the filter, so a `$9$` value written that way was not redacted.
 - 2026-11-12 — `rpc::parse_hello_capabilities`, `rpc::parse_rpc_reply` and
@@ -40,6 +40,10 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-10 — `NetconfSession::commit_history` gives the device's commits as data
   (`CommitRecord`), so a consumer can tell whether a commit that got no answer took effect.
   `NetconfSession::unanswered` says which request got no answer.
+- 2026-11-12 — What a device writes on stderr reaches the caller it concerns, each piece once: in
+  `Timeout::stderr`, in `SshMessages::stderr` (a closed connection, a failed send, `close()`), from
+  `NetconfSession::take_stderr` when the request went well, and in `DeviceCheck::stderr`.
+  `NetconfTransport::take_stderr` is the transport's side of it, with a default.
 - 2026-11-10 — `russh_transport::check_device` checks that a device is there and answers NETCONF.
   It takes a connection step by step — TCP, SSH and host key, login, NETCONF subsystem, hello, one
   request — and reports how far it got and how long each step took. The report (`DeviceCheck`) is
@@ -64,6 +68,8 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-12 — A certificate is not a secret, and is no longer redacted: a PEM block labelled
   `CERTIFICATE` is left as it is. Private keys, public keys on their own, SSH public keys and
   blocks with a label the filter does not know are redacted as before.
+- 2026-11-12 — **Breaking:** `NetconfError::Timeout` and `SshMessages` have a new field, `stderr`.
+  `Closed::detail` no longer holds the stderr text: it is in `ssh.stderr`.
 - 2026-11-12 — A redacted statement keeps the closing tags after it on the line:
   `secret "abc";</configuration-text>` lost the tag with the value, and what went out was no
   longer XML. The tags are kept where the statement has ended before them with a `;` or a `}`; a

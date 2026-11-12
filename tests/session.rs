@@ -360,14 +360,21 @@ async fn an_incomplete_message_goes_with_a_timeout_and_a_close() {
         end: || NetconfError::Timeout {
             op: "rpc-recv",
             partial: String::new(),
+            stderr: "commit: database locked".into(),
         },
     };
     let mut s = NetconfSession::establish(t, true).await.unwrap();
     match s.rpc("<get-configuration/>").await {
-        Err(NetconfError::Timeout { op, partial: held }) => {
+        Err(NetconfError::Timeout {
+            op,
+            partial: held,
+            stderr,
+        }) => {
             assert_eq!(op, "rpc-recv");
             assert!(held.contains("<system><root-authentication>"), "{held}");
             assert!(!held.contains("$6$leak"), "a secret leaked: {held}");
+            // What the device wrote on stderr stays with the timeout (0.7.0).
+            assert_eq!(stderr, "commit: database locked");
         }
         other => panic!("expected a Timeout, got {other:?}"),
     }
@@ -1031,6 +1038,7 @@ async fn after_a_timeout_the_session_sends_nothing_more() {
         end: || NetconfError::Timeout {
             op: "rpc-recv",
             partial: String::new(),
+            stderr: String::new(),
         },
     };
     let mut s = NetconfSession::establish(t, true).await.unwrap();
