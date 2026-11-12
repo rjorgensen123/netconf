@@ -309,9 +309,15 @@ rather than too little.
 - **hashed and obfuscated values** — `$9$…`, `$8$…`, `$6$…`, `$5$…`, `$1$…`, `$0$…`, `$2a$…`,
   `$sha1$…`, wherever they stand. Standing alone, the value goes and the `$tag$` stays, so you can
   see which form it is. The `$junos-…` variables of dynamic profiles are not matched.
-- **certificates and private keys** — PEM blocks, across lines. The `-----BEGIN …-----` and
-  `-----END …-----` markers stay; the body goes.
-- **SSH key blobs** — base64 that begins as an SSH public key does, whatever statement it is under
+- **private keys** — PEM blocks, across lines. The `-----BEGIN …-----` and `-----END …-----`
+  markers stay; the body goes. **A certificate is not a secret**, and is left as it is: a block
+  labelled `CERTIFICATE` (or `X509 CERTIFICATE`, `TRUSTED CERTIFICATE`) is made to be shown.
+  Every other block is redacted like a key — a public key on its own too, since it cannot be told
+  from an SSH key in PEM form, and a label the filter does not know. A certificate that stands as
+  the value of a secret statement, or on a line Junos marks `SECRET-DATA`, is redacted: what is
+  marked a secret is one.
+- **SSH key blobs** — base64 that begins as an SSH public key does, whatever statement it is
+  under. SSH public keys are treated as sensitive, and are redacted.
 - **the password in a URL** — `scp://user:password@host/path`. The user, the host and the path stay.
 - **anything Junos marks `## SECRET-DATA`** (or `/* SECRET-DATA */`) — a safety net that catches a
   secret leaf even when the list does not know it

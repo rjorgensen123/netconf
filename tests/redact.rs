@@ -35,7 +35,7 @@ fn junos_hash_literals_are_redacted_regardless_of_path() {
             "set system login user drift authentication encrypted-password \"${tag}$secret1234\""
         );
         let out = r(&line);
-        assert!(!out.contains("topsecret1234"), "${tag}$ leaked: {out}");
+        assert!(!out.contains("secret1234"), "${tag}$ leaked: {out}");
         assert!(out.contains("encrypted-password"), "{out}");
     }
 }
@@ -424,17 +424,22 @@ fn rare_pem_and_xml_shapes_are_redacted() {
 
 /// Several blocks can meet on one line — a chain whose newlines were lost, say. The
 /// line is walked marker by marker, so a block that begins where another ends is
-/// redacted on the lines that follow too, and body text between any two markers
-/// goes. Seeing the END used to end the look at the line, and the next block's body
-/// went out as it was.
+/// read on the lines that follow too, each by its own label. Seeing the END used to
+/// end the look at the line, and the next block's body went out as it was.
+///
+/// The certificate is public and stays (0.7.0); the private key after it goes.
 #[test]
-fn blocks_that_meet_on_one_line_are_all_redacted() {
+fn blocks_that_meet_on_one_line_are_each_read_by_their_label() {
     let chain = "-----BEGIN CERTIFICATE-----\nMIIBcertBody\n\
                  MIIBcertTail==-----END CERTIFICATE----------BEGIN PRIVATE KEY-----\n\
                  MIIEsecretKey\n-----END PRIVATE KEY-----";
     let out = r(chain);
-    for leak in ["certBody", "certTail", "secretKey"] {
-        assert!(!out.contains(leak), "{leak} leaked: {out}");
+    assert!(!out.contains("secretKey"), "the key leaked: {out}");
+    for public in ["certBody", "certTail"] {
+        assert!(
+            out.contains(public),
+            "{public} is public, and is gone: {out}"
+        );
     }
     assert!(
         out.contains("-----END CERTIFICATE----------BEGIN PRIVATE KEY-----"),
@@ -1220,4 +1225,80 @@ fn tokens_are_redacted() {
     );
     let bucket = "set class-of-service schedulers s token-bucket 100";
     assert_eq!(r(bucket), bucket);
+}
+
+/// **A private key does not leak when another rule takes its BEGIN line** (0.7.0).
+/// The filter reads a line at a time and has to know it is inside a key. A secret
+/// statement, or Junos' own `SECRET-DATA` mark, in front of the `-----BEGIN` takes
+/// the marker with the value it redacts — and the key on the lines after it went out
+/// as it was, under a first line that showed a marker.
+#[test]
+fn a_private_key_does_not_leak_when_another_rule_takes_its_begin_line() {
+    let body = "MIIEowIBAAKCAQEAkeymaterial0123456789";
+    for first in [
+        "    secret \"-----BEGIN RSA PRIVATE KEY-----",
+        "set system x passphrase -----BEGIN RSA PRIVATE KEY-----",
+        "    private-key \"-----BEGIN RSA PRIVATE KEY-----  ## SECRET-DATA",
+    ] {
+        let text =
+            format!("{first}\n{body}\n-----END RSA PRIVATE KEY-----\";\nset system host-name r1");
+        let out = r(&text);
+        assert!(
+            !out.contains("keymaterial"),
+            "{first}: the key leaked: {out}"
+        );
+        // The block ends where it ends: what follows it is read as usual.
+        assert!(out.contains("set system host-name r1"), "{out}");
+        assert_eq!(r(&out), out, "{first}: not idempotent");
+    }
+}
+
+/// **A certificate is public, and is left as it is** (0.7.0). It was redacted like a
+/// key, and the certificate a change was about went out as a marker.
+#[test]
+fn a_certificate_is_public_and_stays() {
+    for label in ["CERTIFICATE", "X509 CERTIFICATE", "TRUSTED CERTIFICATE"] {
+        let text =
+            format!("-----BEGIN {label}-----\nMIICcertBody\nMIICcertTail==\n-----END {label}-----");
+        assert_eq!(r(&text), text, "{label}");
+    }
+    // On one line, as Junos writes it in a configuration.
+    let one_line = "    local-certificate \"-----BEGIN CERTIFICATE-----\\nMIICcertBody\\n-----END CERTIFICATE-----\\n\";";
+    assert_eq!(r(one_line), one_line);
+    // A line Junos itself marks as secret is redacted, whatever it holds.
+    let marked = format!("{one_line} ## SECRET-DATA");
+    assert!(!r(&marked).contains("certBody"), "{}", r(&marked));
+    // So is the value of a secret statement — the lines after it too, when the
+    // statement has taken the `BEGIN` marker with it.
+    let under_a_secret =
+        "    secret \"-----BEGIN CERTIFICATE-----\nMIICcertBody\n-----END CERTIFICATE-----\";";
+    let out = r(under_a_secret);
+    assert!(!out.contains("certBody"), "{out}");
+    assert_eq!(r(&out), out, "not idempotent");
+}
+
+/// **Only a certificate is let through** (0.7.0). A private key is the secret; a
+/// public key on its own cannot be told from an SSH key in PEM form, and SSH public
+/// keys are redacted; a label the filter does not know is redacted like a key.
+#[test]
+fn every_pem_block_but_a_certificate_is_redacted() {
+    for label in [
+        "PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "PUBLIC KEY",
+        "RSA PUBLIC KEY",
+        "SSH2 PUBLIC KEY",
+        "CERTIFICATE REQUEST",
+        "SOMETHING ELSE",
+    ] {
+        let text = format!("-----BEGIN {label}-----\nMIIEblockBody\n-----END {label}-----");
+        let out = r(&text);
+        assert!(!out.contains("blockBody"), "{label}: {out}");
+        assert!(out.contains(&format!("-----BEGIN {label}-----")), "{out}");
+    }
+    // An SSH public key is redacted as before.
+    let ssh = "set system login user x authentication ssh-rsa \"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7keybody x@y\"";
+    assert!(!r(ssh).contains("AAAAB3NzaC1yc2E"), "{}", r(ssh));
 }

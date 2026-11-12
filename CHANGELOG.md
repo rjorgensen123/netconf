@@ -18,6 +18,9 @@ Every notable change to this crate is recorded here. The format follows
   `all_free(Rwd)`, a `#` inside a word (`ParseError::Hash`), and a `rename` or `copy` whose target
   is not a sibling after one `to` (`ParseError::Target`), is not covered by a `Subtree` rule for
   `Set`, or cannot be checked against the candidate. `replace` is in the `Delete` class.
+- 2026-11-12 — A private key in a PEM block no longer leaks when another rule redacts its `BEGIN`
+  line: a secret statement or a `SECRET-DATA` mark in front of the marker took it with the value,
+  and the key on the lines after it went out as it was.
 
 ### Added
 
@@ -47,6 +50,9 @@ Every notable change to this crate is recorded here. The format follows
   broken connection, a reply it cannot read — or when the device has sent data no request asked
   for. Every later request is refused as `Protocol`, and `close()` skips `<close-session/>`. A
   request sent on top of an unanswered one read the late answer as its own.
+- 2026-11-12 — A certificate is not a secret, and is no longer redacted: a PEM block labelled
+  `CERTIFICATE` is left as it is. Private keys, public keys on their own, SSH public keys and
+  blocks with a label the filter does not know are redacted as before.
 - 2026-11-10 — The candidate is discarded only under the session's own lock. `confirm_commit` and
   `abort_change` are refused without it, and the cleanup after a failed change sends nothing
   without it.

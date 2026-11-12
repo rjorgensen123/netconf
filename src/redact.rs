@@ -240,7 +240,7 @@ impl Redactor {
     /// line as it goes out.
     pub fn redact(&self, text: &str) -> String {
         let mut out = String::with_capacity(text.len());
-        let mut in_pem = false;
+        let mut in_pem = Pem::Outside;
         // The names of the secret XML elements we are inside, opened on an earlier
         // line. Redaction is otherwise line by line, so a value written as
         //
@@ -284,7 +284,7 @@ impl Redactor {
     fn redact_line(
         &self,
         view: &View<'_>,
-        in_pem: &mut bool,
+        in_pem: &mut Pem,
         in_secret_xml: &mut Vec<Open>,
         path: &Path,
     ) -> Doc {
@@ -318,12 +318,27 @@ impl Redactor {
             .map(|o| o.name.clone())
             .collect();
         let open = |name: String, shown: bool| Open { name, shown };
+        // The PEM state a line leaves behind is read from the line as it came
+        // (0.7.0), as the secret elements above are. A statement in front of a
+        // `-----BEGIN` takes the marker with its value, so a later pass no longer
+        // sees a block begin. The state used to be taken from the last pass, and
+        // the key on the lines that followed went out as it was.
+        let mut as_it_came = None;
         loop {
             let (mut pem, mut xml) = (*in_pem, in_secret_xml.clone());
             let before = doc.text.clone();
             self.apply_rules(&mut doc, &mut pem, &mut xml, &closed_unshown, path);
+            let came = *as_it_came.get_or_insert(pem);
             if doc.text == before {
-                *in_pem = pem;
+                // A certificate is public only while its `BEGIN` marker stands. When
+                // a secret statement or a `SECRET-DATA` mark has taken the marker,
+                // the device or the list has called the value a secret, and the
+                // rest of the block is redacted with it.
+                *in_pem = if came == Pem::Public && pem != Pem::Public {
+                    Pem::Secret
+                } else {
+                    came
+                };
                 // Did this line OPEN secret elements without closing them? Then the
                 // value is on the lines that follow, and the state carries into
                 // them. Read on the line as it goes out, whichever rules applied,
@@ -352,7 +367,7 @@ impl Redactor {
     fn apply_rules(
         &self,
         doc: &mut Doc,
-        in_pem: &mut bool,
+        in_pem: &mut Pem,
         in_secret_xml: &mut Vec<Open>,
         closed_unshown: &[String],
         path: &Path,
@@ -434,7 +449,7 @@ impl Redactor {
     }
 
     /// The rules for a line outside a secret XML element.
-    fn line_rules(&self, doc: &mut Doc, in_pem: &mut bool, path: &Path) {
+    fn line_rules(&self, doc: &mut Doc, in_pem: &mut Pem, path: &Path) {
         let line = doc.text.clone();
         let line = line.as_str();
 
@@ -444,10 +459,11 @@ impl Redactor {
         // secret element in a statement's value, say, and with it the rest of the
         // line the element rule would have redacted.
 
-        // 1. PEM blocks — certificates and private keys — which can span several
-        //    lines, and several of which can meet on one line. What stands outside
-        //    a block on such a line is read by the other rules too (0.5.13): a line
-        //    that went on past an `-----END …-----` went out as it was.
+        // 1. PEM blocks — private keys, and every block that is not a certificate —
+        //    which can span several lines, and several of which can meet on one
+        //    line. What stands outside a block on such a line is read by the other
+        //    rules too (0.5.13): a line that went on past an `-----END …-----` went
+        //    out as it was.
         let mut ranges = redact_pem(line, in_pem).unwrap_or_default();
 
         // 2. Statement-based redaction, in set format and in curly/text format.
@@ -1296,9 +1312,33 @@ fn value_range(line: &str, start: usize, cut: usize) -> Option<std::ops::Range<u
     (len > 0).then_some(start..start + len)
 }
 
-/// PEM blocks — certificates and private keys. Returns what to redact when the
-/// line touches PEM at all (it continues a block, or begins one), and `None`
-/// otherwise, so the other rules apply.
+/// Where a line stands with the PEM blocks before it (0.7.0; a `bool` before, which
+/// could not tell a certificate from a key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pem {
+    /// In no block.
+    Outside,
+    /// In a block whose body is redacted: a private key, and every block that is
+    /// not known to be public.
+    Secret,
+    /// In a certificate, which is public: its body is left as it is.
+    Public,
+}
+
+/// The PEM labels whose blocks are public (0.7.0): a certificate is made to be
+/// shown. Nothing else is here. A private key is the secret; a public key on its
+/// own cannot be told from an SSH key in PEM form, and SSH public keys are
+/// redacted; a label this list does not know is redacted like a key.
+const PUBLIC_PEM_LABELS: &[&str] = &["CERTIFICATE", "X509 CERTIFICATE", "TRUSTED CERTIFICATE"];
+
+/// PEM blocks — private keys, certificates and the rest. Returns what to redact
+/// when the line touches PEM at all (it continues a block, or begins one), and
+/// `None` otherwise, so the other rules apply.
+///
+/// **The private key is the secret, and a certificate is not** (0.7.0). The body
+/// of a block is redacted unless its label says it is a certificate
+/// ([`PUBLIC_PEM_LABELS`]); every body was redacted before, and the certificate a
+/// change was about went out as a marker.
 ///
 /// The line is walked marker by marker. Inside a block, everything up to an END
 /// marker is body; outside one, text is kept up to the next BEGIN marker. Any number
@@ -1310,32 +1350,38 @@ fn value_range(line: &str, start: usize, cut: usize) -> Option<std::ops::Range<u
 ///
 /// Markers stay, and so does a plain label. Body text goes wherever on the line it
 /// sits. A BEGIN marker without its closing hyphens fails closed: what follows it
-/// is taken as body unless it is a plain label.
-fn redact_pem(line: &str, in_pem: &mut bool) -> Option<Vec<std::ops::Range<usize>>> {
+/// is taken as the body of a secret block unless it is a plain label, and the
+/// block is a secret one whatever the label says.
+fn redact_pem(line: &str, in_pem: &mut Pem) -> Option<Vec<std::ops::Range<usize>>> {
     const BEGIN: &str = "-----BEGIN";
     const END: &str = "-----END";
     const DASHES: &str = "-----";
 
-    if !*in_pem && !line.contains(BEGIN) {
+    if *in_pem == Pem::Outside && !line.contains(BEGIN) {
         return None;
     }
     let mut ranges = Vec::new();
     let mut pos = 0;
     loop {
         let rest = &line[pos..];
-        if *in_pem {
+        if *in_pem != Pem::Outside {
             // Inside a block: everything up to the END marker is body.
+            let secret = *in_pem == Pem::Secret;
             let Some(es) = rest.find(END) else {
-                push_pem_body(&mut ranges, line, pos, line.len());
+                if secret {
+                    push_pem_body(&mut ranges, line, pos, line.len());
+                }
                 return Some(ranges);
             };
-            push_pem_body(&mut ranges, line, pos, pos + es);
+            if secret {
+                push_pem_body(&mut ranges, line, pos, pos + es);
+            }
             // The END marker runs to its closing hyphens, or to the end of the line.
             let close = rest[es + END.len()..]
                 .find(DASHES)
                 .map_or(rest.len(), |i| es + END.len() + i + DASHES.len());
             pos += close;
-            *in_pem = false;
+            *in_pem = Pem::Outside;
         } else {
             // Outside a block: text is kept up to the next BEGIN marker.
             let Some(bs) = rest.find(BEGIN) else {
@@ -1344,8 +1390,13 @@ fn redact_pem(line: &str, in_pem: &mut bool) -> Option<Vec<std::ops::Range<usize
             let after = bs + BEGIN.len();
             match rest[after..].find(DASHES).map(|i| after + i) {
                 // A well-formed marker: its closing hyphens are its own, not the
-                // start of an END marker.
+                // start of an END marker. Its label says what the block is.
                 Some(c) if !rest[c..].starts_with(END) => {
+                    *in_pem = if PUBLIC_PEM_LABELS.contains(&rest[after..c].trim()) {
+                        Pem::Public
+                    } else {
+                        Pem::Secret
+                    };
                     pos += c + DASHES.len();
                 }
                 // No closing hyphens before an END marker or the end of the line. A
@@ -1356,9 +1407,9 @@ fn redact_pem(line: &str, in_pem: &mut bool) -> Option<Vec<std::ops::Range<usize
                         ranges.push(pos + after..pos + stop);
                     }
                     pos += stop;
+                    *in_pem = Pem::Secret;
                 }
             }
-            *in_pem = true;
         }
     }
 }

@@ -1106,9 +1106,18 @@ What is redacted:
 - **SSH key blobs** anywhere, by their base64 key-type prefix. The prefixes are those of public
   keys, so a public key under `system login user … authentication ssh-rsa` loses its blob; the
   statement name and the comment stay.
-- **PEM blocks**, on one line or across lines; the `BEGIN`/`END` markers stay. Body text on a
-  marker's own line goes too, any number of blocks may end and begin on one line, and a BEGIN
-  marker without its closing hyphens fails closed: only a plain label is kept. What
+- **PEM blocks**, on one line or across lines; the `BEGIN`/`END` markers stay. **The private key
+  is the secret, and a certificate is not:** the body of a block labelled `CERTIFICATE`, `X509
+  CERTIFICATE` or `TRUSTED CERTIFICATE` is left as it is, and the body of every other block is
+  redacted — a private key, a public key on its own (it cannot be told from an SSH key in PEM
+  form, and SSH public keys are redacted), and a label that is not known. Body text on a
+  marker's own line goes too, any number of blocks may end and begin on one line, each read by
+  its own label, and a BEGIN marker without its closing hyphens fails closed: only a plain label
+  is kept, and the block is redacted whatever the label says. Where a line leaves a block is read
+  on the line as the device wrote it, so a statement or a `SECRET-DATA` mark that takes the
+  `BEGIN` marker with its value does not end the block. A line Junos marks `SECRET-DATA`, and the
+  value of a secret statement, is redacted whatever it holds, a certificate included: when either
+  has taken a certificate's `BEGIN` marker, the rest of that block is redacted with it. What
   stands outside a block on such a line is read by the other rules.
 - **XML leaves** `<name …>value</name>` whose local name is a secret statement — under its
   parent, where the list says one — attributes and all; and a value on the lines after such an element is opened, until the closing tag
