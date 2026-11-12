@@ -1232,23 +1232,26 @@ impl NetconfTransport for RusshTransport {
     }
 
     async fn recv(&mut self) -> Result<Bytes, NetconfError> {
+        // One clock for the whole read (0.7.0). The limit used to start again for
+        // every message on the channel, and the ones that carry no data — stderr,
+        // an exit status — do not end the read: a device that kept sending those
+        // held one read until the session's deadline.
+        let read_by = std::time::Instant::now() + self.timeouts.per_read(self.budget);
         loop {
             // Both the per-read deadline AND the session deadline: never wait longer
-            // than the smaller of the per-read limit — `per_rpc`, or `per_commit`
-            // during a commit — and the remaining TTL. A device that stops answering
-            // part-way through an RPC does not hang us, and a session lives never past
-            // its total lifetime, regardless of activity.
-            let Some(budget) = recv_budget(
-                self.timeouts.per_read(self.budget),
-                self.deadline,
-                std::time::Instant::now(),
-            ) else {
+            // than the smaller of what is left of the per-read limit — `per_rpc`, or
+            // `per_commit` during a commit — and the remaining TTL. A device that
+            // stops answering part-way through an RPC does not hang us, and a
+            // session lives never past its total lifetime, regardless of activity.
+            let now = std::time::Instant::now();
+            let left = recv_budget(read_by.saturating_duration_since(now), self.deadline, now);
+            let budget = match left {
+                Some(left) if !left.is_zero() => left,
                 // After the device's EOF, the wait for what follows it ends in the
                 // close outcome, however it ends.
-                if self.eof {
-                    return close_outcome(self.said(true));
-                }
-                return Err(self.timed_out("session-ttl"));
+                _ if self.eof => return close_outcome(self.said(true)),
+                Some(_) => return Err(self.timed_out("rpc-recv")),
+                None => return Err(self.timed_out("session-ttl")),
             };
             if let Some(data) = self.pending.take() {
                 return Ok(data);
@@ -1324,11 +1327,15 @@ impl NetconfTransport for RusshTransport {
                 Err(e) => return Err(ended(e, self.said(true))),
             }
             let mut after = Vec::new();
-            while let Some(budget) = recv_budget(
-                self.timeouts.per_read(ReplyBudget::PerRpc),
-                self.deadline,
-                std::time::Instant::now(),
-            ) {
+            // One clock for the whole wait (0.7.0), as for a read.
+            let closed_by = std::time::Instant::now() + self.timeouts.per_read(ReplyBudget::PerRpc);
+            loop {
+                let now = std::time::Instant::now();
+                let left =
+                    recv_budget(closed_by.saturating_duration_since(now), self.deadline, now);
+                let Some(budget) = left.filter(|left| !left.is_zero()) else {
+                    break;
+                };
                 match timeout(budget, self.channel.wait()).await {
                     Err(_) | Ok(None) | Ok(Some(russh::ChannelMsg::Close)) => break,
                     Ok(Some(russh::ChannelMsg::Data { data })) => after.extend_from_slice(&data),

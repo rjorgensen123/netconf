@@ -21,6 +21,10 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-12 — A private key in a PEM block no longer leaks when another rule redacts its `BEGIN`
   line: a secret statement or a `SECRET-DATA` mark in front of the marker took it with the value,
   and the key on the lines after it went out as it was.
+- 2026-11-12 — Two limits hold as documented. A whole end-of-message message over the size cap
+  is refused; the cap was checked only while the terminator was missing. And a read has one clock:
+  the limit started again for every message on the channel, so a device that kept writing on
+  stderr held one read, or the wait in `close`, until the session's deadline.
 - 2026-11-12 — One call to `rpc` is one request. Text that is two requests to the device — two
   elements, an end tag that closes the `<rpc>` it is sent in, `]]>]]>` in end-of-message framing —
   or none, or not well-formed, is refused as `Protocol` before anything is sent. It was sent as

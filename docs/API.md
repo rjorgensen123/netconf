@@ -452,7 +452,7 @@ read.
 it, `with_max_message_size` sets another — applied to the
 de-framer's buffer and to a single chunk (fail-closed — the guard against a device that never ends
 a message or states an absurd chunk length). In EOM mode the buffer is refused once it passes the
-cap without a terminator; in chunked mode the buffered bytes, chunk headers included, and the
+cap without a terminator, and so is a whole message longer than the cap; in chunked mode the buffered bytes, chunk headers included, and the
 chunks' total are both held under it. NETCONF has **no streaming of a single reply** (chunked framing is wire
 framing, not incremental delivery) — large configurations are therefore read in **segments**:
 `get_configuration` with a filter, subtree by subtree. The consumer must be deliberate about
@@ -1434,6 +1434,8 @@ it carries is the pinned one; `observed` is the fingerprint of that key.
 The transport enforces the session TTL (§1): the frame is validated before anything connects, the
 deadline is set at connection start, and `send`/`recv` refuse after the deadline. Each single
 `send`/`recv` waits under `per_rpc`, or under `per_commit` while the session has a commit in flight.
+The limit is one clock for the whole call: what the device sends that is no data — stderr, an exit
+status — does not start it again, in `recv` or in the wait `close` does.
  Before anything
 connects, `connect` refuses — as `Transport(Io)` — a missing `host_key`, `SshPolicy::Custom`,
 `Timeouts` outside their frames, and an empty host or username or one holding a control character

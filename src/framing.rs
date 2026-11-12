@@ -177,6 +177,16 @@ impl Decoder {
         // arrives in many pieces cost quadratic time.
         let from = self.scanned.saturating_sub(EOM.len() - 1);
         if let Some(pos) = find_subslice(&self.buf[from..], EOM).map(|p| from + p) {
+            // A message that is whole is held to the cap as well (0.7.0). The cap
+            // used to be checked only while the terminator was missing, so a
+            // message whose terminator came in the read that took it past the cap
+            // went through.
+            if pos > self.max {
+                return Err(NetconfError::protocol_with(
+                    format!("message exceeds max ({} B)", self.max),
+                    bytes_as_text(&self.buf[..pos]),
+                ));
+            }
             let msg = self.buf[..pos].to_vec();
             self.consume(pos + EOM.len());
             Ok(Some(msg))

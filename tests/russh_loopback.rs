@@ -56,6 +56,9 @@ enum Device {
     ExplainsAndStalls,
     /// Writes on stderr why, and never answers the subsystem request.
     ExplainsAndNeverOpens,
+    /// Opens the subsystem, and from the first data it is sent writes on stderr
+    /// four times a second, and never answers.
+    DripsOnStderr,
     /// A small NETCONF device like `ClosesCleanly` that writes on stderr as well:
     /// with its hello, and again at the client's EOF.
     Chatty,
@@ -86,6 +89,7 @@ impl Device {
             Device::ExplainsAndCloses => "explains-and-closes",
             Device::ExplainsAndStalls => "explains-and-stalls",
             Device::ExplainsAndNeverOpens => "explains-and-never-opens",
+            Device::DripsOnStderr => "drips-on-stderr",
             Device::Chatty => "chatty",
         }
     }
@@ -96,6 +100,8 @@ struct Handler {
     /// Held so the channels stay open: sshd does not close a channel whose
     /// subsystem it refused.
     channels: Vec<Channel<Msg>>,
+    /// The device has begun writing on stderr.
+    dripping: bool,
 }
 
 impl russh::server::Handler for Handler {
@@ -150,7 +156,7 @@ impl russh::server::Handler for Handler {
             Device::ExplainsAndNeverOpens => {
                 session.extended_data(channel, 1, EXPLANATION.as_bytes())
             }
-            Device::ExplainsAndCloses | Device::ExplainsAndStalls => {
+            Device::ExplainsAndCloses | Device::ExplainsAndStalls | Device::DripsOnStderr => {
                 session.channel_success(channel)
             }
             Device::NeverReads
@@ -220,6 +226,19 @@ impl russh::server::Handler for Handler {
             Device::ExplainsAndStalls => {
                 session.extended_data(channel, 1, EXPLANATION.as_bytes())?;
             }
+            Device::DripsOnStderr if !self.dripping => {
+                self.dripping = true;
+                let handle = session.handle();
+                tokio::spawn(async move {
+                    while handle
+                        .extended_data(channel, 1, &b"still working\n"[..])
+                        .await
+                        .is_ok()
+                    {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                });
+            }
             Device::ClosesCleanly | Device::Chatty
                 if data.windows(13).any(|w| w == b"close-session") =>
             {
@@ -267,6 +286,7 @@ async fn start(device: Device, timeouts: Timeouts) -> ConnectOptions {
         let handler = Handler {
             device,
             channels: Vec::new(),
+            dripping: false,
         };
         if let Ok(session) = russh::server::run_stream(config, socket, handler).await {
             let _ = session.await;
@@ -1108,4 +1128,47 @@ async fn a_device_check_reports_what_the_device_wrote_on_stderr() {
     );
     assert!(!check.to_string().contains("stderr-leak"), "{check}");
     assert_eq!(check.stderr(), None);
+}
+
+/// **A read has one clock** (0.7.0). The limit used to start again for every
+/// message on the channel, and the ones that carry no data do not end the read: a
+/// device that kept writing on stderr held one read until the session's deadline.
+/// The wait `close` does is bounded the same way.
+#[tokio::test]
+async fn a_device_that_keeps_writing_on_stderr_does_not_hold_a_read() {
+    let timeouts = Timeouts {
+        per_rpc: Duration::from_secs(1),
+        ..Timeouts::default()
+    };
+    let opts = start(Device::DripsOnStderr, timeouts).await;
+    let mut transport = RusshTransport::connect(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the device opens the subsystem");
+    transport.send(b"<hello/>").await.expect("the send");
+
+    let started = Instant::now();
+    let e = tokio::time::timeout(Duration::from_secs(20), transport.recv())
+        .await
+        .expect("the read ran past its limit")
+        .expect_err("the device never answers");
+    assert!(
+        matches!(e, NetconfError::Timeout { op: "rpc-recv", .. }),
+        "{e}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+
+    let started = Instant::now();
+    let _ = tokio::time::timeout(Duration::from_secs(20), transport.close())
+        .await
+        .expect("the close ran past its limit");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
 }

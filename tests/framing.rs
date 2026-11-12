@@ -150,6 +150,31 @@ fn eom_without_terminator_over_max_gives_protocol() {
     assert!(d.next_message().is_err());
 }
 
+/// A message that is whole is held to the cap too (0.7.0). The cap was checked
+/// only while the terminator was missing, so a message whose terminator came in
+/// the read that took it past the cap went through.
+#[test]
+fn a_whole_eom_message_over_max_gives_protocol() {
+    let mut d = Decoder::with_max_message_size(Framing::Eom, 16);
+    d.push(&[b'a'; 17]);
+    d.push(b"]]>]]>");
+    let e = d.next_message().unwrap_err();
+    assert!(e.to_string().contains("message exceeds max (16 B)"), "{e}");
+
+    // In one read, too.
+    let mut d = Decoder::with_max_message_size(Framing::Eom, 16);
+    let mut one = vec![b'a'; 64];
+    one.extend_from_slice(b"]]>]]>");
+    d.push(&one);
+    assert!(d.next_message().is_err());
+
+    // A message of exactly the cap is within it.
+    let mut d = Decoder::with_max_message_size(Framing::Eom, 16);
+    d.push(&[b'a'; 16]);
+    d.push(b"]]>]]>");
+    assert_eq!(d.next_message().unwrap().unwrap().len(), 16);
+}
+
 // --- RFC 6242 §4.2 conformance ---------------------------------------------- #
 
 /// **Whitespace between messages is discarded, not fatal.**
