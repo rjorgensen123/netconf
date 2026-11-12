@@ -172,9 +172,10 @@ pub enum TransportError {
     /// refusal for an open subsystem, and the session then failed later as a timeout
     /// that named neither the cause nor the fix.
     SubsystemUnavailable {
-        /// What the device wrote on stderr before it refused, trimmed, with every
-        /// control character written out as an escape (0.5.11). Empty when it wrote
-        /// nothing, which is the usual case.
+        /// What the device wrote on stderr before it refused, trimmed, with the
+        /// device's secrets redacted whatever the policy (0.7.0) and every control
+        /// character written out as an escape (0.5.11). Empty when it wrote nothing,
+        /// which is the usual case.
         stderr: String,
         /// What the device said over SSH before it refused: its login banner, the
         /// exit status or signal of the subsystem, its disconnect message
@@ -208,7 +209,8 @@ pub enum TransportError {
     /// left behind.
     Closed {
         /// What ended, in words — and what the subsystem wrote on stderr, when it
-        /// wrote something, as `Io` carried it before.
+        /// wrote something, as `Io` carried it before; with the device's secrets
+        /// redacted whatever the policy (0.7.0).
         detail: String,
         /// The part of a message the session had received when it ended, as the
         /// device sent it — in chunked framing with its chunk headers — redacted as a

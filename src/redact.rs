@@ -628,7 +628,9 @@ impl Redactor {
             if h.in_text && tag_at_k(start) {
                 continue;
             }
-            if let Some(r) = value_range(line, start, next_annotation(&notes, start, line.len())) {
+            let cut = next_annotation(&notes, start, line.len());
+            let cut = before_closing_tags(line, &doc.literal, &tags, start, cut);
+            if let Some(r) = value_range(line, start, cut) {
                 if r.end > covered.end {
                     covered = r.clone();
                 }
@@ -844,26 +846,42 @@ impl<'a> View<'a> {
 /// The XML entity at `i` in `s`, if one begins there: the character it stands for,
 /// and its length. The five predefined entities and character references, decimal
 /// and hexadecimal.
+///
+/// A character reference is read however many digits it has (0.7.0). It used to be
+/// read only when it was short, so `&#x0000000024;`, a `$` to every XML reader,
+/// was no `$` here, and a `$9$` value written that way went out whole.
 fn entity_at(s: &str, i: usize) -> Option<(char, usize)> {
     let rest = s[i..].strip_prefix('&')?;
-    let semi = rest.find(';').filter(|&n| n <= 10)?;
-    let name = &rest[..semi];
-    let c = match name {
-        "amp" => '&',
-        "lt" => '<',
-        "gt" => '>',
-        "quot" => '"',
-        "apos" => '\'',
-        _ => {
-            let n = name.strip_prefix('#')?;
-            let code = match n.strip_prefix(['x', 'X']) {
-                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-                None => n.parse::<u32>().ok()?,
-            };
-            char::from_u32(code)?
-        }
+    let Some(number) = rest.strip_prefix('#') else {
+        return [
+            ("amp;", '&'),
+            ("lt;", '<'),
+            ("gt;", '>'),
+            ("quot;", '"'),
+            ("apos;", '\''),
+        ]
+        .into_iter()
+        .find(|(name, _)| rest.starts_with(name))
+        .map(|(name, c)| (c, 1 + name.len()));
     };
-    Some((c, semi + 2))
+    let (digits, radix) = match number.strip_prefix(['x', 'X']) {
+        Some(hex) => (hex, 16),
+        None => (number, 10),
+    };
+    // A sign is no part of a character reference, but a lenient reader takes a `+`
+    // for one, and so does this: what any reader may decode is decoded here.
+    let signed = digits.strip_prefix('+').unwrap_or(digits);
+    let n = signed
+        .bytes()
+        .take_while(|c| char::from(*c).is_digit(radix))
+        .count();
+    if n == 0 || signed.as_bytes().get(n) != Some(&b';') {
+        return None;
+    }
+    let code = u32::from_str_radix(&signed[..n], radix).ok()?;
+    // `&`, then all of `rest` up to and including the `;`.
+    let len = 1 + (rest.len() - signed.len()) + n + 1;
+    Some((char::from_u32(code)?, len))
 }
 
 /// A line being redacted: its text as the rules see it, and where each byte came
@@ -1282,6 +1300,50 @@ fn next_annotation(notes: &[usize], start: usize, end: usize) -> usize {
         .get(notes.partition_point(|&n| n < start))
         .copied()
         .unwrap_or(end)
+}
+
+/// Where the value that begins at `start` ends, when closing tags stand between the
+/// statement and `cut`: at the first of them, otherwise at `cut` (0.7.0). A
+/// statement written on the line of the tag that closes the element around it,
+/// `secret "abc";</configuration-text>`, used to take the tag with it, and what
+/// went out was no longer XML.
+///
+/// The tags are structure only where the statement has ended before them: after a
+/// `;` or a `}`, as the line has it written, and with every quote before them
+/// closed. A value that runs up to the tag, `secret abc</x>` or
+/// `secret "abc"</x>`, may hold the tag's text itself, and is redacted to `cut` as
+/// before.
+fn before_closing_tags(
+    line: &str,
+    literal: &[bool],
+    tags: &[Tag],
+    start: usize,
+    cut: usize,
+) -> usize {
+    let b = line.as_bytes();
+    // `end` without the whitespace the line has written before it.
+    let without_space = |mut end: usize| {
+        while end > start && literal[end - 1] && matches!(b[end - 1], b' ' | b'\t') {
+            end -= 1;
+        }
+        end
+    };
+    let mut first = None;
+    let mut end = without_space(cut);
+    for g in tags.iter().rev().skip_while(|g| g.end > cut) {
+        if g.kind != TagKind::End || g.end != end || g.start <= start {
+            break;
+        }
+        first = Some(g.start);
+        end = without_space(g.start);
+    }
+    let Some(first) = first else {
+        return cut;
+    };
+    let written = |k: usize, c: u8| literal[k] && b[k] == c;
+    let quotes = (start..end).filter(|&k| written(k, b'"')).count();
+    let ended = end > start && (written(end - 1, b';') || written(end - 1, b'}'));
+    if ended && quotes % 2 == 0 { first } else { cut }
 }
 
 /// The value from `start` to `cut`, without trailing whitespace and the statement's

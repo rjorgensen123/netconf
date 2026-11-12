@@ -62,6 +62,20 @@ pub(crate) fn no_policy(text: &str) -> String {
     crate::redact::redact_secrets(text)
 }
 
+/// An error from one of the parsers a consumer calls itself, with the document a
+/// `Protocol` error carries redacted (0.7.0). The parsers build the error with the
+/// document as it came, for a session to pass through its policy; called without a
+/// session, no policy is bound, and the document used to go out as it came.
+fn without_policy(e: NetconfError) -> NetconfError {
+    match e {
+        NetconfError::Protocol { detail, received } => NetconfError::Protocol {
+            detail,
+            received: received.map(|r| no_policy(&r)),
+        },
+        other => other,
+    }
+}
+
 /// Text the error quotes from the document — a parser's message, a name — through
 /// `filter` as the document wrote it, then made printable (0.5.13; it was made
 /// printable and never filtered).
@@ -94,10 +108,16 @@ pub fn wrap_rpc(message_id: u64, inner: &str) -> String {
 }
 
 /// Take the capability URIs out of a `<hello>` document. What a `Protocol` error
-/// quotes of the document is redacted with
+/// quotes of the document, and the document it carries, are redacted with
 /// [`redact_secrets`](crate::redact::redact_secrets): no policy is bound here
-/// (0.5.13).
+/// (0.5.13; the document it carries since 0.7.0).
 pub fn parse_hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> {
+    hello_capabilities(xml).map_err(without_policy)
+}
+
+/// [`parse_hello_capabilities`], with the document a `Protocol` error carries as it
+/// came.
+fn hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> {
     let mut reader = Reader::from_str(xml);
     let filter: Filter<'_> = &no_policy;
     let mut caps = Vec::new();
@@ -172,8 +192,10 @@ pub fn parse_hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> 
 /// `rest`, and what a `Protocol` error quotes of the document — comes redacted with
 /// [`redact_secrets`](crate::redact::redact_secrets): no policy is bound here, and
 /// without one that lets the device's secrets through, they are redacted (0.5.13).
+/// So does the document a `Protocol` error carries (0.7.0; it went out as it came).
 pub fn parse_rpc_reply(xml: &str) -> Result<Vec<DeviceError>, NetconfError> {
-    split_reply_errors(read_rpc_reply(xml, &no_policy)?.finish(|text| no_policy(&text)))
+    let read = read_rpc_reply(xml, &no_policy).map_err(without_policy)?;
+    split_reply_errors(read.finish(|text| no_policy(&text)))
 }
 
 /// Whether an `<rpc-error>` is fatal: `error`, `fatal`, or no severity at all. A
@@ -696,11 +718,11 @@ pub(crate) fn reply_message_id_raw(xml: &str) -> Option<String> {
 /// read as `""` too, so a reply holding only `<ok/>`, or only warnings, passed the
 /// drift check as «no change» and the candidate was committed.
 ///
-/// What a `Protocol` error quotes of the document is redacted with
-/// [`redact_secrets`](crate::redact::redact_secrets): no policy is bound here
-/// (0.5.13).
+/// What a `Protocol` error quotes of the document, and the document it carries, are
+/// redacted with [`redact_secrets`](crate::redact::redact_secrets): no policy is
+/// bound here (0.5.13; the document it carries since 0.7.0).
 pub fn extract_compare_diff(xml: &str) -> Result<String, NetconfError> {
-    compare_diff(xml, &no_policy)
+    compare_diff(xml, &no_policy).map_err(without_policy)
 }
 
 /// [`extract_compare_diff`], with what a `Protocol` error quotes of the document

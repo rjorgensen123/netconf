@@ -1054,7 +1054,8 @@ redact in it, and the secret elements a line leaves open are read on the line as
 
 
 **How a line is read**. Each line is read with its XML entities as the characters they
-stand for — the five predefined ones and character references — so `&#x24;9&#x24;` is a `$9$`
+stand for — the five predefined ones and character references, however many digits one has — so
+`&#x24;9&#x24;` is a `$9$`, `&#x0000000024;` a `$`,
 and `authentication-&#107;ey` a statement name, in an XML reply as in a diff; what is not redacted
 goes out as it came in, entities and all. Whitespace and the ASCII control characters separate
 words. Every rule reads the line as it stands, and what any of them finds is redacted. Markup is
@@ -1085,6 +1086,10 @@ What is redacted:
   trailing `;` `{` `}` `]` `)` and a `## …` or `/* … */` annotation are kept, and a list value
   keeps its own closing bracket: `secret [ "$9$a" "$9$b" ];` → `secret [SENSITIVE: …];`;
   the punctuation, the annotation and the whitespace between them are kept as they stood.
+  Closing tags at the end of the value are kept too, where the statement has ended before them
+  with a `;` or a `}` and every quote is closed: `secret "abc";</configuration-text>` →
+  `secret [SENSITIVE: …];</configuration-text>`. A value that runs up to the tag, `secret abc</x>`,
+  is redacted with it.
  An annotation is a word of its own, as Junos writes it; one glued to the value or
   inside a quoted value is part of the value, and past an annotation the line is read on.
  The whole line is scanned: `description`, `annotate`
@@ -1217,8 +1222,8 @@ key exchange never got far enough for a key to be seen.
 `SubsystemUnavailable` means the login went through — address, host key and credentials
 are fine — and the device did not open the `netconf` subsystem: it answered the request with a
 failure, or closed the channel before it answered. That is a device without NETCONF over SSH (on
-Junos, `set system services netconf ssh`). `stderr` is what the device wrote there first, trimmed and made printable;
-usually empty.
+Junos, `set system services netconf ssh`). `stderr` is what the device wrote there first, trimmed, with
+the device's secrets redacted (`redact_secrets`, whatever the policy) and made printable; usually empty.
 
 `AuthRejected` means the device did not let the login through with the password. It
 carries what the device said: `remaining_methods`, the methods it accepts, in its order and by their
@@ -1305,13 +1310,16 @@ the contract:
 | `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch or a host certificate (rejected) |
 | `ssh_host_key_enrollment` / `ssh_host_key_observed` | info | no pin — fingerprint observed |
 | `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run |
-| `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr — the device's text |
+| `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr — the device's text, redacted |
 | `secrets_in_diff` | warn | the compare diff `prepare_change` fetched carries device secrets (only a fingerprint is logged); `compare()` on its own emits nothing |
 
 **The rules:** no event carries passwords, keys or unredacted config/diff content —
 `secrets_in_diff` logs only a fingerprint, and fires only under a policy that lets secrets through.
- Text the device wrote — `netconf_subsystem_stderr` — is made printable before it is
-logged. A legacy SSH policy is warned once per device; after
+ Text the device wrote — `netconf_subsystem_stderr` — is redacted with `redact_secrets` and made
+printable before it is logged, whatever the policy: the transport has none. What the device writes
+is redacted together with what it wrote before, and the event carries the lines it has ended; a
+line is logged when the device ends it. The transport keeps 4096 bytes of it, and what comes
+after them is not logged. A legacy SSH policy is warned once per device; after
 that its `ssh_connect` event still carries `legacy = true`, and `ssh_connect_failed` and
 `ssh_session_established` name the policy in `ssh_policy`. The tag follows the policy, not the
 negotiated algorithm. Error messages can be logged as they are: the device's text in them is
@@ -1390,7 +1398,7 @@ What a failure becomes (classified by russh's error types, not its message text)
 | key exchange failed otherwise | `Negotiation { offered: [] }` |
 | the password was not accepted | `AuthRejected { username, remaining_methods, partial_success }` |
 | the device refused the `netconf` subsystem, or closed the channel before answering | `SubsystemUnavailable { stderr, ssh }` |
-| the device closed the subsystem after writing to stderr, or after saying something over SSH | `Closed { detail, ssh, .. }`, `detail` carrying the stderr text |
+| the device closed the subsystem after writing to stderr, or after saying something over SSH | `Closed { detail, ssh, .. }`, `detail` carrying the stderr text, redacted |
 | the device closed the subsystem and said nothing | an empty read; the session makes it `Closed` *(§2)* |
 | the login, the channel, the subsystem request or a send failed, after the device said something over SSH | `Closed { detail, ssh, .. }`, `detail` carrying russh's text |
 | anything else | `Io` with russh's text |
@@ -1501,11 +1509,11 @@ human.
 pub const BASE_1_0: &str; pub const BASE_1_1: &str;
 pub fn client_hello(offer_1_1: bool) -> String;
 pub fn wrap_rpc(message_id: u64, inner: &str) -> String;
-pub fn parse_hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError>; // a Protocol error carries the hello in received, and what it quotes of it redacted
-pub fn parse_rpc_reply(xml: &str) -> Result<Vec<DeviceError>, NetconfError>; // the checks in §2, a Protocol error carrying the reply; Ok = the warnings; the device's text in an error, and what a Protocol error quotes of the reply, redacted with redact_secrets
+pub fn parse_hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError>; // a Protocol error carries the hello in received, redacted, and what it quotes of it redacted
+pub fn parse_rpc_reply(xml: &str) -> Result<Vec<DeviceError>, NetconfError>; // the checks in §2, a Protocol error carrying the reply; Ok = the warnings; the device's text in an error, and what a Protocol error quotes and carries of the reply, redacted with redact_secrets
 pub fn reply_message_id(xml: &str) -> Option<u64>; // digits, no leading zero, any u64 — the session itself compares the text, never this number
 pub fn hello_session_id(xml: &str) -> Option<u64>; // read as RFC 6241's unsignedInt — digits, no leading zero, at most 4294967295
-pub fn extract_compare_diff(xml: &str) -> Result<String, NetconfError>; // no <configuration-output> = Protocol; a Protocol error carries the reply in received, and what it quotes of it redacted
+pub fn extract_compare_diff(xml: &str) -> Result<String, NetconfError>; // no <configuration-output> = Protocol; a Protocol error carries the reply in received, redacted, and what it quotes of it redacted
 ```
 
 The parser is **lenient on purpose**: it matches on local element names and ignores prefixes and

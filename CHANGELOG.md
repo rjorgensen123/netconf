@@ -21,6 +21,17 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-12 — A private key in a PEM block no longer leaks when another rule redacts its `BEGIN`
   line: a secret statement or a `SECRET-DATA` mark in front of the marker took it with the value,
   and the key on the lines after it went out as it was.
+- 2026-11-12 — What a device writes on the subsystem's stderr is redacted before it leaves the
+  transport: in the `netconf_subsystem_stderr` event, in `SubsystemUnavailable.stderr` and in
+  `Closed.detail`, and so in the report of `check_device`. It was made printable only, so a secret
+  the device wrote there was logged. It is redacted whatever the policy, since the transport has
+  none. The event carries the lines the device has ended, redacted together with what it wrote
+  before them; what comes after the 4096 bytes the transport keeps is no longer logged.
+- 2026-11-12 — A character reference is read however many digits it has. `&#x0000000024;` is a `$`
+  to an XML reader and was none to the filter, so a `$9$` value written that way was not redacted.
+- 2026-11-12 — `rpc::parse_hello_capabilities`, `rpc::parse_rpc_reply` and
+  `rpc::extract_compare_diff` redact the document a `Protocol` error carries in `received`, as
+  their documentation said. Through a session it was redacted already.
 
 ### Added
 
@@ -53,6 +64,10 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-12 — A certificate is not a secret, and is no longer redacted: a PEM block labelled
   `CERTIFICATE` is left as it is. Private keys, public keys on their own, SSH public keys and
   blocks with a label the filter does not know are redacted as before.
+- 2026-11-12 — A redacted statement keeps the closing tags after it on the line:
+  `secret "abc";</configuration-text>` lost the tag with the value, and what went out was no
+  longer XML. The tags are kept where the statement has ended before them with a `;` or a `}`; a
+  value that runs up to the tag is redacted with it, as before.
 - 2026-11-10 — The candidate is discarded only under the session's own lock. `confirm_commit` and
   `abort_change` are refused without it, and the cleanup after a failed change sends nothing
   without it.

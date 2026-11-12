@@ -285,24 +285,58 @@ fn append_capped(buf: &mut String, text: &str, cap: usize) {
     buf.push_str(&text[..end]);
 }
 
-/// Log what the subsystem wrote on stderr, and keep it, capped.
+/// What the device wrote on stderr, as it leaves the transport: with the device's
+/// secrets redacted, then made printable (0.7.0). The text is kept as the device
+/// wrote it, and nothing of it goes out — into the log, `SubsystemUnavailable` or
+/// `close_outcome` — but through here. It used to go out made printable only, so a
+/// secret the device wrote there was in the error and in the log.
 ///
-/// We do not INTERPRET it — we log it and keep it, so it can travel with the error
+/// The transport has no policy to ask, so the redaction is the one a reply passes
+/// where none is bound: [`redact_secrets`](crate::redact::redact_secrets). The
+/// order matters: redacted first, as the device wrote it, and printable after.
+fn stderr_text(kept: &str) -> String {
+    printable(crate::redact::redact_secrets(kept).trim())
+}
+
+/// The text of the log line for what the device has just written on stderr: the
+/// lines it ended, from the one byte `had` of `kept` is on, where what was just
+/// written begins (0.7.0).
+///
+/// The device's text comes in pieces, and a piece alone can not be redacted: the
+/// name of a secret statement may be in the piece before it, and so may the
+/// `-----BEGIN` line of a private key; and what makes a word a secret may come
+/// after it on its line. So all that is kept is redacted, and the log line carries
+/// the lines the new piece ended. A line the device has not ended is logged when
+/// it ends. A piece the cap left no room for is not kept, and is not logged
+/// either.
+fn stderr_log_text(kept: &str, had: usize) -> String {
+    let first = kept[..had].matches('\n').count();
+    let redacted = crate::redact::redact_secrets(kept);
+    // The last part is the line not ended yet, or empty after the last line end.
+    let mut lines: Vec<&str> = redacted.split('\n').collect();
+    lines.pop();
+    let ended = lines.get(first..).unwrap_or_default();
+    printable(ended.join("\n").trim())
+}
+
+/// Keep what the subsystem wrote on stderr, capped, and log it.
+///
+/// We do not INTERPRET it — we keep it and log it, so it can travel with the error
 /// if the session breaks. `ext == 1` is stderr (RFC 4254 §5.2); other codes do not
 /// occur in practice, but we take them the same way rather than filtering them out.
 /// Wherever the text goes out — this log line, `SubsystemUnavailable`,
-/// `close_outcome` — it is made printable first (0.5.11): a control character the
-/// device wrote stays visible on the line instead of acting on the terminal or the
-/// log.
+/// `close_outcome` — it has the device's secrets redacted (0.7.0; see
+/// `stderr_text`) and is made printable (0.5.11): a control character the device
+/// wrote stays visible on the line instead of acting on the terminal or the log.
 fn keep_stderr(buf: &mut String, data: &[u8], ext: u32) {
-    let text = String::from_utf8_lossy(data);
+    let had = buf.len();
+    append_capped(buf, &String::from_utf8_lossy(data), MAX_STDERR);
     tracing::warn!(
         event = "netconf_subsystem_stderr",
         ext,
-        text = %printable(text.trim()),
+        text = %stderr_log_text(buf, had),
         "the netconf subsystem wrote to stderr"
     );
-    append_capped(buf, &text, MAX_STDERR);
 }
 
 /// Wait for the device's answer to the subsystem request. `Ok` means the subsystem
@@ -345,7 +379,7 @@ async fn await_subsystem(
             | None => {
                 return Err(NetconfError::Transport(
                     TransportError::SubsystemUnavailable {
-                        stderr: printable(stderr.trim()),
+                        stderr: stderr_text(stderr),
                         ssh: Box::new(said_now(said)),
                     },
                 ));
@@ -372,7 +406,7 @@ fn close_outcome(stderr: &str, ssh: SshMessages) -> Result<Bytes, NetconfError> 
     } else {
         format!(
             "the device closed the netconf subsystem, and said: {}",
-            printable(said)
+            stderr_text(said)
         )
     };
     Err(NetconfError::Transport(TransportError::Closed {
@@ -2035,8 +2069,9 @@ mod target_tests {
 
 #[cfg(test)]
 mod stderr_tests {
-    use super::{append_capped, close_outcome};
+    use super::{append_capped, close_outcome, keep_stderr, stderr_log_text, stderr_text};
     use crate::error::{NetconfError, SshMessages, TransportError};
+    use crate::redact::REDACTED;
 
     /// If the device said nothing, an empty read is the signal the layer above is
     /// waiting for: «the peer hung up». `read_message` is what turns that into an
@@ -2102,6 +2137,81 @@ mod stderr_tests {
             s.ends_with("said: bell\\u{0007} and\\r\\nmore\\u{2028}x"),
             "{s}"
         );
+    }
+
+    /// A secret the device wrote on stderr is redacted in the error (0.7.0). The
+    /// text used to go out made printable only.
+    #[test]
+    fn what_the_device_said_has_its_secrets_redacted() {
+        let said = "error: could not load\nencrypted-password \"$9$leak\";\n";
+        let e = close_outcome(said, SshMessages::default()).unwrap_err();
+        let NetconfError::Transport(TransportError::Closed { detail: s, .. }) = e else {
+            panic!("expected a transport error");
+        };
+        assert!(!s.contains("$9$leak"), "{s}");
+        assert!(s.contains("could not load\\nencrypted-password"), "{s}");
+        assert!(s.contains(REDACTED), "{s}");
+        // The same text is what `SubsystemUnavailable` carries.
+        let text = stderr_text(said);
+        assert!(!text.contains("$9$leak"), "{text}");
+        assert!(text.starts_with("error: could not load\\n"), "{text}");
+    }
+
+    /// The log line carries what the device has just written, redacted with what
+    /// it wrote before (0.7.0). A private key written a line at a time has its
+    /// `-----BEGIN` line in an earlier piece, and a piece read alone is no key.
+    #[test]
+    fn the_log_line_is_redacted_with_what_came_before_it() {
+        let mut kept = String::new();
+        let mut lines = Vec::new();
+        for piece in [
+            "error: bad key\n-----BEGIN PRIVATE KEY-----\n",
+            "MIIEkeyBodyLineOne\n",
+            "MIIEkeyBodyLineTwo\n-----END PRIVATE KEY-----\n",
+            "secret ",
+            "\"hunter2\";\n",
+        ] {
+            let had = kept.len();
+            keep_stderr(&mut kept, piece.as_bytes(), 1);
+            lines.push(stderr_log_text(&kept, had));
+        }
+        let all = lines.join("|");
+        for secret in ["keyBodyLineOne", "keyBodyLineTwo", "hunter2"] {
+            assert!(!all.contains(secret), "{secret}: {all}");
+        }
+        assert!(lines[0].starts_with("error: bad key"), "{all}");
+        // A line is logged when the device ends it, whole.
+        assert_eq!(lines[3], "", "{all}");
+        assert!(lines[4].starts_with("secret "), "{all}");
+        assert!(lines[4].ends_with(';'), "{all}");
+    }
+
+    /// A line the device has not ended is not logged yet (0.7.0): what makes a word
+    /// on it a secret may still come. The password in a URL is one only once the
+    /// `@` after it is there.
+    #[test]
+    fn a_line_is_logged_when_the_device_ends_it() {
+        let mut kept = String::new();
+        let had = kept.len();
+        keep_stderr(&mut kept, b"fetching scp://user:hunter2", 1);
+        assert_eq!(stderr_log_text(&kept, had), "");
+        let had = kept.len();
+        keep_stderr(&mut kept, b"@host/file failed\n", 1);
+        let line = stderr_log_text(&kept, had);
+        assert!(!line.contains("hunter2"), "{line}");
+        assert!(line.starts_with("fetching scp://user:"), "{line}");
+        assert!(line.ends_with("@host/file failed"), "{line}");
+    }
+
+    /// A piece the cap left no room for is not kept, so it can not be redacted with
+    /// what came before it, and the log line does not carry it (0.7.0).
+    #[test]
+    fn a_piece_past_the_cap_is_not_logged() {
+        let mut kept = "x".repeat(super::MAX_STDERR);
+        let had = kept.len();
+        keep_stderr(&mut kept, b"secret \"hunter2\";", 1);
+        assert_eq!(kept.len(), had);
+        assert_eq!(stderr_log_text(&kept, had), "");
     }
 
     /// The cap never cuts inside a character. It used to cut with `truncate` at a

@@ -628,3 +628,35 @@ fn a_processing_instruction_in_an_rpc_error_is_kept() {
         other => panic!("expected a Device error, got {other:?}"),
     }
 }
+
+/// The parsers a consumer calls itself redact the document a `Protocol` error
+/// carries (0.7.0). No policy is bound there, and it went out as it came.
+#[test]
+fn a_protocol_error_from_a_public_parser_carries_the_document_redacted() {
+    use netconf::NetconfError;
+    use netconf::rpc::{extract_compare_diff, parse_hello_capabilities};
+
+    let secret = "encrypted-password \"$9$leak\"";
+    let errors = [
+        // Not an <rpc-reply>.
+        parse_rpc_reply(&format!("<hello>{secret}</hello>")).unwrap_err(),
+        // Not well formed.
+        parse_rpc_reply(&format!("<rpc-reply>{secret}</oops>")).unwrap_err(),
+        // A hello without capabilities.
+        parse_hello_capabilities(&format!("<hello>{secret}</hello>")).unwrap_err(),
+        // A reply without <configuration-output>.
+        extract_compare_diff(&format!("<rpc-reply>{secret}</rpc-reply>")).unwrap_err(),
+    ];
+    for e in errors {
+        let NetconfError::Protocol {
+            received: Some(received),
+            ..
+        } = &e
+        else {
+            panic!("expected Protocol with the document, got {e:?}");
+        };
+        assert!(!received.contains("$9$leak"), "{received}");
+        assert!(received.contains("encrypted-password"), "{received}");
+        assert!(!e.to_string().contains("$9$leak"), "{e}");
+    }
+}

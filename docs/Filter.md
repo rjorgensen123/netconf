@@ -323,8 +323,8 @@ rather than too little.
   secret leaf even when the list does not know it
 
 The text is read as XML writes it: an entity is read as the character it stands for, so
-`&#x24;9&#x24;` is a `$9$`; a statement name glued to punctuation or a control character is still
-the name; an element is read by its local name, with any namespace prefix and attributes, and a
+`&#x24;9&#x24;` is a `$9$`, and so is one written with leading zeros; a statement name glued to
+punctuation or a control character is still the name; an element is read by its local name, with any namespace prefix and attributes, and a
 value that runs over several lines is redacted on all of them. A secret in a comment, in a CDATA
 section or in text that came from `&lt;…&gt;` is read like any other text, and text that looks like
 the marker gets no pass. Text the filter does not touch goes out exactly as it came in, and a second
@@ -336,7 +336,8 @@ A statement is redacted by its exact name, from the list below, and only where J
 secret in it: a word that merely holds `key`, `secret` or `password` is none of them. Where the
 name alone does not say it, its context does — the words before it on the line in set format, the
 blocks it is inside in text format (or the `[edit …]` banner of a compare diff), and its parent
-element in XML. From the statement on, the rest of the line goes, up to a Junos annotation.
+element in XML. From the statement on, the rest of the line goes, up to a Junos annotation — or up
+to the closing tags the line ends in, where the statement has ended before them with a `;` or a `}`.
 
 | Statement | Context | Where Junos has it |
 |---|---|---|

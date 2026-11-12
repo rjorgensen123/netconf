@@ -1302,3 +1302,69 @@ fn every_pem_block_but_a_certificate_is_redacted() {
     let ssh = "set system login user x authentication ssh-rsa \"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7keybody x@y\"";
     assert!(!r(ssh).contains("AAAAB3NzaC1yc2E"), "{}", r(ssh));
 }
+
+/// A character reference is read however many digits it has (0.7.0). `$` written
+/// with leading zeros is a `$` to every XML reader, and it was none here: the
+/// value went out as it came, for the consumer's reader to decode.
+#[test]
+fn a_character_reference_with_leading_zeros_is_read() {
+    for dollar in [
+        "&#x24;",
+        "&#36;",
+        "&#x0000000024;",
+        "&#0000000000036;",
+        "&#X00000000000000000000000000000024;",
+    ] {
+        let line = format!("description {dollar}9{dollar}abcdefgh");
+        let out = r(&line);
+        assert!(!out.contains("abcdefgh"), "{dollar}: {out}");
+        assert!(out.starts_with("description "), "{out}");
+        assert_eq!(r(&out), out, "not idempotent");
+    }
+    // What is no character reference is still none: no digits, no `;`, a code
+    // past the last character.
+    for not_one in ["&#;", "&#x;", "&#x24", "&#xFFFFFFFFFF;"] {
+        let line = format!("description {not_one}9{not_one}abcdefgh");
+        assert_eq!(r(&line), line);
+    }
+}
+
+/// A statement on the line of the tag that closes the element around it keeps the
+/// tag (0.7.0). The value used to run to the end of the line, the tag with it, and
+/// what went out was no longer XML.
+#[test]
+fn a_closing_tag_after_a_statement_is_kept() {
+    for (line, tail) in [
+        (
+            "<configuration-text>secret \"abc\";</configuration-text>",
+            ";</configuration-text>",
+        ),
+        ("authentication-key \"$9$abc\"; </bgp>", "; </bgp>"),
+        ("key { secret \"abc\"; }</a> </b>", " }</a> </b>"),
+    ] {
+        let out = r(line);
+        assert!(!out.contains("abc"), "{out}");
+        assert!(out.ends_with(tail), "{line}: {out}");
+        assert_eq!(r(&out), out, "not idempotent");
+    }
+}
+
+/// The tag is kept only where the statement has ended before it, with a `;` or a
+/// `}` (0.7.0). A value that runs up to the tag, or a quote still open in front of
+/// it, may hold the tag's text itself, and is redacted to the end of the line as
+/// before.
+#[test]
+fn a_closing_tag_the_value_may_hold_is_redacted_with_it() {
+    for line in [
+        "secret abc</x>",
+        "secret \"abc\"</x>",
+        "secret \"abc;</x>",
+        "secret \"abc</x>\";",
+        "secret abc&#59;</x>",
+        "secret \"abc\";&lt;/x&gt;",
+    ] {
+        let out = r(line);
+        assert!(!out.contains("abc"), "{line}: {out}");
+        assert!(!out.contains("/x"), "{line}: {out}");
+    }
+}
