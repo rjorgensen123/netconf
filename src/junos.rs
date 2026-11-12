@@ -343,6 +343,16 @@ impl<T: NetconfTransport> NetconfSession<T> {
         commit_history(&xml, &filter).map_err(|e| self.filtered(e))
     }
 
+    /// [`read_commit_history`](Self::read_commit_history), for a device that may
+    /// not have committed yet: no entry is no error.
+    async fn read_commit_entries(&mut self) -> Result<Vec<CommitEntry>, NetconfError> {
+        let xml = self
+            .rpc_raw("<get-commit-information/>", ReplyBudget::PerRpc)
+            .await?;
+        let filter = |text: &str| self.redacted(text.to_string());
+        commit_entries(&xml, &filter).map_err(|e| self.filtered(e))
+    }
+
     /// The device's commit history (0.7.0): one [`CommitRecord`] per commit the
     /// device keeps, the newest first, as `<get-commit-information>` describes them
     /// — who committed, through what, when, and with which log message.
@@ -395,6 +405,18 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// commit is live, and the device rolls it back by itself unless it is
     /// confirmed.
     ///
+    /// **The record is this session's commit, and nothing else** (0.7.0). The
+    /// device's commit history is read before the commit as well as after it. The
+    /// commit is recorded when it is the one new entry above what was the last
+    /// commit before, and the device has it under the user this session is logged
+    /// in as. The first entry after the commit used to be taken as it stood, so a
+    /// commit by someone else that landed between this one and the read was
+    /// recorded as this session's, and the commit that confirms found the device
+    /// unchanged. When the session cannot tell, the error is `CommittedThenFailed`
+    /// and says what it found; nothing is recorded, so the commit that confirms is
+    /// not checked. A history that cannot be read before the commit fails the
+    /// call with nothing committed.
+    ///
     /// Returns the device's `<rpc-reply>` to the commit, redacted as
     /// [`commit_check`](Self::commit_check)'s is (0.5.13).
     pub async fn commit_confirmed(
@@ -411,6 +433,9 @@ impl<T: NetconfTransport> NetconfSession<T> {
         let inner = format!(
             "<commit-configuration>{sync}<confirmed/><confirm-timeout>{minutes}</confirm-timeout>{log}</commit-configuration>"
         );
+        // What the device's last commit is before this one (0.7.0), to tell this
+        // one by afterwards. Nothing is committed if it cannot be read.
+        let before = self.read_commit_entries().await?;
         let reply = self.send_commit(&inner).await?;
         // The commit is live. A failure to read the record is reported as coming
         // after it, with the device's answer to the commit (0.5.13).
@@ -423,6 +448,24 @@ impl<T: NetconfTransport> NetconfSession<T> {
                 });
             }
         };
+        if let Some(why) = not_own_commit(&before, &history, self.user.as_deref()) {
+            let last = |entries: &[CommitEntry]| match entries.first() {
+                Some(entry) => self.shown(entry.line()),
+                None => "(none)".to_string(),
+            };
+            let error = NetconfError::protocol(format!(
+                "the confirmed commit is live, and the session cannot tell which commit in \
+                 the device's history is its own: {why}. The last commit before it: {}. The \
+                 last commit now: {}. Nothing is recorded, so the commit that confirms it \
+                 is not checked against the device",
+                last(&before),
+                last(&history)
+            ));
+            return Err(NetconfError::CommittedThenFailed {
+                reply,
+                error: Box::new(error),
+            });
+        }
         // `commit_history` refuses a history without a first entry.
         let entry = history.swap_remove(0);
         self.confirmed = Some(ConfirmedCommit { entry });
@@ -747,6 +790,14 @@ impl CommitEntry {
         parts.join(" · ")
     }
 
+    /// The text of the field `name`, when the entry has it.
+    fn field(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
+    }
+
     /// Whether `other` is the same commit: every field the same but the sequence
     /// number, which is the commit's place in the history and moves on by one with
     /// every later commit.
@@ -779,13 +830,11 @@ fn date_time_seconds(e: &BytesStart<'_>) -> Option<String> {
 }
 
 /// The `<commit-history>` entries of a `<get-commit-information>` reply, in the
-/// device's order — the newest first. A reply whose first entry is missing or
-/// empty is `Protocol`, carrying the reply: a device that has committed has at
-/// least one.
+/// device's order — the newest first. None, for a device that has not committed.
 ///
 /// What a `Protocol` error quotes of the document goes through `filter`, then is
 /// made printable (0.5.13).
-fn commit_history(
+fn commit_entries(
     xml: &str,
     filter: crate::rpc::Filter<'_>,
 ) -> Result<Vec<CommitEntry>, NetconfError> {
@@ -904,7 +953,17 @@ fn commit_history(
             Ok(_) => {}
         }
     }
-    // The reply goes with the error (0.5.13).
+    Ok(entries)
+}
+
+/// [`commit_entries`], for where the device's last commit is what is asked for: a
+/// reply whose first entry is missing or empty is `Protocol`, carrying the reply
+/// (0.5.13) — a device that has committed has at least one.
+fn commit_history(
+    xml: &str,
+    filter: crate::rpc::Filter<'_>,
+) -> Result<Vec<CommitEntry>, NetconfError> {
+    let entries = commit_entries(xml, filter)?;
     if entries.first().is_none_or(|e| e.fields.is_empty()) {
         return Err(NetconfError::protocol_with(
             "commit information: the reply has no <commit-history> entry — the device has not \
@@ -913,6 +972,54 @@ fn commit_history(
         ));
     }
     Ok(entries)
+}
+
+/// Why the first entry of `after` can not be taken for the commit this session
+/// just made, if it can not (0.7.0). `before` is the device's history read before
+/// the commit, `after` the one read after it, and `user` the user the session is
+/// logged in as, when it knows.
+///
+/// The commit is this session's when it is the one new entry above what was the
+/// last commit before it, and — when the session knows who it is — the device has
+/// that user on it. The first entry used to be taken as it stood: a commit by
+/// someone else, landing between this session's commit and its read of the
+/// history, was recorded as this session's, and the commit that confirms then
+/// found the device unchanged.
+fn not_own_commit(
+    before: &[CommitEntry],
+    after: &[CommitEntry],
+    user: Option<&str>,
+) -> Option<String> {
+    let new = match before.first() {
+        None => Some(after.len()),
+        Some(last) => after.iter().position(|e| e.same_commit(last)),
+    };
+    match new {
+        Some(1) => {}
+        Some(0) => return Some("the history holds no commit that was not there before it".into()),
+        Some(n) => {
+            return Some(format!(
+                "{n} commits have come since the history was read before it"
+            ));
+        }
+        None => {
+            return Some(
+                "the commit that was the last one before it is no longer in the history".into(),
+            );
+        }
+    }
+    let by = after.first().and_then(|e| e.field("user"));
+    match (user, by) {
+        (Some(user), Some(by)) if user != by => Some(format!(
+            "the one new commit was made by another user than this session's ({})",
+            crate::wire::printable(user)
+        )),
+        (Some(user), None) => Some(format!(
+            "the one new commit names no user, and this session's is {}",
+            crate::wire::printable(user)
+        )),
+        _ => None,
+    }
 }
 
 /// A `get_configuration` filter as the gate read it: the element names it checks, and
@@ -1293,6 +1400,14 @@ mod commit_budget_tests {
         ))
     }
 
+    /// The history of a device that has not committed: what a confirmed commit
+    /// reads before it commits.
+    fn no_commit_info() -> Vec<u8> {
+        eom(&format!(
+            "<rpc-reply xmlns=\"{BASE_1_0}\"><commit-information/></rpc-reply>"
+        ))
+    }
+
     fn diff() -> Vec<u8> {
         eom(&format!(
             "<rpc-reply xmlns=\"{BASE_1_0}\"><configuration-output>\
@@ -1340,6 +1455,7 @@ mod commit_budget_tests {
             Some(PER_COMMIT),
             vec![
                 (SLOW, ok()),
+                (QUICK, no_commit_info()),
                 (SLOW, ok()),
                 (QUICK, commit_info()),
                 (SLOW, ok()),
@@ -1431,5 +1547,80 @@ mod commit_budget_tests {
             Err(NetconfError::CommitUnanswered(inner)) if is_rpc_recv_timeout(&inner) => {}
             other => panic!("expected CommitUnanswered(Timeout {{ op: rpc-recv }}), got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod own_commit_tests {
+    //! Which commit in the device's history is the one a session just made
+    //! (0.7.0) — see `not_own_commit`.
+    use super::{commit_entries, not_own_commit};
+
+    fn history(entries: &[(&str, &str)]) -> Vec<super::CommitEntry> {
+        let body: String = entries
+            .iter()
+            .enumerate()
+            .map(|(n, (user, time))| {
+                let user = if user.is_empty() {
+                    String::new()
+                } else {
+                    format!("<user>{user}</user>")
+                };
+                format!(
+                    "<commit-history><sequence-number>{n}</sequence-number>{user}\
+                     <date-time>{time}</date-time></commit-history>"
+                )
+            })
+            .collect();
+        let xml = format!("<rpc-reply><commit-information>{body}</commit-information></rpc-reply>");
+        commit_entries(&xml, &crate::rpc::no_policy).unwrap()
+    }
+
+    /// The one new entry is the session's when the device has it under the
+    /// session's user — or when the session does not know who it is.
+    #[test]
+    fn the_one_new_commit_is_the_sessions_when_the_user_is() {
+        let before = history(&[("other", "t0")]);
+        let ours = history(&[("ops", "t1"), ("other", "t0")]);
+        assert_eq!(not_own_commit(&before, &ours, Some("ops")), None);
+        assert_eq!(not_own_commit(&before, &ours, None), None);
+        // A device that had not committed before.
+        assert_eq!(
+            not_own_commit(&[], &history(&[("ops", "t1")]), Some("ops")),
+            None
+        );
+
+        let theirs = history(&[("someone", "t1"), ("other", "t0")]);
+        let why = not_own_commit(&before, &theirs, Some("ops")).expect("another user's");
+        assert!(
+            why.contains("another user than this session's (ops)"),
+            "{why}"
+        );
+        // Whose it is, is not for the session to say when it knows no user.
+        assert_eq!(not_own_commit(&before, &theirs, None), None);
+
+        let nameless = history(&[("", "t1"), ("other", "t0")]);
+        let why = not_own_commit(&before, &nameless, Some("ops")).expect("no user on it");
+        assert!(why.contains("names no user"), "{why}");
+    }
+
+    /// Anything but one new entry is not one commit of this session's.
+    #[test]
+    fn anything_but_one_new_commit_cannot_be_told() {
+        let before = history(&[("other", "t0")]);
+        for (after, why) in [
+            (history(&[("other", "t0")]), "holds no commit"),
+            (
+                history(&[("someone", "t2"), ("ops", "t1"), ("other", "t0")]),
+                "2 commits have come",
+            ),
+            (history(&[("ops", "t1")]), "no longer in the history"),
+        ] {
+            let got = not_own_commit(&before, &after, Some("ops")).expect(why);
+            assert!(got.contains(why), "{got}");
+        }
+        assert!(
+            not_own_commit(&[], &history(&[("ops", "t2"), ("x", "t1")]), Some("ops")).is_some()
+        );
     }
 }

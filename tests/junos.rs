@@ -111,7 +111,7 @@ async fn commit_check_validates_without_committing() {
 
 #[tokio::test]
 async fn commit_confirmed_uses_minutes() {
-    let (mut s, log) = session(vec![ok_reply(), info_a()]).await;
+    let (mut s, log) = session(vec![info_before(), ok_reply_any(), info_a()]).await;
     s.commit_confirmed(5, None).await.unwrap();
     let sent = sent_str(&log);
     assert!(sent.contains("<confirmed/>"));
@@ -148,17 +148,55 @@ fn info_a() -> Vec<u8> {
     )
 }
 
+/// The device's history before the commit `commit_info_reply` shows on top: the one
+/// commit that stands below it there. A confirmed commit reads the history before
+/// it commits (0.7.0), to tell its own commit by afterwards.
+fn info_before() -> Vec<u8> {
+    eom(&format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><commit-information>\
+         <commit-history><sequence-number>0</sequence-number><user>other</user>\
+         <client>cli</client><date-time>2026-10-01 08:00:00 UTC</date-time></commit-history>\
+         </commit-information></rpc-reply>"
+    ))
+}
+
+/// The history of a device that has not committed: none.
+fn no_history() -> Vec<u8> {
+    eom(&format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><commit-information/></rpc-reply>"
+    ))
+}
+
+/// The history after one more commit on top of [`info_a`].
+fn info_a_then_one_more() -> Vec<u8> {
+    eom(&format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><commit-information>\
+         <commit-history><sequence-number>0</sequence-number><user>rjorgensen</user>\
+         <client>netconf</client><date-time junos:seconds=\"2\">2026-10-03 10:05:00 UTC\
+         </date-time><log>commit confirmed, rollback in 5mins</log></commit-history>\
+         <commit-history><sequence-number>1</sequence-number><user>rjorgensen</user>\
+         <client>netconf</client><date-time junos:seconds=\"1\">2026-10-03 10:00:00 UTC\
+         </date-time><log>commit confirmed, rollback in 5mins</log></commit-history>\
+         <commit-history><sequence-number>2</sequence-number><user>other</user>\
+         <client>cli</client><date-time>2026-10-01 08:00:00 UTC</date-time></commit-history>\
+         </commit-information></rpc-reply>"
+    ))
+}
+
 /// Off by default: every commit is sent exactly as before the option existed.
 #[tokio::test]
 async fn commits_carry_no_synchronize_by_default() {
-    // Each confirmed commit reads the device's commit information after it.
+    // Each confirmed commit reads the device's commit information before it and
+    // after it.
     let (mut s, log) = session(vec![
         ok_reply_any(),
         ok_reply_any(),
+        info_before(),
         ok_reply_any(),
         info_a(),
-        ok_reply_any(),
         info_a(),
+        ok_reply_any(),
+        info_a_then_one_more(),
     ])
     .await;
     s.commit(None).await.unwrap();
@@ -173,11 +211,11 @@ async fn commits_carry_no_synchronize_by_default() {
             "<commit-configuration><log>t</log></commit-configuration>",
         ),
         (
-            3,
+            4,
             "<commit-configuration><confirmed/><confirm-timeout>5</confirm-timeout></commit-configuration>",
         ),
         (
-            5,
+            7,
             "<commit-configuration><confirmed/><confirm-timeout>5</confirm-timeout><log>t</log></commit-configuration>",
         ),
     ] {
@@ -192,10 +230,12 @@ async fn commits_carry_synchronize_when_set() {
     let (mut s, log) = session(vec![
         ok_reply_any(),
         ok_reply_any(),
+        info_before(),
         ok_reply_any(),
         info_a(),
-        ok_reply_any(),
         info_a(),
+        ok_reply_any(),
+        info_a_then_one_more(),
     ])
     .await;
     s.set_synchronize_commits(true);
@@ -214,11 +254,11 @@ async fn commits_carry_synchronize_when_set() {
             "<commit-configuration><synchronize/><log>t</log></commit-configuration>",
         ),
         (
-            3,
+            4,
             "<commit-configuration><synchronize/><confirmed/><confirm-timeout>5</confirm-timeout></commit-configuration>",
         ),
         (
-            5,
+            7,
             "<commit-configuration><synchronize/><confirmed/><confirm-timeout>5</confirm-timeout><log>t</log></commit-configuration>",
         ),
     ] {
@@ -1119,6 +1159,7 @@ async fn the_confirming_commit_is_withheld_when_the_device_changed() {
          \"$6$leak\";</configuration-output></configuration-information></rpc-reply>"
     ));
     let (mut s, log) = session(vec![
+        info_before(),
         ok_reply_any(),
         info_a(),
         foreign_then_ours,
@@ -1155,7 +1196,7 @@ async fn the_confirming_commit_is_withheld_when_the_device_changed() {
 
     // Another commit, and ours is no longer in the history: the error says so, and
     // nothing is fetched or made up.
-    let (mut s, log) = session(vec![ok_reply_any(), info_a(), info_b()]).await;
+    let (mut s, log) = session(vec![info_before(), ok_reply_any(), info_a(), info_b()]).await;
     s.commit_confirmed(5, Some("job")).await.unwrap();
     match s.commit(Some("job")).await {
         Err(NetconfError::ChangedSinceConfirmed(c)) => {
@@ -1175,7 +1216,14 @@ async fn the_confirming_commit_is_withheld_when_the_device_changed() {
     assert_eq!(sent.matches("<commit-configuration").count(), 1, "{sent}");
 
     // Changes loaded in the candidate: the diff the check read goes with the error.
-    let (mut s, log) = session(vec![ok_reply_any(), info_a(), info_a(), some_diff()]).await;
+    let (mut s, log) = session(vec![
+        info_before(),
+        ok_reply_any(),
+        info_a(),
+        info_a(),
+        some_diff(),
+    ])
+    .await;
     s.commit_confirmed(5, Some("job")).await.unwrap();
     match s.commit(Some("job")).await {
         Err(NetconfError::ChangedSinceConfirmed(c)) => {
@@ -1195,6 +1243,7 @@ async fn the_confirming_commit_is_withheld_when_the_device_changed() {
 
     // Unchanged: the commit confirms, and the record is cleared.
     let (mut s, log) = session(vec![
+        info_before(),
         ok_reply_any(),
         info_a(),
         info_a(),
@@ -1209,9 +1258,10 @@ async fn the_confirming_commit_is_withheld_when_the_device_changed() {
         .await
         .expect("nothing pending: no check, one request");
     let sent = sent_str(&log);
+    // Before the confirmed commit, after it, and before the commit that confirms.
     assert_eq!(
         sent.matches("<get-commit-information/>").count(),
-        2,
+        3,
         "{sent}"
     );
     assert_eq!(sent.matches("<commit-configuration").count(), 3, "{sent}");
@@ -1224,7 +1274,12 @@ async fn a_confirmed_commit_whose_record_cannot_be_read_is_committed_then_failed
     let no_entry = eom(&format!(
         "<rpc-reply xmlns=\"{BASE_1_0}\"><commit-information/></rpc-reply>"
     ));
-    let (mut s, _log) = session(vec![commit_results("<commit-success/>"), no_entry]).await;
+    let (mut s, _log) = session(vec![
+        info_before(),
+        commit_results("<commit-success/>"),
+        no_entry,
+    ])
+    .await;
     match s.commit_confirmed(5, None).await {
         Err(NetconfError::CommittedThenFailed { reply, error }) => {
             assert!(error.to_string().contains("commit-history"), "{error}");
@@ -1256,6 +1311,7 @@ async fn the_answer_to_a_commit_reaches_the_caller() {
     let (mut s, _log) = session(vec![
         commit_results("<commit-check-success/>"),
         commit_results("<commit-success/>"),
+        info_before(),
         commit_results("<commit-success/>"),
         info_a(),
     ])
@@ -1285,6 +1341,7 @@ async fn the_record_of_a_confirmed_commit_can_be_read() {
          <configuration-output/></configuration-information></rpc-reply>"
     ));
     let (mut s, _log) = session(vec![
+        info_before(),
         ok_reply_any(),
         info_a(),
         info_a(),
@@ -1331,7 +1388,7 @@ async fn a_commit_entry_is_filtered_before_it_is_made_printable() {
         )
     };
 
-    let (mut s, _log) = session(vec![ok_reply_any(), ours(), theirs()]).await;
+    let (mut s, _log) = session(vec![info_before(), ok_reply_any(), ours(), theirs()]).await;
     s.commit_confirmed(5, Some("job")).await.unwrap();
     let record = s.confirmed_commit().expect("a confirmed commit is waiting");
     assert!(record.contains("log=job $9$"), "{record}");
@@ -1357,7 +1414,7 @@ async fn a_commit_entry_is_filtered_before_it_is_made_printable() {
         other => panic!("expected ChangedSinceConfirmed, got {other:?}"),
     }
 
-    let (mut s, _log) = session(vec![ok_reply_any(), ours()]).await;
+    let (mut s, _log) = session(vec![info_before(), ok_reply_any(), ours()]).await;
     s.set_policy(
         ConfigPolicy::with_default_floor()
             .grant(Scope::LogicalUnits, Access::Rw)
@@ -1392,7 +1449,14 @@ async fn a_diff_that_cannot_be_fetched_goes_with_the_change_it_was_for() {
         "<rpc-reply xmlns=\"{BASE_1_0}\"><rpc-error><error-tag>operation-failed</error-tag>\
          <error-message>rollback 1 is not available</error-message></rpc-error></rpc-reply>"
     ));
-    let (mut s, log) = session(vec![ok_reply_any(), info_a(), foreign_then_ours, refused]).await;
+    let (mut s, log) = session(vec![
+        info_before(),
+        ok_reply_any(),
+        info_a(),
+        foreign_then_ours,
+        refused,
+    ])
+    .await;
     s.commit_confirmed(5, Some("job")).await.unwrap();
     match s.commit(Some("job")).await {
         Err(NetconfError::ChangedSinceConfirmed(c)) => {
@@ -1432,7 +1496,7 @@ async fn nothing_in_a_commit_entry_is_skipped() {
          <log><![CDATA[job 42]]></log>loose words</commit-history>\
          </commit-information></rpc-reply>"
     ));
-    let (mut s, _log) = session(vec![ok_reply_any(), entry]).await;
+    let (mut s, _log) = session(vec![no_history(), ok_reply_any(), entry]).await;
     s.commit_confirmed(5, None).await.unwrap();
     assert_eq!(
         s.confirmed_commit().as_deref(),
@@ -1444,7 +1508,7 @@ async fn nothing_in_a_commit_entry_is_skipped() {
          <commit-history><sequence-number>1</sequence-number><user>old</user>\
          </commit-history></commit-information></rpc-reply>"
     ));
-    let (mut s, _log) = session(vec![ok_reply_any(), empty_first]).await;
+    let (mut s, _log) = session(vec![no_history(), ok_reply_any(), empty_first]).await;
     match s.commit_confirmed(5, None).await {
         Err(NetconfError::CommittedThenFailed { error, .. }) => {
             assert!(
@@ -1533,7 +1597,7 @@ async fn the_seconds_of_a_commit_are_in_the_record() {
         ))
     };
     for (seconds, field) in [("1759485600", "1759485600"), ("007", "007"), ("", "")] {
-        let (mut s, _log) = session(vec![ok_reply_any(), entry(seconds)]).await;
+        let (mut s, _log) = session(vec![no_history(), ok_reply_any(), entry(seconds)]).await;
         s.commit_confirmed(5, None).await.unwrap();
         assert_eq!(
             s.confirmed_commit().as_deref(),
@@ -1696,4 +1760,75 @@ async fn a_secret_in_the_commit_history_is_redacted() {
     let history = s.commit_history().await.unwrap();
     let log = history[0].log().unwrap();
     assert!(!log.contains("hunter2"), "{log}");
+}
+
+/// **A confirmed commit records its own commit, and nothing else** (0.7.0). The
+/// history is read before the commit as well as after it, and the commit is the
+/// session's when it is the one new entry above what was last before. The first
+/// entry after the commit used to be taken as it stood, so a commit by someone
+/// else that landed between this one and the read was recorded as this session's,
+/// and the commit that confirms found the device unchanged.
+#[tokio::test]
+async fn a_confirmed_commit_records_its_own_commit_and_nothing_else() {
+    // Someone else's commit landed right after ours: two new entries.
+    let two_new = eom(&format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><commit-information>\
+         <commit-history><sequence-number>0</sequence-number><user>someone</user>\
+         <client>cli</client><date-time>2026-10-03 10:00:01 UTC</date-time>\
+         <log>hotfix</log></commit-history>\
+         <commit-history><sequence-number>1</sequence-number><user>rjorgensen</user>\
+         <client>netconf</client><date-time>2026-10-03 10:00:00 UTC</date-time></commit-history>\
+         <commit-history><sequence-number>2</sequence-number><user>other</user>\
+         <client>cli</client><date-time>2026-10-01 08:00:00 UTC</date-time></commit-history>\
+         </commit-information></rpc-reply>"
+    ));
+    // The device's last commit before ours is gone from its history.
+    let unrelated = commit_info_reply("0", "rjorgensen", "2026-10-03 10:00:00 UTC", "job");
+    let before_unrelated = eom(&format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><commit-information>\
+         <commit-history><sequence-number>0</sequence-number><user>gone</user>\
+         <date-time>2026-09-01 08:00:00 UTC</date-time></commit-history>\
+         </commit-information></rpc-reply>"
+    ));
+    for (before, after, why) in [
+        (info_before(), two_new, "2 commits have come"),
+        (
+            info_before(),
+            info_before(),
+            "holds no commit that was not there before it",
+        ),
+        (before_unrelated, unrelated, "is no longer in the history"),
+    ] {
+        let (mut s, log) = session(vec![before, commit_results("<commit-success/>"), after]).await;
+        match s.commit_confirmed(5, Some("job")).await {
+            Err(NetconfError::CommittedThenFailed { reply, error }) => {
+                assert!(reply.contains("<commit-success/>"), "{reply}");
+                let text = error.to_string();
+                assert!(text.contains("cannot tell which commit"), "{text}");
+                assert!(text.contains(why), "{text}");
+                assert!(text.contains("The last commit before it: "), "{text}");
+                assert!(text.contains("The last commit now: "), "{text}");
+            }
+            other => panic!("{why}: expected CommittedThenFailed, got {other:?}"),
+        }
+        // Nothing is recorded, and the commit went out once.
+        assert_eq!(s.confirmed_commit(), None, "{why}");
+        assert_eq!(
+            sent_str(&log).matches("<commit-configuration").count(),
+            1,
+            "{why}"
+        );
+    }
+
+    // A history that cannot be read before the commit: nothing is committed.
+    let refused = eom(&format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><rpc-error><error-severity>error</error-severity>\
+         <error-message>permission denied</error-message></rpc-error></rpc-reply>"
+    ));
+    let (mut s, log) = session(vec![refused]).await;
+    assert!(matches!(
+        s.commit_confirmed(5, None).await,
+        Err(NetconfError::Device(_))
+    ));
+    assert!(!sent_str(&log).contains("<commit-configuration"));
 }

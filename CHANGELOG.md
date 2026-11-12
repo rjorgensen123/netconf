@@ -33,6 +33,9 @@ Every notable change to this crate is recorded here. The format follows
   elements, an end tag that closes the `<rpc>` it is sent in, `]]>]]>` in end-of-message framing —
   or none, or not well-formed, is refused as `Protocol` before anything is sent. It was sent as
   written, and the answer to the second request was read as the answer to the next one.
+- 2026-11-13 — `commit_confirmed` records its own commit and nothing else. It reads the commit
+  history before and after the commit, and takes the one new entry under the session's user;
+  otherwise it is `CommittedThenFailed`. The first entry after the commit was taken as it stood.
 - 2026-11-12 — `lock`, `unlock`, `discard_changes` and `rollback(0)` are changes, not reads: a
   policy that permits no change refuses them. `all_free(Ro)` runs no command beyond `show`,
   whatever is granted, as `read_only` does.

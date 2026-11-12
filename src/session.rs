@@ -54,6 +54,10 @@ pub struct NetconfSession<T: NetconfTransport> {
     /// [`connect`](Self::connect) (0.7.0). For what [`unanswered`](Self::unanswered)
     /// says.
     peer: Option<String>,
+    /// The user the session is logged in as, when it was made by
+    /// [`connect`](Self::connect) (0.7.0). A confirmed commit is recognised in the
+    /// device's commit history by it.
+    pub(crate) user: Option<String>,
 }
 
 /// Why a session sends nothing more (0.7.0).
@@ -211,6 +215,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
         let transport = T::connect(opts).await.map_err(redact_content)?;
         let mut session = Self::establish(transport, true).await?;
         session.peer = Some(format!("{}@{}:{}", opts.username, opts.host, opts.port));
+        session.user = Some(opts.username.clone());
         Ok(session)
     }
 
@@ -284,6 +289,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
             unanswered: None,
             locked: false,
             peer: None,
+            user: None,
         })
     }
 

@@ -316,6 +316,12 @@ This is the safety net under everything else: if you lose the connection midway,
 down the very thing you were working over, **the device reverts by itself**. Nobody has to make it
 in time to save it.
 
+**The confirmed commit is recorded as yours only when it is.** `commit_confirmed` reads the
+device's commit history before it commits and after, and takes the commit for its own when it is
+the one new entry and stands under the user you are logged in as. If someone else committed at
+the same moment, the error is `CommittedThenFailed` and says what it found: your commit is live,
+and you decide what to do with it.
+
 **The confirming commit checks the device first.** It commits only if the device's last commit is
 still the confirmed one and the candidate is clean. Otherwise it is withheld as
 `NetconfError::ChangedSinceConfirmed`, which carries both commit entries and the diff — and the

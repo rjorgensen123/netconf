@@ -536,9 +536,15 @@ approved. That is the consumer's to choose. `compare` shows what a commit would 
 `prepare_change` and `confirm_commit` (§5) lock, hand over the diff, and commit only when the
 candidate still is what was seen.
 
-**A confirmed commit is confirmed only into the state it was made in**. After
-`commit_confirmed` has been answered, the session reads `<get-commit-information/>` and keeps the
-device's last commit — the confirmed one — as its record: the first `<commit-history>` entry's
+**A confirmed commit is confirmed only into the state it was made in**. `commit_confirmed` reads
+`<get-commit-information/>` before the commit and after it, and keeps the commit as its record
+when it can tell that it is its own: it is the one new entry above what was the device's last
+commit before, and the device has it under the user the session is logged in as (a session made
+with `establish` knows no user, and goes by the first alone). Otherwise the error is
+`CommittedThenFailed`: `the confirmed commit is live, and the session cannot tell which commit in
+the device's history is its own: <why>. The last commit before it: <entry>. The last commit now:
+<entry>. …` — nothing is recorded, and the commit that confirms is not checked. A history that
+cannot be read before the commit fails the call with nothing committed. The record is the first `<commit-history>` entry's
 fields, `name=value`, joined with ` · `, with the `junos:seconds` on `<date-time>` as the field
 `seconds` after it — `date-time=2026-10-03 10:00:00 UTC · seconds=1759485600`, the commit's time as
 a number, read strictly as one; what is not one goes as it stood. The
