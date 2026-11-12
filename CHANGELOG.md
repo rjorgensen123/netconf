@@ -91,6 +91,8 @@ Every notable change to this crate is recorded here. The format follows
   holds while it logs in. The Getting started block in the README is split in two.
 - 2026-11-12 — A connect refused for its `Timeouts` no longer spends the device's one legacy
   warning.
+- 2026-11-12 — CI builds with the Rust version in `Cargo.toml`, builds the documentation, and
+  checks the checksum of cargo-deny before running it.
 - 2026-11-12 — The README and the guide say that `ConfigPolicy::new` takes a floor of the
   consumer's own, and that an empty list is no floor. They said the floor could not be set aside.
 - 2026-11-12 — **Breaking:** `NetconfError::Timeout` and `SshMessages` have a new field, `stderr`.

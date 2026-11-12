@@ -9,6 +9,9 @@
 # included, and there are no path dependencies — so CI builds exactly what a
 # consumer builds. `.cargo/config.toml` names a registry for publishing only;
 # nothing in a build reads it.
+# The image is not pinned to a digest. It is the operating system the jobs run in;
+# the Rust they use is the one the crate asks for, installed in each job. A pinned
+# image would have to be moved by hand, and would pin nothing that matters here.
 name: CI
 
 on:
@@ -33,8 +36,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Add clippy and rustfmt
-        run: rustup component add clippy rustfmt
+      # The crate says which Rust it is built with: `rust-version` in Cargo.toml.
+      # CI uses that one, in every job, and not whatever the image happens to hold,
+      # so what is tested is what the crate asks for. The version is read, checked
+      # for its form, installed, and checked again once it is the default.
+      - name: Use the Rust the crate asks for
+        run: |
+          RUST=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          echo "$RUST" | grep -Eqx '[0-9]+\.[0-9]+(\.[0-9]+)?'
+          rustup toolchain install "$RUST" --profile minimal --component clippy --component rustfmt
+          rustup default "$RUST"
+          case "$(rustc --version)" in
+            "rustc $RUST "*|"rustc $RUST."*) ;;
+            *) echo "the default is not Rust $RUST: $(rustc --version)"; exit 1 ;;
+          esac
 
       - name: Format check
         run: cargo fmt --all --check
@@ -61,6 +76,13 @@ jobs:
       - name: Clippy with russh-transport (warnings are errors)
         run: cargo clippy --all-targets --locked --features russh-transport -- -D warnings
 
+      # The documentation is built with warnings as errors: a broken link in a doc
+      # comment is a wrong statement about the code.
+      - name: Docs (warnings are errors)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --all-features
+
   # The dependency audit: RustSec advisories, with the documented
   # RUSTSEC-2023-0071 exception (see deny.toml), the licence allowlist, the
   # aws-lc ban and the source check. `all-features` in deny.toml means the russh
@@ -75,12 +97,31 @@ jobs:
         with:
           persist-credentials: false
 
+      # The crate says which Rust it is built with: `rust-version` in Cargo.toml.
+      # CI uses that one, in every job, and not whatever the image happens to hold,
+      # so what is tested is what the crate asks for. The version is read, checked
+      # for its form, installed, and checked again once it is the default.
+      - name: Use the Rust the crate asks for
+        run: |
+          RUST=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          echo "$RUST" | grep -Eqx '[0-9]+\.[0-9]+(\.[0-9]+)?'
+          rustup toolchain install "$RUST" --profile minimal --component clippy --component rustfmt
+          rustup default "$RUST"
+          case "$(rustc --version)" in
+            "rustc $RUST "*|"rustc $RUST."*) ;;
+            *) echo "the default is not Rust $RUST: $(rustc --version)"; exit 1 ;;
+          esac
+
+      # The archive is checked against its SHA-256 before anything in it is run,
+      # and what was installed is asked for its version afterwards.
       - name: Fetch cargo-deny
         run: |
           curl -sSfL -o /tmp/cd.tgz \
             https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  /tmp/cd.tgz" | sha256sum -c -
           tar -xzf /tmp/cd.tgz -C /tmp --strip-components=1
           install /tmp/cargo-deny /usr/local/bin/
+          test "$(cargo deny --version)" = "cargo-deny 0.20.2"
 
       - name: cargo deny check
         run: cargo deny check
