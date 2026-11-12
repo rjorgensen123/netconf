@@ -1386,6 +1386,7 @@ the contract:
 | `ssh_connect` / `ssh_connect_failed` | info/warn | `ssh_connect`: the attempt (host, port, username, policy, `pinned`/`enrollment`), warn the first time per device under a legacy policy. `ssh_connect_failed` (host, port, `ssh_policy`, `error`): the TCP connection or the SSH handshake failed; a timeout, a rejected login or a refused subsystem are reported through their own errors, not this event |
 | `ssh_auth_failed` | warn | authentication rejected (the methods the device named, `partial_success`) |
 | `ssh_session_established` / `ssh_session_closed` | info | session lifecycle; established only once the device has opened the subsystem |
+| `ssh_session_failed` | warn | russh ended an established connection on an error — `error` is russh's text, redacted |
 | `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch or a host certificate (rejected) |
 | `ssh_host_key_enrollment` / `ssh_host_key_observed` | info | no pin — fingerprint observed |
 | `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run |
@@ -1480,6 +1481,7 @@ What a failure becomes (classified by russh's error types, not its message text)
 | the device refused the `netconf` subsystem, or closed the channel before answering | `SubsystemUnavailable { stderr, ssh }` |
 | the device closed the subsystem after writing to stderr, or after saying something over SSH | `Closed { detail, ssh, .. }`, `ssh.stderr` carrying the stderr text, redacted |
 | the device closed the subsystem and said nothing | an empty read; the session makes it `Closed` *(§2)* |
+| russh ended the connection on an error — a line that broke, a key re-exchange that failed | `Closed { detail: "the SSH connection failed: <russh's text>", ssh, .. }`, from the read or the send that found it gone |
 | the login, the channel, the subsystem request or a send failed, after the device said something over SSH | `Closed { detail, ssh, .. }`, `detail` carrying russh's text |
 | anything else | `Io` with russh's text |
 

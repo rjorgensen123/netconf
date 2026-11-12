@@ -552,6 +552,7 @@ an `event` field:
 | `ssh_connect_failed`, `ssh_auth_failed` | the connection or the login failed |
 | `ssh_host_key_verified`, `ssh_host_key_mismatch` | the host key matched, or did not |
 | `ssh_session_established`, `ssh_session_closed` | the session is up, or closed |
+| `ssh_session_failed` | the SSH connection broke under an established session — with why |
 | `ssh_host_key_probe`, `ssh_host_key_enrollment`, `ssh_host_key_observed`, `ssh_host_key_probe_failed` | `observe_host_key` |
 | `netconf_subsystem_stderr` | the device wrote on the subsystem's stderr — how much, never what |
 | `secrets_in_diff` | a diff carries secrets because the policy lets them through — never the content |

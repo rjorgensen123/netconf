@@ -311,6 +311,9 @@ static EVENTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 /// The level of every `ssh_connect` event, with its `username`, in order.
 static SSH_CONNECT_LEVELS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
+/// Every `ssh_session_failed` event, with all its fields as text.
+static SESSION_FAILED_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// Every `netconf_subsystem_stderr` event, with all its fields as text, from every
 /// test in this file: the event has no `username`.
 static STDERR_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -375,6 +378,12 @@ impl tracing::Subscriber for Capture {
         }
         let mut fields = Fields::default();
         event.record(&mut fields);
+        if fields.event.as_deref() == Some("ssh_session_failed") {
+            SESSION_FAILED_EVENTS
+                .lock()
+                .unwrap()
+                .push(fields.all.clone());
+        }
         if fields.event.as_deref() == Some("netconf_subsystem_stderr") {
             STDERR_EVENTS.lock().unwrap().push(fields.all.clone());
         }
@@ -1223,4 +1232,68 @@ async fn a_connect_refused_for_its_timeouts_does_not_spend_the_legacy_warning() 
     assert_eq!(levels(), ["WARN"]);
     assert!(RusshTransport::connect(&opts).await.is_err());
     assert_eq!(levels(), ["WARN", "INFO"]);
+}
+
+/// Put a wire between the client and the device, which the test can cut: a TCP
+/// relay on a port of its own. Sending on the returned channel resets the
+/// client's connection, as a line that breaks does.
+async fn behind_a_wire(
+    mut opts: ConnectOptions,
+) -> (ConnectOptions, tokio::sync::oneshot::Sender<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let device_port = opts.port;
+    opts.port = listener.local_addr().unwrap().port();
+    let (cut, mut cut_now) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let (mut client, _) = listener.accept().await.unwrap();
+        let mut device = tokio::net::TcpStream::connect(("127.0.0.1", device_port))
+            .await
+            .unwrap();
+        tokio::select! {
+            _ = tokio::io::copy_bidirectional(&mut client, &mut device) => {}
+            _ = &mut cut_now => {}
+        }
+        // A reset rather than a close: the client is told nothing first.
+        let _ = client.set_zero_linger();
+    });
+    (opts, cut)
+}
+
+/// **A connection that breaks says why** (0.7.0). russh knows what ended the
+/// connection, and netconf passed the error on without keeping it: the channel
+/// just ended, and the caller was told that the peer had closed. The reason is in
+/// the error now, and in the log.
+#[tokio::test]
+async fn a_connection_that_breaks_says_why() {
+    let opts = start(Device::NeverReads, Timeouts::default()).await;
+    let (opts, cut) = behind_a_wire(opts).await;
+    let mut transport = RusshTransport::connect(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the device opens the subsystem");
+
+    cut.send(()).expect("the wire is there to cut");
+    let started = Instant::now();
+    let e = tokio::time::timeout(Duration::from_secs(20), transport.recv())
+        .await
+        .expect("the read outlived the connection")
+        .expect_err("the connection is gone");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    let text = e.to_string();
+    let NetconfError::Transport(TransportError::Closed { detail, .. }) = e else {
+        panic!("expected Closed, got {text}");
+    };
+    assert!(
+        detail.starts_with("the SSH connection failed: ") && detail.len() > 30,
+        "{detail}"
+    );
+    let events = SESSION_FAILED_EVENTS.lock().unwrap().clone();
+    assert!(
+        events.iter().any(|e| e.contains("error=")),
+        "the failure was not logged: {events:?}"
+    );
 }

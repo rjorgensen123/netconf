@@ -96,6 +96,12 @@ fn note_exit(said: &StdMutex<SshMessages>, msg: &russh::ChannelMsg) {
     }
 }
 
+/// Why russh ended the connection, when it ended it on an error (0.7.0): a line
+/// that broke, a key re-exchange that failed. Shared between the handler, which
+/// russh tells, and the transport, which reports it. The text has passed
+/// `russh_text`.
+type Failed = Arc<StdMutex<Option<String>>>;
+
 /// The russh client handler. It verifies the host key against a pinned fingerprint,
 /// when one is set, and captures the observed one for enrollment. It keeps what the
 /// device says over SSH outside the channel: its login banner and its disconnect
@@ -107,6 +113,8 @@ struct ClientHandler {
     observed: Arc<StdMutex<Option<String>>>,
     /// What the device has said over SSH.
     said: Said,
+    /// Why russh ended the connection, if it did on an error.
+    failed: Failed,
 }
 
 impl russh::client::Handler for ClientHandler {
@@ -129,8 +137,11 @@ impl russh::client::Handler for ClientHandler {
     }
 
     /// The device's disconnect message (RFC 4253 §11.1), kept for the error the
-    /// ended connection brings (0.5.13). russh's default drops it; an error is
-    /// passed on as russh's default passes it.
+    /// ended connection brings (0.5.13). russh's default drops it.
+    ///
+    /// An error russh ends the connection on is kept too (0.7.0), and passed on as
+    /// russh's default passes it. It used to be passed on only: the channel then
+    /// just ended, and the caller was told that the peer had closed, not why.
     async fn disconnected(
         &mut self,
         reason: russh::client::DisconnectReason<Self::Error>,
@@ -145,7 +156,11 @@ impl russh::client::Handler for ClientHandler {
                 note(&self.said, |s| s.disconnect = Some(disconnect));
                 Ok(())
             }
-            russh::client::DisconnectReason::Error(e) => Err(e),
+            russh::client::DisconnectReason::Error(e) => {
+                let why = russh_text(&e);
+                *self.failed.lock().unwrap_or_else(|p| p.into_inner()) = Some(why);
+                Err(e)
+            }
         }
     }
 
@@ -451,7 +466,10 @@ async fn await_subsystem(
 ///
 /// A separate function so the decision can be unit-tested without SSH, like
 /// `recv_budget`.
-fn close_outcome(ssh: SshMessages) -> Result<Bytes, NetconfError> {
+fn close_outcome(ssh: SshMessages, failed: Option<String>) -> Result<Bytes, NetconfError> {
+    if let Some(why) = failed {
+        return Err(connection_failed(&why, ssh));
+    }
     if ssh.is_empty() {
         return Ok(Bytes::new());
     }
@@ -460,6 +478,17 @@ fn close_outcome(ssh: SshMessages) -> Result<Bytes, NetconfError> {
         partial: String::new(),
         ssh: Box::new(ssh),
     }))
+}
+
+/// The `Closed` for a connection russh ended on an error (0.7.0): what russh says
+/// went wrong, and what the device had said over SSH. It was reported as the peer
+/// having closed, with russh's reason left behind.
+fn connection_failed(why: &str, ssh: SshMessages) -> NetconfError {
+    NetconfError::Transport(TransportError::Closed {
+        detail: format!("the SSH connection failed: {}", printable(why)),
+        partial: String::new(),
+        ssh: Box::new(ssh),
+    })
 }
 
 /// Keep `data`, sent after the session was closed, up to `cap` bytes in all
@@ -506,6 +535,8 @@ pub struct RusshTransport {
     /// What the subsystem wrote on stderr, and how much of it has been handed
     /// over. It used to be discarded silently.
     stderr: Stderr,
+    /// Why russh ended the connection, if it did on an error — from the handler.
+    failed: Failed,
     /// Data that arrived before the device answered the subsystem request, handed
     /// out by the first `recv`. See `await_subsystem`.
     pending: Option<Bytes>,
@@ -859,10 +890,12 @@ impl RusshTransport {
 
         let observed = Arc::new(StdMutex::new(None));
         let said: Said = Arc::default();
+        let failed = Failed::default();
         let handler = ClientHandler {
             pinned: opts.host_key.clone(),
             observed: observed.clone(),
             said: said.clone(),
+            failed: failed.clone(),
         };
 
         // The TCP connection, the handshake and the host key check. From here until
@@ -983,6 +1016,7 @@ impl RusshTransport {
             channel,
             observed_host_key,
             stderr,
+            failed,
             pending,
             said,
             eof: false,
@@ -1207,6 +1241,28 @@ impl RusshTransport {
         ssh
     }
 
+    /// Why russh ended the connection, if it did on an error, logged as it is
+    /// reported (0.7.0). Once: the next call finds the connection closed.
+    fn failed(&mut self) -> Option<String> {
+        let why = self
+            .failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()?;
+        tracing::warn!(
+            event = "ssh_session_failed",
+            error = %printable(&why),
+            "the SSH connection failed"
+        );
+        Some(why)
+    }
+
+    /// What a read that finds the channel ended reports — see `close_outcome`.
+    fn ended_read(&mut self) -> Result<Bytes, NetconfError> {
+        let failed = self.failed();
+        close_outcome(self.said(true), failed)
+    }
+
     /// A `Timeout` for `op`, with what the device wrote on stderr (0.7.0). The
     /// session goes on, so it is the lines the device has ended.
     fn timed_out(&mut self, op: &'static str) -> NetconfError {
@@ -1242,7 +1298,10 @@ impl NetconfTransport for RusshTransport {
         // over SSH goes with it (0.5.13), and what it wrote on stderr (0.7.0).
         match timeout(budget, self.channel.data(bytes)).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(ended(e, self.said(true))),
+            Ok(Err(e)) => match self.failed() {
+                Some(why) => Err(connection_failed(&why, self.said(true))),
+                None => Err(ended(e, self.said(true))),
+            },
             Err(_) if std::time::Instant::now() >= self.deadline => {
                 Err(self.timed_out("session-ttl"))
             }
@@ -1272,7 +1331,7 @@ impl NetconfTransport for RusshTransport {
                 Some(left) if !left.is_zero() => left,
                 // After the device's EOF, the wait for what follows it ends in the
                 // close outcome, however it ends.
-                _ if self.eof => return close_outcome(self.said(true)),
+                _ if self.eof => return self.ended_read(),
                 Some(_) => return Err(self.timed_out("rpc-recv")),
                 None => return Err(self.timed_out("session-ttl")),
             };
@@ -1282,7 +1341,7 @@ impl NetconfTransport for RusshTransport {
             let msg = match timeout(budget, self.channel.wait()).await {
                 Ok(msg) => msg,
                 Err(_) if self.eof => {
-                    return close_outcome(self.said(true));
+                    return self.ended_read();
                 }
                 Err(_) if std::time::Instant::now() >= self.deadline => {
                     return Err(self.timed_out("session-ttl"));
@@ -1314,7 +1373,7 @@ impl NetconfTransport for RusshTransport {
                 }
                 Some(russh::ChannelMsg::Close) | None => {
                     self.closed = true;
-                    return close_outcome(self.said(true));
+                    return self.ended_read();
                 }
                 Some(other) => {
                     note_exit(&self.said, &other);
@@ -1480,6 +1539,7 @@ pub async fn observe_host_key(
         observed: observed.clone(),
         // The probe ends before the login, so there is nothing for the device to say.
         said: Arc::default(),
+        failed: Failed::default(),
     };
 
     // Every way out of the probe drops `tether`, and the device sees the connection
@@ -2061,6 +2121,7 @@ mod host_key_tests {
             pinned: Some(pinned.to_string()),
             observed: observed.clone(),
             said: Arc::default(),
+            failed: Default::default(),
         };
         (h, observed)
     }
@@ -2138,6 +2199,7 @@ mod host_key_tests {
             pinned: None,
             observed: observed.clone(),
             said: Arc::default(),
+            failed: Default::default(),
         };
         assert!(
             !enrolling.check_server_key(&certificate).await.unwrap(),
@@ -2230,8 +2292,8 @@ mod stderr_tests {
     /// error with its own wording, and that has to keep working.
     #[test]
     fn a_silent_disconnect_is_still_an_empty_read() {
-        assert_eq!(close_outcome(said("")).unwrap().len(), 0);
-        assert_eq!(close_outcome(said("   \n ")).unwrap().len(), 0);
+        assert_eq!(close_outcome(said(""), None).unwrap().len(), 0);
+        assert_eq!(close_outcome(said("   \n "), None).unwrap().len(), 0);
     }
 
     /// What the device said over SSH is an answer too (0.5.13): an exit status alone
@@ -2242,7 +2304,7 @@ mod stderr_tests {
             exit_status: Some(1),
             ..SshMessages::default()
         };
-        match close_outcome(ssh) {
+        match close_outcome(ssh, None) {
             Err(NetconfError::Transport(TransportError::Closed { detail, ssh, .. })) => {
                 assert!(detail.contains("closed the netconf subsystem"), "{detail}");
                 assert_eq!(ssh.exit_status, Some(1));
@@ -2257,7 +2319,7 @@ mod stderr_tests {
     /// `ssh.stderr` (0.7.0; part of `detail` before), and in the error's text.
     #[test]
     fn if_the_device_said_something_that_is_the_answer() {
-        let e = close_outcome(said("\nnetconf: permission denied\n")).unwrap_err();
+        let e = close_outcome(said("\nnetconf: permission denied\n"), None).unwrap_err();
         let text = e.to_string();
         let NetconfError::Transport(TransportError::Closed { detail, ssh, .. }) = e else {
             panic!("expected a transport error");
@@ -2268,6 +2330,28 @@ mod stderr_tests {
             text.ends_with("; the device wrote on stderr: netconf: permission denied"),
             "{text}"
         );
+    }
+
+    /// A connection russh ended on an error says so (0.7.0), with russh's reason:
+    /// it was an empty read, and the caller was told that the peer had closed.
+    #[test]
+    fn a_connection_that_failed_says_why() {
+        let failed = Some("Connection reset by peer (os error 104)".to_string());
+        let e = close_outcome(SshMessages::default(), failed.clone()).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "transport: closed: the SSH connection failed: Connection reset by peer (os error 104)"
+        );
+        // What the device had said goes with it.
+        let e = close_outcome(said("netconf: going down\n"), failed).unwrap_err();
+        let NetconfError::Transport(TransportError::Closed { detail, ssh, .. }) = e else {
+            panic!("expected Closed");
+        };
+        assert!(
+            detail.starts_with("the SSH connection failed: "),
+            "{detail}"
+        );
+        assert_eq!(ssh.stderr.as_deref(), Some("netconf: going down"));
     }
 
     /// A control character the device wrote on stderr is written out as an escape,

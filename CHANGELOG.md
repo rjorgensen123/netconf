@@ -97,6 +97,9 @@ Every notable change to this crate is recorded here. The format follows
   holds while it logs in. The Getting started block in the README is split in two.
 - 2026-11-12 — A connect refused for its `Timeouts` no longer spends the device's one legacy
   warning.
+- 2026-11-13 — A connection that breaks under a session says why: `Closed::detail` is `the SSH
+  connection failed: …` with russh's reason, and the new `ssh_session_failed` event logs it. It
+  was reported as the peer having closed.
 - 2026-11-12 — The docs say that a diff comes whole whatever the read grants are, with the
   secrets redacted: it is what a change does, and what is approved before a commit.
 - 2026-11-12 — The docs say what a bare `commit` does not give: it puts the whole shared
