@@ -262,7 +262,9 @@ let policy = ConfigPolicy::with_default_floor().allow_command("request system st
 
 A grant is a prefix of whole words, compared as written. An empty grant grants nothing.
 `read_only` refuses every command but `show` whatever is granted; `all_free(Rwd)` runs every
-command.
+command that is written as one: on one line, in printable ASCII, with its quotes closed. That
+policy is the access, not the format — a line break in a command is a second command to the
+device, whoever sent it.
 
 What a command must look like:
 

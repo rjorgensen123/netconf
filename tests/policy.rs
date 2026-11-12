@@ -1444,3 +1444,65 @@ fn check_set_payload_parses_and_judges() {
     let e = p.check_set_payload("edit interfaces").unwrap_err();
     assert!(e.contains("could not parse payload"), "{e}");
 }
+
+/// **`all_free(Rwd)` is the access, not the format** (0.7.0). It lifts what a command
+/// may do; how a command is written is checked under every policy. The check used
+/// to return before reading the command, and a line break in it is a second
+/// command to the device.
+#[test]
+fn all_free_is_the_access_not_the_format() {
+    let free = ConfigPolicy::all_free(Access::Rwd);
+
+    // What a command may do is lifted: any command, any pipe, as written.
+    for cmd in [
+        "request system reboot",
+        "show interfaces | save /var/tmp/x",
+        "SHOW version",
+        "show \"configuration\" system",
+        "show interfaces\tterse | match \"ge|xe\"",
+    ] {
+        free.check_command(cmd)
+            .unwrap_or_else(|e| panic!("{cmd:?}: {e}"));
+    }
+
+    // How it is written is not.
+    for (cmd, why) in [
+        (
+            "show version\nrequest system reboot",
+            "a control character, U+000A",
+        ),
+        (
+            "show version\rrequest system reboot",
+            "a control character, U+000D",
+        ),
+        ("show version\u{7}", "a control character, U+0007"),
+        (
+            "show version\u{2028}request system reboot",
+            "outside printable ASCII, U+2028",
+        ),
+        (
+            "show interfaces | match ø",
+            "outside printable ASCII, U+00F8",
+        ),
+        ("show log messages | match \"abc", "unbalanced quote"),
+        ("show version |", "an empty pipe"),
+        ("show version | | count", "an empty pipe"),
+        ("", "empty operational command"),
+        ("   ", "empty operational command"),
+    ] {
+        let e = free
+            .check_command(cmd)
+            .expect_err(&format!("{cmd:?} was let through"));
+        assert!(e.contains(why), "{cmd:?}: {e}");
+    }
+
+    // The same refusals, in the same words, under a policy that grants less.
+    let floored = ConfigPolicy::with_default_floor();
+    for cmd in ["show version\nrequest system reboot", "show version |", ""] {
+        assert_eq!(
+            floored.check_command(cmd).unwrap_err(),
+            free.check_command(cmd).unwrap_err(),
+            "{cmd:?}"
+        );
+    }
+}

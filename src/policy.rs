@@ -365,7 +365,9 @@ impl ConfigPolicy {
     /// For when the consumer deliberately wants full control. `all_free(Ro)` allows no
     /// changes; `all_free(Rw)` sets and modifies anywhere but does not delete;
     /// `all_free(Rwd)` allows everything. Fail-closed on unknown verbs still applies,
-    /// through [`parse_set_payload`].
+    /// through [`parse_set_payload`], and a command is still read for how it is
+    /// written — see [`check_command`](Self::check_command): this policy is the
+    /// access, not the format.
     pub fn all_free(access: Access) -> Self {
         ConfigPolicy {
             protected_roots: Vec::new(),
@@ -600,13 +602,17 @@ impl ConfigPolicy {
     ///
     /// An ordinary `show` runs under the device user's own authorisation on the box;
     /// this crate does not try to reproduce the device's login class.
+    ///
+    /// **`all_free(Rwd)` is the access, not the format** (0.7.0). It lifts what a
+    /// command may do: any command, any pipe. How a command is written is checked
+    /// all the same — one line of printable ASCII, every quote closed, not empty,
+    /// no pipe empty — since a line break in a command is a second command to the
+    /// device, whoever sent it. The check used to return before any of that.
     pub fn check_command(&self, cmd: &str) -> Result<(), String> {
         if self.mode == Mode::AllDeny {
             return Err("all-deny: nothing is permitted — no command (denied, fail-closed)".into());
         }
-        if self.is_all_free_rwd() {
-            return Ok(()); // the all/all rule: deliberate full control
-        }
+        // How the command is written, whatever the access.
         if let Some(c) = outside_printable_ascii(cmd) {
             let what = if c.is_control() {
                 "a control character"
@@ -621,6 +627,17 @@ impl ConfigPolicy {
         }
         let segments = split_pipes(cmd).map_err(|e| format!("{e} (denied, fail-closed)"))?;
         let pipes = &segments[1..];
+        let toks: Vec<&str> = segments[0].split_whitespace().collect();
+        let Some(first) = toks.first() else {
+            return Err("empty operational command".into());
+        };
+        if pipes.iter().any(|pipe| pipe.trim().is_empty()) {
+            return Err(EMPTY_PIPE.into());
+        }
+        // What the command may do.
+        if self.is_all_free_rwd() {
+            return Ok(()); // the all/all rule: deliberate full control
+        }
         if segments[0].contains('"') {
             return Err(
                 "a quote in the command itself — a quote belongs in a pipe's pattern, as in \
@@ -628,10 +645,6 @@ impl ConfigPolicy {
                     .into(),
             );
         }
-        let toks: Vec<&str> = segments[0].split_whitespace().collect();
-        let Some(first) = toks.first() else {
-            return Err("empty operational command".into());
-        };
         if *first != "show" {
             if first.eq_ignore_ascii_case("show") {
                 return Err(format!(
@@ -1178,13 +1191,16 @@ fn split_pipes(cmd: &str) -> Result<Vec<&str>, ParseError> {
     Ok(parts)
 }
 
+/// The refusal of a `|` with nothing after it.
+const EMPTY_PIPE: &str = "an empty pipe — `|` with nothing after it (denied, fail-closed)";
+
 /// Check one pipe after a `show`: it must name a [`READ_ONLY_PIPES`] entry, written
 /// as the device reads it — lowercase (0.5.11; `| MATCH` used to be folded). `compare`
 /// may name a rollback and nothing else: `| compare`, or `| compare rollback <n>`.
 fn check_pipe(pipe: &str) -> Result<(), String> {
     let mut words = pipe.split_whitespace();
     let Some(name) = words.next() else {
-        return Err("an empty pipe — `|` with nothing after it (denied, fail-closed)".into());
+        return Err(EMPTY_PIPE.into());
     };
     if !READ_ONLY_PIPES.contains(&name) {
         return Err(format!(

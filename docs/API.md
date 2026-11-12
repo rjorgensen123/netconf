@@ -616,7 +616,10 @@ optional prefix); an attribute unquoted, given twice, or holding `<`; an entity 
 predefined ones and character references; a control character, written directly or as a character
 reference such as `&#12;`; and `]]>]]>`. Whitespace between elements is not kept.
 
-**The command gate.** Every part of the command is checked, pipes included. Strings are read by the set parser's quoting
+**The command gate.** A command is checked for two things, in this order. **How it is written** is
+the same for every policy, `all_free(Rwd)` included: one line of printable ASCII and a tab, every
+quote closed, not empty, no pipe empty. **What it may do** is what the policy decides, and what
+`all_free(Rwd)` lifts. Every part of the command is checked, pipes included. Strings are read by the set parser's quoting
 rule (§6): a `|` inside a double-quoted string does not split the command, `\"` inside one is a
 quote that does not close it, and a quote that does not close refuses the command —
 `unbalanced quote: «command» (denied, fail-closed)`, the command redacted. A quote belongs in a
@@ -1003,7 +1006,8 @@ change …`.
 
 `all_free(access)` enforces **only the access level**, on any path — no scope rules and **no
 floor**. For reading, every `all_free` level opens every tree, `Ro` included; for commands beyond
-`show`, only `all_free(Rwd)` does, and then the command is not checked at all. Nothing is
+`show`, only `all_free(Rwd)` does: what the command does is then not checked, how it is written
+still is (§4) — `all_free` is the access, not the format. Nothing is
 redacted under it. **It turns the filter off:** netconf then runs without the feature
 it exists for, and the floor, the read gate and the redaction hold for every policy but this one.
 It exists for consumers that need "read/write/delete everything", and must be chosen deliberately.

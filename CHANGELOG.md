@@ -21,6 +21,10 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-12 — A private key in a PEM block no longer leaks when another rule redacts its `BEGIN`
   line: a secret statement or a `SECRET-DATA` mark in front of the marker took it with the value,
   and the key on the lines after it went out as it was.
+- 2026-11-12 — `all_free(Rwd)` is the access, not the format: a command is checked for how it is
+  written under every policy. A line break or another control character, a character outside
+  ASCII, a quote left open, an empty pipe and an empty command are refused under `all_free(Rwd)`
+  too. They were sent as written, and a line break in a command is a second command to the device.
 - 2026-11-12 — What a device writes on the subsystem's stderr is redacted before it leaves the
   transport, whatever the policy. It was made printable only.
 - 2026-11-12 — That text is no longer logged: `netconf_subsystem_stderr` says how much the device
