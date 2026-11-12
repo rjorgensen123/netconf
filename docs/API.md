@@ -244,7 +244,7 @@ pub struct NetconfSession<T: NetconfTransport>;
 impl<T: NetconfTransport> NetconfSession<T> {
  pub async fn connect(opts: &ConnectOptions) -> Result<Self, NetconfError>;
  pub async fn establish(transport: T, offer_1_1: bool) -> Result<Self, NetconfError>;
- pub async fn rpc(&mut self, inner: &str) -> Result<String, NetconfError>; // the <rpc-reply>, secrets redacted
+ pub async fn rpc(&mut self, inner: &str) -> Result<String, NetconfError>; // the raw line: one request, the caller's own text, no policy asked; the <rpc-reply>, secrets redacted
  pub async fn close(self) -> Result<SessionEnd, NetconfError>; // the warnings it held and what the device said over SSH; a failure is CloseFailed
  pub fn hello(&self) -> String; // the device's <hello>, whole, secrets redacted
  pub fn capabilities(&self) -> &[String]; // made printable
@@ -269,8 +269,18 @@ rules without a change grant) refuses `load_configuration`, `commit`, `commit_co
 `rollback` to a previous configuration, which loads one whole and so needs `all_free(Rwd)` like a
 `Text` load; `rollback(0)` only discards. The refusals are `NetconfError::Policy`: `no policy
 bound to the session — nothing is permitted, as under ConfigPolicy::all_deny() …`, `all-deny:
-nothing is permitted …`, `the policy bound to this session permits no change …`. Raw `rpc()` goes
-around the gates (low level, documented), not around the redaction.
+nothing is permitted …`, `the policy bound to this session permits no change …`.
+
+**`rpc`** is the raw line to the device, for what the crate has no function for. The request is
+the caller's own text: the crate does not read what it does, so no policy is asked — it goes around
+the gates, with or without a policy bound — and what it does to the device, a lock or a commit,
+the session does not know of. The reply and the errors are redacted as for any request. **One call
+is one request:** the text must be one XML element with nothing but whitespace around it, and in
+end-of-message framing it must not hold `]]>]]>`. Text that would be two requests to the device —
+two elements side by side, or an end tag that closes the `<rpc>` it is sent in — or none, or not
+well-formed, is refused as `Protocol` with nothing sent: `the request is not one request, and was
+not sent: <what it is instead>`. The session is as it was after the refusal. The requests of
+the typed helpers pass the same check.
 
 **`set_synchronize_commits`** is for devices with two Routing Engines. When it is on,
 `commit` and `commit_confirmed` — and so `confirm_commit` — carry `<synchronize/>`, the Junos

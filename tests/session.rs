@@ -1128,3 +1128,77 @@ async fn data_no_request_asked_for_ends_what_the_session_sends() {
         Err(NetconfError::Protocol { .. })
     ));
 }
+
+/// **One call to `rpc` is one request** (0.7.0). Text that would be two requests to
+/// the device, or none, is refused before anything is sent, whatever policy is
+/// bound: the caller sent one and thinks it is one, and the answer to the second
+/// would be read as the answer to whatever came next. The error says what the
+/// text is instead, and the session is as it was.
+#[tokio::test]
+async fn a_request_that_is_not_one_request_is_not_sent() {
+    use netconf::NetconfError;
+    let answer = format!("<rpc-reply xmlns=\"{}\"><ok/></rpc-reply>", rpc::BASE_1_0);
+    let (t, log) =
+        MockTransport::recording(vec![hello(false), encode(Framing::Eom, answer.as_bytes())]);
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    let hello_only = log.lock().unwrap().len();
+
+    for (text, why) in [
+        ("<lock/><unlock/>", "it is 2 requests"),
+        ("<a/> <b></b>\n<c/>", "it is 3 requests"),
+        (
+            "<get/></rpc><rpc message-id=\"9\"><kill-session/>",
+            "closes an element it did not open",
+        ),
+        ("<get-config><source>", "is left open"),
+        ("<get-config></source>", "not well-formed XML"),
+        ("", "there is no request in it"),
+        ("  \n ", "there is no request in it"),
+        ("show version", "something other than one element"),
+        ("<get/> and more", "something other than one element"),
+        ("<!-- one --><get/>", "something other than one element"),
+        (
+            "<?xml version=\"1.0\"?><get/>",
+            "something other than one element",
+        ),
+        ("<get a=\"]]>]]>\"/>", "it holds `]]>]]>`"),
+    ] {
+        match s.rpc(text).await {
+            Err(NetconfError::Protocol { detail, received }) => {
+                assert!(
+                    detail.starts_with("the request is not one request, and was not sent: "),
+                    "{text:?}: {detail}"
+                );
+                assert!(detail.contains(why), "{text:?}: {detail}");
+                assert_eq!(received, None);
+            }
+            other => panic!("{text:?}: expected a refusal, got {other:?}"),
+        }
+        assert_eq!(log.lock().unwrap().len(), hello_only, "{text:?} was sent");
+        assert!(s.unanswered().is_none(), "{text:?}");
+    }
+
+    // One element is one request, with whitespace around it and whatever inside it.
+    s.rpc("\n  <get-config><source><running/></source><!-- x --><![CDATA[</rpc>]]></get-config>\n")
+        .await
+        .expect("one request");
+    let sent = String::from_utf8_lossy(&log.lock().unwrap()).into_owned();
+    assert!(sent.contains("message-id=\"1\""), "{sent}");
+}
+
+/// `]]>]]>` ends a message only in end-of-message framing. In chunked framing it
+/// is text like any other, and the request is one request.
+#[tokio::test]
+async fn the_end_of_message_mark_is_text_in_a_chunked_session() {
+    let answer = format!(
+        "<rpc-reply xmlns=\"{}\" message-id=\"1\"><ok/></rpc-reply>",
+        rpc::BASE_1_0
+    );
+    let t = MockTransport::new(vec![
+        hello(true),
+        encode(Framing::Chunked, answer.as_bytes()),
+    ]);
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    assert_eq!(s.framing(), Framing::Chunked);
+    s.rpc("<get a=\"]]>]]>\"/>").await.expect("one request");
+}

@@ -21,6 +21,10 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-12 — A private key in a PEM block no longer leaks when another rule redacts its `BEGIN`
   line: a secret statement or a `SECRET-DATA` mark in front of the marker took it with the value,
   and the key on the lines after it went out as it was.
+- 2026-11-12 — One call to `rpc` is one request. Text that is two requests to the device — two
+  elements, an end tag that closes the `<rpc>` it is sent in, `]]>]]>` in end-of-message framing —
+  or none, or not well-formed, is refused as `Protocol` before anything is sent. It was sent as
+  written, and the answer to the second request was read as the answer to the next one.
 - 2026-11-12 — `all_free(Rwd)` is the access, not the format: a command is checked for how it is
   written under every policy. A line break or another control character, a character outside
   ASCII, a quote left open, an empty pipe and an empty command are refused under `all_free(Rwd)`
@@ -72,6 +76,8 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-12 — A certificate is not a secret, and is no longer redacted: a PEM block labelled
   `CERTIFICATE` is left as it is. Private keys, public keys on their own, SSH public keys and
   blocks with a label the filter does not know are redacted as before.
+- 2026-11-12 — The README and `docs/Filter.md` say what the raw `session.rpc` is: the one call
+  outside the policy. The protection covers what is done through the crate's functions.
 - 2026-11-12 — **Breaking:** `NetconfError::Timeout` and `SshMessages` have a new field, `stderr`.
   `Closed::detail` no longer holds the stderr text: it is in `ssh.stderr`.
 - 2026-11-12 — A redacted statement keeps the closing tags after it on the line:

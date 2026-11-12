@@ -38,10 +38,16 @@ speak the protocol — and that carries a set of filters for what is allowed to 
 
 **The filter is not configuration. It is the product.** A consumer of this crate is
 expected to hardcode the policy it wants, in its own source, and hand it to the session.
-From then on the rule is fixed: no request the consumer's own code can construct — not
-through a bug, not through a caller it did not anticipate, not through input that got
-further than it should have — reaches the equipment unless the policy already allowed
-it. The protection sits *below* the thing that might be wrong.
+From then on the rule is fixed: no read, command or change made through the crate's
+functions — not through a bug, not through a caller it did not anticipate, not through
+input that got further than it should have — reaches the equipment unless the policy
+already allowed it. The protection sits *below* the thing that might be wrong.
+
+One call stands outside this, by name: `session.rpc(xml)` sends a request the caller
+wrote itself. netconf cannot read what such a request does, so no policy is asked. It
+checks that the text is one request, and it redacts the reply as it does any other. Use
+it for what the crate has no function for, and keep input you do not control away from
+it.
 
 That is the whole idea. Everything else here exists to make it hold.
 
@@ -50,6 +56,7 @@ That is the whole idea. Everything else here exists to make it hold.
 - **Default-deny.** A session without a policy permits nothing — no read, no `show`,
   no command, no write. Not a warning, not a default-permit with a log line — it
   refuses, as `ConfigPolicy::all_deny()` does. The consumer defines the policy it uses.
+  The raw `session.rpc` is the one call outside the policy, as said above.
 - **An absolute floor.** Some things cannot be permitted at all, no matter what policy
   a consumer writes. A consumer can only ever narrow what it is allowed to do. The one
   exception is `all_free`, which turns the filter off — a choice made out loud, never

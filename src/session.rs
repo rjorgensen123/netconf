@@ -309,6 +309,20 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// which redacts nothing. This is the one place every reply passes, so it holds
     /// for the typed helpers and for this raw layer alike; the raw layer goes around
     /// the read and command gates, not around this.
+    ///
+    /// **This is the raw line to the device**, for what the crate has no function
+    /// for. The request is the caller's own text: the crate does not read what it
+    /// does, so no policy is asked, and what it does to the device — a lock, a
+    /// commit — the session does not know of. Keep input you do not control away
+    /// from it.
+    ///
+    /// **One call is one request** (0.7.0). The text must be one XML element, with
+    /// nothing but whitespace around it, and in end-of-message framing it must not
+    /// hold `]]>]]>`. Text that is two requests to the device — two elements, or an
+    /// end tag that closes the `<rpc>` it is sent in — is refused as `Protocol`,
+    /// with nothing sent, and the error says what it is instead. It was sent as
+    /// written, and the answer to the second request was read as the answer to
+    /// whatever came next. The session is as it was after such a refusal.
     pub async fn rpc(&mut self, inner: &str) -> Result<String, NetconfError> {
         self.rpc_with_budget(inner, ReplyBudget::PerRpc).await
     }
@@ -402,6 +416,13 @@ impl<T: NetconfTransport> NetconfSession<T> {
                  step, and sends nothing more",
                 bytes_as_text(self.decoder.buffered()),
             ));
+        }
+        // One call is one request (0.7.0). Text that is not one is not sent: the
+        // device would answer each, and the session reads one answer.
+        if let Err(why) = rpc::one_request(inner, self.encode_mode == Framing::Eom) {
+            return Err(NetconfError::protocol(format!(
+                "the request is not one request, and was not sent: {why}"
+            )));
         }
         self.transport.reply_budget(budget);
         self.msg_id += 1;

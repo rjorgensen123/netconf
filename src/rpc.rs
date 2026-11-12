@@ -102,6 +102,97 @@ pub fn client_hello(offer_1_1: bool) -> String {
     )
 }
 
+/// Whether `inner` is one request (0.7.0): one XML element, with nothing but
+/// whitespace around it. `Err` says what it is instead.
+///
+/// A call sends one request and reads one answer. Text that is two elements, or
+/// that closes the `<rpc>` it is sent in and opens another, is two requests to the
+/// device and one to the caller, and the answer to the second would be read as the
+/// answer to whatever is sent next. That is an error whatever the request is for,
+/// so this reads the form of the text and nothing of what it means. With `eom`,
+/// end-of-message framing, `]]>]]>` ends the message wherever it stands, and what
+/// follows it is a message of its own.
+pub(crate) fn one_request(inner: &str, eom: bool) -> Result<(), String> {
+    if eom && inner.contains("]]>]]>") {
+        return Err(
+            "it holds `]]>]]>`, which ends a message in end-of-message framing, and what \
+             follows it would reach the device as a second message"
+                .into(),
+        );
+    }
+    let outside = "there is something other than one element in it: text, a comment, a \
+                   declaration or the like, outside the request's element";
+    let mut reader = Reader::from_str(inner);
+    // The end tags are matched here, so one that closes nothing can be told from
+    // one that closes the wrong element.
+    reader.config_mut().check_end_names = false;
+    reader.config_mut().allow_unmatched_ends = true;
+    let mut open: Vec<Vec<u8>> = Vec::new();
+    let mut elements = 0_usize;
+    loop {
+        match reader.read_event() {
+            Err(e) => {
+                return Err(format!(
+                    "it is not well-formed XML: {}",
+                    quoted(&no_policy, &e.to_string())
+                ));
+            }
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                if open.is_empty() {
+                    elements += 1;
+                }
+                open.push(e.name().as_ref().to_vec());
+            }
+            Ok(Event::Empty(_)) => {
+                if open.is_empty() {
+                    elements += 1;
+                }
+            }
+            Ok(Event::End(e)) => match open.pop() {
+                None => {
+                    return Err(
+                        "an end tag in it closes an element it did not open: it would close \
+                         the `<rpc>` the request is sent in, and what follows would be a \
+                         second request"
+                            .into(),
+                    );
+                }
+                Some(name) if name != e.name().as_ref() => {
+                    return Err(
+                        "it is not well-formed XML: an end tag in it closes another \
+                         element than the one that is open"
+                            .into(),
+                    );
+                }
+                Some(_) => {}
+            },
+            Ok(Event::Text(t)) if open.is_empty() => {
+                if !t.iter().all(u8::is_ascii_whitespace) {
+                    return Err(outside.into());
+                }
+            }
+            Ok(_) if open.is_empty() => return Err(outside.into()),
+            Ok(_) => {}
+        }
+    }
+    if !open.is_empty() {
+        return Err(
+            "an element in it is left open: the request would run on into the end of the \
+             `<rpc>` it is sent in"
+                .into(),
+        );
+    }
+    match elements {
+        1 => Ok(()),
+        0 => Err("there is no request in it: no XML element".into()),
+        n => Err(format!(
+            "it is {n} requests, {n} elements side by side, and a call sends one request \
+             and reads one answer: send each in its own call"
+        )),
+    }
+}
+
 /// Wrap an RPC body in an `<rpc>` envelope with the given `message-id`.
 pub fn wrap_rpc(message_id: u64, inner: &str) -> String {
     format!("<rpc xmlns=\"{BASE_1_0}\" message-id=\"{message_id}\">{inner}</rpc>")

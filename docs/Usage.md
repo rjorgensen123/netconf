@@ -668,8 +668,11 @@ If you need to build or parse NETCONF messages yourself, `netconf::rpc` and `net
 open — the hello, wrapping, capability parsing, reply parsing, diff extraction, and the framing of
 RFC 6242 in both modes. `session.rpc(xml)` sends any request and returns the reply.
 
-`session.rpc` goes **around** the policy — it is the layer the typed helpers are built on — but not
-around the redaction.
+`session.rpc` is the raw line to the device: it goes **around** the policy — it is the layer the
+typed helpers are built on — but not around the redaction. The request is your own text, and
+netconf does not read what it does, so keep input you do not control away from it. One call is one
+request: text that is two requests to the device, or none, is refused before anything is sent, and
+the error says what the text is instead.
 
 The parser is **lenient on purpose**: it matches on element names and ignores namespaces, so both
 classic Junos and standard mode are understood. It never panics on broken input.

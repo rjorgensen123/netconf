@@ -30,6 +30,10 @@ enforces it itself. **A session with no policy bound permits nothing** — no re
 change — exactly as `ConfigPolicy::all_deny()`. The consumer decides what is permitted; until it
 does, netconf does nothing on its behalf.
 
+The raw `session.rpc` is the one call outside the policy: it sends a request the caller wrote
+itself, which netconf cannot read, with or without a policy bound. The filter covers what is done
+through the typed helpers.
+
 There are four kinds of policy:
 
 | Policy | Permits |
