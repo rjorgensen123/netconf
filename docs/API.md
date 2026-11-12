@@ -504,7 +504,7 @@ impl<T: NetconfTransport> NetconfSession<T> {
  pub async fn rollback(&mut self, n: u32) -> Result<String, NetconfError>; // the <rpc-reply>; 0 = last committed; n > 0 needs all_free(Rwd)
  pub async fn discard_changes(&mut self) -> Result<String, NetconfError>; // the <rpc-reply>
  pub async fn get_configuration(&mut self, filter: Option<&str>) -> Result<String, NetconfError>; // the <rpc-reply>, secrets redacted
- pub async fn compare(&mut self) -> Result<String, NetconfError>; // the diff text; "" = empty; absent = Protocol
+ pub async fn compare(&mut self) -> Result<String, NetconfError>; // the diff text, whole whatever the read grants are, secrets redacted; "" = empty; absent = Protocol
  pub async fn command(&mut self, cmd: &str) -> Result<String, NetconfError>; // the <rpc-reply>, secrets redacted
 }
 ```

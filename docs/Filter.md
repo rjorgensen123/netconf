@@ -245,7 +245,14 @@ key material, and reading them requires an explicit grant, `allow_read(tree)`:
 They are the public constant `netconf::policy::SENSITIVE_READ_ROOTS`. Reading the **whole**
 configuration includes them, and so requires a grant on every one.
 
-The gate applies to `get_configuration` and to configuration read through a command:
+The gate applies to `get_configuration` and to configuration read through a command. It does not
+apply to a **diff**: `compare`, the diff `prepare_change` hands over and the one a
+`ChangedSinceConfirmed` carries come whole, also under a sensitive tree without a grant, with the
+device's secrets redacted. A diff is what a change does, and it is what you approve before a
+commit; a diff with a part held back would be approved unseen. The candidate is shared, so a diff
+also shows what others have left there.
+
+Where the gate applies:
 
 - **`get_configuration(Some(filter))`** — the filter is XML, read strictly: elements, attributes
   and text only; no declaration, doctype, processing instruction, comment or CDATA; every element

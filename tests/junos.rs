@@ -242,6 +242,35 @@ async fn compare_returns_diff_body() {
     assert!(!out.contains("configuration-output"));
 }
 
+/// **A diff comes whole, whatever the read grants are.** The grants on the
+/// sensitive trees are for reading configuration. A diff is what a change does and
+/// what is approved before a commit, so a change under `system` is in it without
+/// an `allow_read("system")` — with the device's secrets redacted, as everywhere.
+#[tokio::test]
+async fn a_diff_comes_whole_without_a_read_grant_and_with_its_secrets_redacted() {
+    let reply = format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><configuration-information>\
+         <configuration-output>[edit system]\n+   host-name edge-1;\n\
+         [edit system login user ops authentication]\n\
+         +   encrypted-password \"$6$diff-leak\"; ## SECRET-DATA\n\
+         [edit interfaces]\n+   unit 123</configuration-output>\
+         </configuration-information></rpc-reply>"
+    );
+    // `system` is a sensitive tree, and this policy has no read grant on it.
+    let (mut s, _log) = session(vec![eom(&reply), text_reply("x")]).await;
+    let out = s.compare().await.unwrap();
+    assert!(out.contains("[edit system]"), "{out}");
+    assert!(out.contains("host-name edge-1"), "{out}");
+    assert!(out.contains("[edit interfaces]"), "{out}");
+    assert!(out.contains("encrypted-password"), "{out}");
+    assert!(!out.contains("diff-leak"), "a secret leaked: {out}");
+    // Reading the same tree is still gated.
+    assert!(matches!(
+        s.command("show configuration system").await,
+        Err(NetconfError::Policy(_))
+    ));
+}
+
 /// **Absent is not empty.** A compare reply without `<configuration-output>` is the
 /// device not saying what the diff is, and that is reported as `Protocol` — not read
 /// as «no change». It used to come back `""`, the same as an empty element: a reply

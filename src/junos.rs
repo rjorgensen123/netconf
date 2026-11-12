@@ -594,6 +594,16 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// element gives an empty string: no change. A reply without the element is
     /// [`NetconfError::Protocol`] (0.5.7) — see
     /// [`extract_compare_diff`](crate::rpc::extract_compare_diff).
+    ///
+    /// **The diff comes whole, whatever the read grants are.** The grants on the
+    /// sensitive trees are for reading configuration; a diff is what a change
+    /// does, and it is what the consumer approves before a commit. A diff with a
+    /// part held back would be approved unseen. So a change under `system` is in
+    /// the diff without an `allow_read("system")`, with the device's secrets
+    /// redacted as everywhere. The candidate is shared, so the diff also shows
+    /// what others have left there. The same holds for the diff
+    /// [`prepare_change`](Self::prepare_change) hands over and the one a
+    /// [`ChangedSinceConfirmed`](NetconfError::ChangedSinceConfirmed) carries.
     pub async fn compare(&mut self) -> Result<String, NetconfError> {
         let raw = self.compare_raw().await?;
         Ok(self.redacted(raw))

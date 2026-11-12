@@ -94,6 +94,8 @@ Every notable change to this crate is recorded here. The format follows
   holds while it logs in. The Getting started block in the README is split in two.
 - 2026-11-12 — A connect refused for its `Timeouts` no longer spends the device's one legacy
   warning.
+- 2026-11-12 — The docs say that a diff comes whole whatever the read grants are, with the
+  secrets redacted: it is what a change does, and what is approved before a commit.
 - 2026-11-12 — The docs say what a bare `commit` does not give: it puts the whole shared
   candidate into operation, with no diff, no lock and no check against what was approved.
 - 2026-11-12 — CI builds with the Rust version in `Cargo.toml`, builds the documentation, and
