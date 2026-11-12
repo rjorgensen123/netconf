@@ -117,6 +117,7 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-10 — The candidate is discarded only under the session's own lock. `confirm_commit` and
   `abort_change` are refused without it, and the cleanup after a failed change sends nothing
   without it.
+- 2026-11-13 — The README names MiMo and Mistral Vibe among the independent reviewers.
 
 ## [0.6.1] — 2026-10-05
 

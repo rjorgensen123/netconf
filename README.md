@@ -135,7 +135,7 @@ not do.
 
 The code is written by Claude AI (Opus and Fable).
 
-Reviewed independently by Fable, Opus and Gemini.
+Reviewed independently by Fable, Opus, Gemini, MiMo and Mistral Vibe.
 
 ## License
 
