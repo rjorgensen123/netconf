@@ -291,7 +291,10 @@ itself, which is the recommended setup. Off, no commit carries it; `commit_check
 One session per connection, **no pooling**. `connect` announces base:1.1 and falls back to EOM if
 the peer does not announce 1.1. `establish` exists for an already-connected transport — it is what
 the mock tests use, and why all protocol logic is testable without hardware. Both hellos are EOM
-framed; chunked is used only when **both** sides announced base:1.1. A hello with no capabilities
+framed; chunked is used only when **both** sides announced base:1.1. The device's first message
+must be a `<hello>` — `the document is not a <hello> but a <name> — refusing to read it as one` —
+and a capability is read where RFC 6241 puts it, a `<capability>` in the `<capabilities>` of the
+hello, and nowhere else. A hello with no capabilities
 is `Protocol`, and so is one that is not UTF-8, that does not parse as XML, or that uses an entity
 other than the five predefined ones and character references anywhere in it. Data the device
 sends after its hello, before the first request, stops a switch to chunked framing as `Protocol`;
@@ -1566,7 +1569,7 @@ human.
 pub const BASE_1_0: &str; pub const BASE_1_1: &str;
 pub fn client_hello(offer_1_1: bool) -> String;
 pub fn wrap_rpc(message_id: u64, inner: &str) -> String;
-pub fn parse_hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError>; // a Protocol error carries the hello in received, redacted, and what it quotes of it redacted
+pub fn parse_hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError>; // the document must be a <hello>, and the capabilities those of its <capabilities>; a Protocol error carries the document in received, redacted, and what it quotes of it redacted
 pub fn parse_rpc_reply(xml: &str) -> Result<Vec<DeviceError>, NetconfError>; // the checks in §2, a Protocol error carrying the reply; Ok = the warnings; the device's text in an error, and what a Protocol error quotes and carries of the reply, redacted with redact_secrets
 pub fn reply_message_id(xml: &str) -> Option<u64>; // digits, no leading zero, any u64 — the session itself compares the text, never this number
 pub fn hello_session_id(xml: &str) -> Option<u64>; // read as RFC 6241's unsignedInt — digits, no leading zero, at most 4294967295

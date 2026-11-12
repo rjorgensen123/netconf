@@ -1202,3 +1202,27 @@ async fn the_end_of_message_mark_is_text_in_a_chunked_session() {
     assert_eq!(s.framing(), Framing::Chunked);
     s.rpc("<get a=\"]]>]]>\"/>").await.expect("one request");
 }
+
+/// A first message that is no `<hello>` does not open a session (0.7.0), whatever
+/// capabilities it holds: it used to choose the framing.
+#[tokio::test]
+async fn a_first_message_that_is_no_hello_opens_no_session() {
+    let doc = format!(
+        "<rpc-reply><capabilities><capability>{}</capability><capability>{}</capability>\
+         </capabilities></rpc-reply>",
+        rpc::BASE_1_0,
+        rpc::BASE_1_1
+    );
+    let t = MockTransport::new(vec![encode(Framing::Eom, doc.as_bytes())]);
+    match NetconfSession::establish(t, true).await {
+        Err(netconf::NetconfError::Protocol { detail, received }) => {
+            assert!(
+                detail.contains("not a <hello> but a <rpc-reply>"),
+                "{detail}"
+            );
+            assert!(received.is_some());
+        }
+        Err(other) => panic!("expected a Protocol error, got {other:?}"),
+        Ok(_) => panic!("a session was opened on something that is no hello"),
+    }
+}

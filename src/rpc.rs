@@ -202,6 +202,12 @@ pub fn wrap_rpc(message_id: u64, inner: &str) -> String {
 /// quotes of the document, and the document it carries, are redacted with
 /// [`redact_secrets`](crate::redact::redact_secrets): no policy is bound here
 /// (0.5.13; the document it carries since 0.7.0).
+///
+/// The document must be a `<hello>` (0.7.0), and a capability is read where RFC
+/// 6241 puts it: a `<capability>` in the `<capabilities>` of the hello. A
+/// `<capability>` used to be read wherever it stood in whatever document came, so
+/// a message that was no hello chose the session's framing. A document with
+/// another root is `Protocol`, as a reply that is no `<rpc-reply>` is.
 pub fn parse_hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> {
     hello_capabilities(xml).map_err(without_policy)
 }
@@ -214,6 +220,17 @@ fn hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> {
     let mut caps = Vec::new();
     let mut in_cap = false;
     let mut cur = String::new();
+    // The local names of the elements that are open, the root first.
+    let mut open: Vec<Vec<u8>> = Vec::new();
+    let not_a_hello = |root: &[u8]| {
+        NetconfError::protocol_with(
+            format!(
+                "the document is not a <hello> but a <{}> — refusing to read it as one",
+                quoted(filter, &String::from_utf8_lossy(root))
+            ),
+            xml,
+        )
+    };
     loop {
         match reader.read_event() {
             Err(e) => {
@@ -224,9 +241,23 @@ fn hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> {
             }
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
-                if local_eq(e.local_name().as_ref(), b"capability") {
-                    in_cap = true;
+                let name = e.local_name();
+                if open.is_empty() && !local_eq(name.as_ref(), b"hello") {
+                    return Err(not_a_hello(name.as_ref()));
+                }
+                open.push(name.as_ref().to_vec());
+                // `<hello><capabilities><capability>`, and nowhere else.
+                in_cap = open.len() == 3
+                    && local_eq(&open[1], b"capabilities")
+                    && local_eq(&open[2], b"capability");
+                if in_cap {
                     cur.clear();
+                }
+            }
+            Ok(Event::Empty(e)) if open.is_empty() => {
+                let name = e.local_name();
+                if !local_eq(name.as_ref(), b"hello") {
+                    return Err(not_a_hello(name.as_ref()));
                 }
             }
             Ok(Event::Text(t)) if in_cap => {
@@ -249,14 +280,20 @@ fn hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> {
             Ok(Event::GeneralRef(r)) => {
                 resolve_entity(&r, filter).map_err(|e| e.about(xml))?;
             }
-            Ok(Event::End(e)) if in_cap && local_eq(e.local_name().as_ref(), b"capability") => {
-                // Made printable, as the device's text is wherever the crate hands
-                // it on (0.5.13); a capability holds nothing secret.
-                let v = printable(cur.trim());
-                if !v.is_empty() {
-                    caps.push(v);
+            Ok(Event::End(_)) => {
+                if in_cap {
+                    // Made printable, as the device's text is wherever the crate
+                    // hands it on (0.5.13); a capability holds nothing secret.
+                    let v = printable(cur.trim());
+                    if !v.is_empty() {
+                        caps.push(v);
+                    }
                 }
-                in_cap = false;
+                open.pop();
+                // An element inside a capability has ended, and its text goes on.
+                in_cap = open.len() == 3
+                    && local_eq(&open[1], b"capabilities")
+                    && local_eq(&open[2], b"capability");
             }
             _ => {}
         }

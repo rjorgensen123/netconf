@@ -660,3 +660,75 @@ fn a_protocol_error_from_a_public_parser_carries_the_document_redacted() {
         assert!(!e.to_string().contains("$9$leak"), "{e}");
     }
 }
+
+/// **A hello is read as a hello** (0.7.0). The document must be a `<hello>`, and a
+/// capability is read where RFC 6241 puts it. A `<capability>` used to be read
+/// wherever it stood in whatever document came, so a message that was no hello
+/// chose the session's framing.
+#[test]
+fn a_hello_is_read_as_a_hello() {
+    use netconf::NetconfError;
+    use netconf::rpc::parse_hello_capabilities;
+    let caps = "<capabilities><capability>urn:ietf:params:netconf:base:1.1</capability>\
+                </capabilities>";
+
+    // Another root is no hello, whatever it holds.
+    for (root, name) in [
+        ("rpc-reply", "rpc-reply"),
+        ("nc:notification", "notification"),
+    ] {
+        let doc = format!("<{root}>{caps}</{root}>");
+        match parse_hello_capabilities(&doc) {
+            Err(NetconfError::Protocol { detail, received }) => {
+                assert_eq!(
+                    detail,
+                    format!(
+                        "the document is not a <hello> but a <{name}> — refusing to read it as one"
+                    )
+                );
+                assert_eq!(received.as_deref(), Some(doc.as_str()));
+            }
+            other => panic!("{doc}: expected Protocol, got {other:?}"),
+        }
+    }
+    assert!(parse_hello_capabilities("<capabilities/>").is_err());
+
+    // A capability outside `<hello><capabilities>` is none.
+    let stray = format!(
+        "<hello><capability>urn:stray:1</capability><x>{caps}</x>\
+         <capabilities><capability>urn:real:1</capability>\
+         <group><capability>urn:stray:2</capability></group></capabilities>\
+         <capability>urn:stray:3</capability></hello>"
+    );
+    assert_eq!(parse_hello_capabilities(&stray).unwrap(), ["urn:real:1"]);
+    let none = format!("<hello><x>{caps}</x></hello>");
+    match parse_hello_capabilities(&none) {
+        Err(NetconfError::Protocol { detail, .. }) => {
+            assert_eq!(detail, "hello without capabilities");
+        }
+        other => panic!("expected Protocol, got {other:?}"),
+    }
+
+    // A prefix on the names changes nothing.
+    let prefixed = "<nc:hello xmlns:nc=\"urn:ietf:params:xml:ns:netconf:base:1.0\">\
+                    <nc:capabilities><nc:capability>urn:real:1</nc:capability>\
+                    </nc:capabilities></nc:hello>";
+    assert_eq!(parse_hello_capabilities(prefixed).unwrap(), ["urn:real:1"]);
+}
+
+/// A fatal `<rpc-error>` is the device's answer whatever wraps it: `Device`, not
+/// `Protocol`. The error is the more specific answer, and this is on purpose.
+#[test]
+fn a_fatal_rpc_error_is_reported_whatever_wraps_it() {
+    use netconf::NetconfError;
+    let error = "<rpc-error><error-severity>error</error-severity>\
+                 <error-message>no such thing</error-message></rpc-error>";
+    for root in ["notification", "hello", "something-else"] {
+        match parse_rpc_reply(&format!("<{root}>{error}</{root}>")) {
+            Err(NetconfError::Device(e)) => {
+                assert_eq!(e.message.as_deref(), Some("no such thing"), "{root}");
+            }
+            other => panic!("{root}: expected Device, got {other:?}"),
+        }
+    }
+}
