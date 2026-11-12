@@ -20,6 +20,13 @@ pub const EOM: &[u8] = b"]]>]]>";
 /// out-of-memory condition or a panic.
 pub const DEFAULT_MAX_MESSAGE: usize = 64 * 1024 * 1024;
 
+/// The most chunks one message may come in (0.7.0). The de-framer keeps track of
+/// where each chunk's data is, and that bookkeeping was held to no limit: a device
+/// sending a message in chunks of one byte made it several times the size cap. A
+/// message in more chunks than this is `Protocol`. At the default cap a message
+/// reaches it only when its chunks are under 64 bytes on average.
+pub const MAX_CHUNKS: usize = 1024 * 1024;
+
 /// The framing chosen for a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Framing {
@@ -337,6 +344,15 @@ fn walk_chunks(
         if size > max || walk.total.saturating_add(size) > max {
             return Err(NetconfError::protocol_with(
                 format!("chunked: chunk size {size} exceeds the maximum ({max} B)"),
+                bytes_as_text(buf),
+            ));
+        }
+        if walk.ranges.len() >= MAX_CHUNKS {
+            return Err(NetconfError::protocol_with(
+                format!(
+                    "chunked: the message is in more than {MAX_CHUNKS} chunks, the most one \
+                     message may come in"
+                ),
                 bytes_as_text(buf),
             ));
         }

@@ -419,6 +419,7 @@ The device may have carried the request out. Whether the device answers at all i
 pub enum Framing { Eom, Chunked }
 pub const EOM: &[u8] = b"]]>]]>";
 pub const DEFAULT_MAX_MESSAGE: usize = 64 * 1024 * 1024;
+pub const MAX_CHUNKS: usize = 1024 * 1024; // the most chunks one message may come in
 pub fn encode(mode: Framing, msg: &[u8]) -> Vec<u8>;
 
 pub struct Decoder;
@@ -456,7 +457,9 @@ it, `with_max_message_size` sets another — applied to the
 de-framer's buffer and to a single chunk (fail-closed — the guard against a device that never ends
 a message or states an absurd chunk length). In EOM mode the buffer is refused once it passes the
 cap without a terminator, and so is a whole message longer than the cap; in chunked mode the buffered bytes, chunk headers included, and the
-chunks' total are both held under it. NETCONF has **no streaming of a single reply** (chunked framing is wire
+chunks' total are both held under it, and a message may come in at most `MAX_CHUNKS` chunks,
+1048576 — `chunked: the message is in more than 1048576 chunks, the most one message may come in` —
+so what the de-framer keeps to track the chunks is bounded too. NETCONF has **no streaming of a single reply** (chunked framing is wire
 framing, not incremental delivery) — large configurations are therefore read in **segments**:
 `get_configuration` with a filter, subtree by subtree. The consumer must be deliberate about
 what it asks for.
@@ -1485,7 +1488,9 @@ channel — the subsystem's exit status or signal come as it ends — and discon
 what the device said over SSH; the wait is a read like any other, bounded by `per_rpc` and the
 session's deadline, and a device that keeps the channel open past it is disconnected all the same.
 Data the device sends after the session is over is no answer to anything and comes back as
-`Closed { detail: "the device sent data after the session was closed", partial, ssh }`. russh fails
+`Closed { detail: "the device sent data after the session was closed", partial, ssh }`. At most
+`DEFAULT_MAX_MESSAGE` bytes of it are kept; when more came, `detail` says how much came and how
+much is kept: `…: <n> B, more than is kept — the first <m> B are here, and the rest was dropped`. russh fails
 the EOF and the disconnect with `SendError` only when the SSH connection has already ended — after
 `<close-session/>` the device may end it first — and that is the close having happened, not a
 failure; any other failure is returned, carrying what the device said (`"disconnect"` in

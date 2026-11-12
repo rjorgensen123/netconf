@@ -328,3 +328,30 @@ fn a_framing_violation_carries_the_bytes_that_stood_there() {
     assert!(detail.contains("without EOM"), "{detail}");
     assert_eq!(bytes.as_deref(), Some("<never-ends"));
 }
+
+/// **A message may come in at most `MAX_CHUNKS` chunks** (0.7.0). The de-framer
+/// keeps track of where each chunk's data is, and that was held to no limit: a
+/// message in chunks of one byte made the bookkeeping several times the size cap.
+#[test]
+fn a_message_in_too_many_chunks_gives_protocol() {
+    use netconf::framing::MAX_CHUNKS;
+    let chunks = |n: usize| {
+        let mut wire = b"\n#1\nx".repeat(n);
+        wire.extend_from_slice(b"\n##\n");
+        wire
+    };
+
+    let mut d = Decoder::new(Framing::Chunked);
+    d.push(&chunks(MAX_CHUNKS));
+    assert_eq!(d.next_message().unwrap().unwrap().len(), MAX_CHUNKS);
+
+    let mut d = Decoder::new(Framing::Chunked);
+    d.push(&chunks(MAX_CHUNKS + 1));
+    let e = d.next_message().unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("the message is in more than 1048576 chunks"),
+        "{}",
+        &e.to_string()[..120]
+    );
+}

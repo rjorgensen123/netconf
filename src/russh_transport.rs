@@ -20,6 +20,7 @@ use bytes::Bytes;
 use tokio::time::timeout;
 
 use crate::error::{ExitSignal, NetconfError, SshDisconnect, SshMessages, TransportError};
+use crate::framing::DEFAULT_MAX_MESSAGE;
 use crate::transport::{Auth, ConnectOptions, NetconfTransport, ReplyBudget, SshPolicy, Timeouts};
 use crate::wire::printable;
 
@@ -459,6 +460,29 @@ fn close_outcome(ssh: SshMessages) -> Result<Bytes, NetconfError> {
         partial: String::new(),
         ssh: Box::new(ssh),
     }))
+}
+
+/// Keep `data`, sent after the session was closed, up to `cap` bytes in all
+/// (0.7.0). How many bytes of it were not kept. What the device sends after the
+/// close used to be kept without limit.
+fn keep_late(after: &mut Vec<u8>, data: &[u8], cap: usize) -> usize {
+    let room = cap.saturating_sub(after.len()).min(data.len());
+    after.extend_from_slice(&data[..room]);
+    data.len() - room
+}
+
+/// What the `Closed` for data sent after the session was closed says: that it
+/// came, and when more came than is kept, how much came and how much is kept.
+fn late_detail(kept: usize, dropped: usize) -> String {
+    let came = "the device sent data after the session was closed";
+    if dropped == 0 {
+        return came.into();
+    }
+    format!(
+        "{came}: {} B, more than is kept — the first {kept} B are here, and the rest was \
+         dropped",
+        kept.saturating_add(dropped)
+    )
 }
 
 /// `e` with what the device wrote on stderr put in it, when `e` is a timeout
@@ -1326,7 +1350,8 @@ impl NetconfTransport for RusshTransport {
                 Ok(()) | Err(russh::Error::SendError) => {}
                 Err(e) => return Err(ended(e, self.said(true))),
             }
-            let mut after = Vec::new();
+            // What comes after the close is kept up to the size of one message.
+            let (mut after, mut dropped) = (Vec::new(), 0_usize);
             // One clock for the whole wait (0.7.0), as for a read.
             let closed_by = std::time::Instant::now() + self.timeouts.per_read(ReplyBudget::PerRpc);
             loop {
@@ -1338,7 +1363,10 @@ impl NetconfTransport for RusshTransport {
                 };
                 match timeout(budget, self.channel.wait()).await {
                     Err(_) | Ok(None) | Ok(Some(russh::ChannelMsg::Close)) => break,
-                    Ok(Some(russh::ChannelMsg::Data { data })) => after.extend_from_slice(&data),
+                    Ok(Some(russh::ChannelMsg::Data { data })) => {
+                        let lost = keep_late(&mut after, &data, DEFAULT_MAX_MESSAGE);
+                        dropped = dropped.saturating_add(lost);
+                    }
                     Ok(Some(russh::ChannelMsg::ExtendedData { data, ext })) => {
                         self.stderr.keep(&data, ext);
                     }
@@ -1347,7 +1375,7 @@ impl NetconfTransport for RusshTransport {
             }
             if !after.is_empty() {
                 late = Some(NetconfError::Transport(TransportError::Closed {
-                    detail: "the device sent data after the session was closed".into(),
+                    detail: late_detail(after.len(), dropped),
                     partial: crate::wire::bytes_as_text(&after),
                     ssh: Box::new(self.said(true)),
                 }));
@@ -2173,7 +2201,10 @@ mod target_tests {
 
 #[cfg(test)]
 mod stderr_tests {
-    use super::{MAX_STDERR, STDERR_CUT, Stderr, append_capped, close_outcome, ended, with_stderr};
+    use super::{
+        MAX_STDERR, STDERR_CUT, Stderr, append_capped, close_outcome, ended, keep_late,
+        late_detail, with_stderr,
+    };
     use crate::error::{NetconfError, SshMessages, TransportError};
     use crate::redact::REDACTED;
 
@@ -2366,6 +2397,27 @@ mod stderr_tests {
             ended("channel closed", SshMessages::default()),
             NetconfError::Transport(TransportError::Io(_))
         ));
+    }
+
+    /// What the device sends after the session is closed is kept up to a cap, and
+    /// the error says when more came (0.7.0). It was kept without limit.
+    #[test]
+    fn what_comes_after_the_close_is_capped_and_the_error_says_so() {
+        let mut after = Vec::new();
+        assert_eq!(keep_late(&mut after, b"abcd", 6), 0);
+        assert_eq!(keep_late(&mut after, b"efgh", 6), 2);
+        assert_eq!(keep_late(&mut after, b"ijkl", 6), 4);
+        assert_eq!(after, b"abcdef");
+
+        assert_eq!(
+            late_detail(6, 0),
+            "the device sent data after the session was closed"
+        );
+        assert_eq!(
+            late_detail(6, 6),
+            "the device sent data after the session was closed: 12 B, more than is kept — \
+             the first 6 B are here, and the rest was dropped"
+        );
     }
 
     /// The cap never cuts inside a character. It used to cut with `truncate` at a
