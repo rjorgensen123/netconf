@@ -118,6 +118,8 @@ Every notable change to this crate is recorded here. The format follows
   `abort_change` are refused without it, and the cleanup after a failed change sends nothing
   without it.
 - 2026-11-13 — The README names MiMo and Mistral Vibe among the independent reviewers.
+- 2026-11-13 — The comment at the top of the GitHub CI file names both differences from the
+  Gitea one: the checkout and the `permissions` block.
 
 ## [0.6.1] — 2026-10-05
 

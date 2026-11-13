@@ -1,9 +1,10 @@
 # GitHub Actions CI for netconf.
 # It runs on every push to main, and on pull requests.
 #
-# The same jobs as .gitea/workflows/ci.yml, step for step, in the same
-# rust:1-bookworm container, so a result here means the same as a result there.
-# The one difference is the checkout: on GitHub that is actions/checkout.
+# The same jobs as .gitea/workflows/ci.yml, in the same rust:1-bookworm
+# container, with the same build, test and audit steps, so a result here means
+# the same as a result there. Two things differ: the checkout, which on GitHub is
+# actions/checkout, and the `permissions` block below, which only this file has.
 #
 # No private registry and no token. Every dependency is on crates.io, krypto
 # included, and there are no path dependencies — so CI builds exactly what a
