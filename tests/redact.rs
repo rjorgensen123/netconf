@@ -85,7 +85,7 @@ fn radius_and_tacacs_secret() {
 }
 
 #[test]
-fn snmp_v2c_community_stays_readable_by_default() {
+fn snmp_v2c_community_stays_readable() {
     // Note: the community must stay **readable** — that is the whole point here.
     // (The test name used to shout it in capitals, which `-D warnings` rejects as
     // a clippy error, so the emphasis lives in this comment instead.)
@@ -99,10 +99,6 @@ fn snmp_v2c_community_stays_readable_by_default() {
         line,
         "the v2c community must be left untouched"
     );
-
-    // Anyone who DOES want it hidden has Redactor::strict().
-    let strict = netconf::Redactor::strict().redact(line);
-    assert!(!strict.contains("public"), "strict() must redact it");
 }
 
 #[test]
@@ -352,17 +348,150 @@ fn bgp_community_name_is_not_secret() {
 }
 
 #[test]
-fn snmp_community_can_be_hidden_with_strict() {
+fn snmp_community_stays_readable_and_a_secret_still_goes() {
     let line = "set snmp community private authorization read-only";
-    // The default keeps the v2c community readable.
+    // The community is not a secret, and is left readable.
     assert_eq!(r(line), line);
-    // Anyone who wants it hidden anyway chooses strict().
-    assert!(!Redactor::strict().redact(line).contains("private"));
-    // … and the $9$ heuristic applies in BOTH modes — a real secret never walks
-    // out just because the community is left visible.
+    // A real secret never walks out because the community is left readable.
     // The value must not be a word that also appears as a statement name, or the
     // assertion would match the name that legitimately survives.
     assert!(!r("set system radius-server 1.1.1.1 secret \"$9$hunter2\"").contains("hunter2"));
+}
+
+// ---------------------------------------------------------------------------
+// Communities, SNMP and BGP, are not secrets, and no rule redacts one as a secret.
+// ---------------------------------------------------------------------------
+
+/// Each of `inputs` goes out as it came in.
+fn unchanged(inputs: &[&str]) {
+    for input in inputs {
+        assert_eq!(r(input), *input, "the input was changed");
+    }
+}
+
+#[test]
+fn an_snmp_community_is_left_as_it_is() {
+    unchanged(&[
+        "set snmp community example-ro authorization read-only",
+        "snmp { community example-ro { authorization read-only; } }",
+        "snmp {\n    community example-ro {\n        authorization read-only;\n    }\n}",
+        "<snmp><community><name>example-ro</name><authorization>read-only</authorization></community></snmp>",
+        "<snmp>\n<community>\n<name>example-ro</name>\n<authorization>read-only</authorization>\n</community>\n</snmp>",
+    ]);
+}
+
+/// A cleartext SNMPv3 `community-name` is left as it is; one the device writes as
+/// `$9$…` is redacted, as every such value is.
+#[test]
+fn an_snmpv3_community_name_is_left_unless_it_is_obfuscated() {
+    unchanged(&[
+        "set snmp v3 snmp-community example-index community-name example-ro security-name example-sec",
+        "<snmp><v3><snmp-community><name>example-index</name><community-name>example-ro</community-name><security-name>example-sec</security-name></snmp-community></v3></snmp>",
+    ]);
+    let out = r(
+        "set snmp v3 snmp-community example-index community-name \"$9$abc123XYZ\" security-name example-sec",
+    );
+    assert!(!out.contains("abc123XYZ"), "{out:?}");
+    assert!(out.contains(REDACTED), "{out:?}");
+    assert!(out.contains("community-name"), "{out:?}");
+}
+
+#[test]
+fn a_bgp_community_under_policy_options_is_left_as_it_is() {
+    unchanged(&[
+        "set policy-options community EXAMPLE-NO-EXPORT members [ 65000:100 65000:200 ]",
+        "policy-options { community EXAMPLE-NO-EXPORT members [ 65000:100 65000:200 ]; }",
+        "policy-options {\n    community EXAMPLE-NO-EXPORT members [ 65000:100 65000:200 ];\n}",
+        "<policy-options>\n<community>\n<name>EXAMPLE-NO-EXPORT</name>\n<members>65000:100</members>\n<members>65000:200</members>\n</community>\n</policy-options>",
+    ]);
+}
+
+/// A BGP community opened on the line that opens `policy-options`, and an SNMP
+/// community opened on a line that begins inside `policy-options`, go out as they
+/// came in.
+#[test]
+fn a_community_where_policy_options_opens_or_closes_on_the_line_is_left_as_it_is() {
+    unchanged(&[
+        "<policy-options><community><name>EXAMPLE-NO-EXPORT</name><members>65000:100</members></community></policy-options>",
+        "<configuration><policy-options>\n</policy-options><snmp><community><name>example-ro</name><authorization>read-only</authorization></community></snmp>",
+    ]);
+}
+
+/// The SNMPv3 keys and passwords beside a community are redacted, and the community
+/// stays as it was.
+#[test]
+fn snmpv3_secrets_beside_a_community_are_redacted() {
+    for (input, community) in [
+        (
+            "set snmp community example-ro authorization read-only\n\
+set snmp v3 usm local-engine user u1 authentication-sha authentication-key \"V3a\"\n\
+set snmp v3 usm local-engine user u1 authentication-sha authentication-password \"V3b\"\n\
+set snmp v3 usm local-engine user u1 privacy-aes128 privacy-key \"V3c\"\n\
+set snmp v3 usm local-engine user u1 privacy-aes128 privacy-password \"V3d\"",
+            "set snmp community example-ro authorization read-only\n",
+        ),
+        (
+            concat!(
+                "snmp {\n",
+                "    community example-ro {\n",
+                "        authorization read-only;\n",
+                "    }\n",
+                "    v3 {\n",
+                "        usm {\n",
+                "            local-engine {\n",
+                "                user u1 {\n",
+                "                    authentication-sha {\n",
+                "                        authentication-key \"V3a\";\n",
+                "                        authentication-password \"V3b\";\n",
+                "                    }\n",
+                "                    privacy-aes128 {\n",
+                "                        privacy-key \"V3c\";\n",
+                "                        privacy-password \"V3d\";\n",
+                "                    }\n",
+                "                }\n",
+                "            }\n",
+                "        }\n",
+                "    }\n",
+                "}",
+            ),
+            "    community example-ro {\n        authorization read-only;\n    }\n",
+        ),
+        (
+            "<snmp><community><name>example-ro</name><authorization>read-only</authorization></community>\
+<v3><usm><local-engine><user><name>u1</name>\
+<authentication-sha><authentication-key>V3a</authentication-key><authentication-password>V3b</authentication-password></authentication-sha>\
+<privacy-aes128><privacy-key>V3c</privacy-key><privacy-password>V3d</privacy-password></privacy-aes128>\
+</user></local-engine></usm></v3></snmp>",
+            "<community><name>example-ro</name><authorization>read-only</authorization></community>",
+        ),
+    ] {
+        let out = r(input);
+        for secret in ["V3a", "V3b", "V3c", "V3d"] {
+            assert!(
+                !out.contains(secret),
+                "«{secret}» survived:\n  in:  {input:?}\n  out: {out:?}"
+            );
+        }
+        assert_eq!(out.matches(REDACTED).count(), 4, "{out:?}");
+        assert!(
+            out.contains(community),
+            "the community changed:\n  in:  {input:?}\n  out: {out:?}"
+        );
+    }
+}
+
+/// `Redactor::default()` is the one redaction, the same as `redact_secrets`.
+#[test]
+fn the_default_redactor_redacts_as_redact_secrets_does() {
+    let text = "set snmp community example-ro authorization read-only\n\
+set system radius-server 192.0.2.1 secret \"Rs1\"";
+    let out = Redactor::default().redact(text);
+    assert_eq!(out, redact_secrets(text));
+    assert!(!out.contains("Rs1"), "{out:?}");
+    assert!(
+        out.starts_with("set snmp community example-ro authorization read-only\n"),
+        "{out:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -894,8 +1023,7 @@ fn only_a_tag_as_xml_writes_it_is_markup() {
 /// in. A few thousand inputs are put together from the pieces the rules read —
 /// names, values, markup, entities, annotations, the marker, line breaks — by a
 /// generator with a fixed seed, so every run reads the same ones. A second pass
-/// changes nothing, so `contains_secrets` is false on what the filter gave back,
-/// under the default and under `strict()`.
+/// changes nothing, so `contains_secrets` is false on what the filter gave back.
 #[test]
 fn a_second_pass_changes_nothing_on_generated_input() {
     const PIECES: &[&str] = &[
@@ -987,7 +1115,6 @@ fn a_second_pass_changes_nothing_on_generated_input() {
         seed ^= seed << 17;
         seed
     };
-    let strict = Redactor::strict();
     for _ in 0..4000 {
         let pieces = 2 + (next() % 14) as usize;
         let input: String = (0..pieces)
@@ -1002,12 +1129,6 @@ fn a_second_pass_changes_nothing_on_generated_input() {
         assert!(
             !contains_secrets(&once),
             "contains_secrets on the output of {input:?}"
-        );
-        let once = strict.redact(&input);
-        assert_eq!(
-            strict.redact(&once),
-            once,
-            "strict: a second pass changed {input:?}"
         );
     }
 }

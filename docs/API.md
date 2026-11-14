@@ -1101,13 +1101,11 @@ consumer holds itself.
 ```rust
 pub const REDACTED: &str = "[SENSITIVE: hidden by netconf — allow_secrets() on the policy shows it]";
 
-pub struct Redactor;
+pub struct Redactor; // #[non_exhaustive]
 impl Redactor {
- pub fn strict() -> Self; // SNMP community too
- pub fn snmp_community_visible(self) -> Self; // ← the default
  pub fn redact(&self, text: &str) -> String;
 }
-impl Default for Redactor { … } // = strict().snmp_community_visible()
+impl Default for Redactor { … }
 
 pub fn redact_secrets(text: &str) -> String; // Redactor::default() — the SNMP v2c community stays visible
 pub fn contains_secrets(text: &str) -> bool; // would redact_secrets change it? Warn WITHOUT logging the content
@@ -1166,8 +1164,12 @@ What is redacted:
   `\u{7}secret x` and `x(secret y` are caught. No name is read out of the element's
   name in a tag as XML writes it; the element rule reads the tag. A name with a tag
   straight after it, `secret<x>`, is an element's text and has no value.
-- **SNMP communities** (`community`, and `community-name` in SNMPv3) only under `strict()`, and
-  not under `policy-options`, where a community is a BGP name. **SNMPv3 keys and passwords are always redacted.**
+- **SNMP communities are not secrets.** They are useful information and not sensitive: whoever can
+  read the configuration on the device can read them there too. No rule redacts one for being a
+  secret, so `community`, and `community-name` in SNMPv3, are left as they are. A value the device
+  writes as `$9$…`, or on a line marked `SECRET-DATA`, is still redacted, as every such value is. A
+  BGP community under `policy-options` is a name, not a secret, and no rule redacts it for being
+  one. **SNMPv3 keys and passwords are always redacted.**
 - **Hash and obfuscation literals** anywhere — `$<tag>$…` for any tag of one to four letters or
   digits: `$9$`, `$8$`, `$6$`, `$5$`, `$1$`, `$0$`, `$2a$`, `$sha1$` and the rest — become
   `$<tag>$` followed by `REDACTED`; the tag stays, so the operator can see which form it was.
@@ -1205,7 +1207,7 @@ What is redacted:
   after it. It fires on what the line holds, not on whether another rule changed it.
 
 
-**The SNMP v2c community stays readable by default.**
+**The SNMP v2c community stays readable.**
 
 ---
 

@@ -123,6 +123,8 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-13 — The README names MiMo and Mistral Vibe among the independent reviewers.
 - 2026-11-13 — The comment at the top of the GitHub CI file names both differences from the
   Gitea one: the checkout and the `permissions` block.
+- 2026-11-14 — **Breaking:** `Redactor::strict()` and `Redactor::snmp_community_visible()` are
+  removed. There is one redaction, and a community, SNMP or BGP, is not a secret.
 
 ## [0.6.1] — 2026-10-05
 

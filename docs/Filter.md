@@ -384,9 +384,9 @@ to the closing tags the line ends in, where the statement has ended before them 
 | `password` | after `archive-sites <url>` or `url <url>` | `system archival configuration archive-sites`, `event-options destinations`, a URL with a password beside it |
 | `challenge-password` | any | a certificate enrollment |
 | `token`, `api-token`, `bearer-token`, `access-token`, `auth-token`, `authentication-token`, `refresh-token`, `oauth-token` | any | a token that authenticates to a service; `authentication-token` under `services security-intelligence url`. A name that merely holds `token`, `token-bucket`, is none of them |
-| `community`, `community-name` | not under `policy-options` | `snmp community`, `snmp v3 snmp-community`; only with `Redactor::strict()` |
 
 These look like secrets and are not, and go out as they came in: `community` (an SNMP v2c community),
+`community-name` (an SNMPv3 `snmp-community`; a value the device writes as `$9$…` is still redacted, as every such value is),
 `hash-key`, the name of a `key-chain` and the `key N` index in it, `authentication-key-chain`,
 `load-key-file`, `license keys`, a host key, `key-exchange`, `hostkey-algorithm`, `key-type`,
 `authentication-order`, `authentication-method pre-shared-keys`, `system login password`, which is
@@ -396,11 +396,11 @@ The public keys under `system login user U authentication ssh-rsa` (and `ssh-dss
 `ssh-ed25519`) are not on the list. The key-blob rule still takes the base64 blob out of them, and
 where Junos marks them `## SECRET-DATA` in text format, the net takes their value there.
 
-> **The SNMP v2c community stays readable.** That is a deliberate choice: a v2c community is never
-> encrypted on the wire, and hiding it would be false safety for something that is a shared secret
-> among the people who run the network anyway. The session always reads with this default. For text
-> you hold yourself, `Redactor::strict()` hides the community as well; a BGP community under
-> `policy-options` is never touched.
+> **An SNMP community is not a secret.** It is not sensitive either, and no rule redacts it for
+> being one: `community` and `community-name` are left as they are. It is useful information, and
+> whoever can read the configuration on a Junos device can read that part too. A value the device
+> writes as `$9$…`, or on a line marked `SECRET-DATA`, is still redacted, as every such value is. A
+> BGP community under `policy-options` is a name, not a secret, and no rule redacts it for being one.
 
 ### The read filter and the drift guard
 

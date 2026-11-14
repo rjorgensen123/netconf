@@ -470,18 +470,16 @@ let policy = ConfigPolicy::with_default_floor()
 The same filter is available for text you hold yourself:
 
 ```rust
-use netconf::{contains_secrets, redact_secrets, Redactor};
+use netconf::{contains_secrets, redact_secrets};
 
 if contains_secrets(text) {
     tracing::warn!("the text carries secrets — keeping the redacted version");
 }
 let safe = redact_secrets(text);
-
-let strict = Redactor::strict().redact(text); // the SNMP community too
 ```
 
-`redact_secrets` is the filter the session uses, which leaves the SNMP v2c community readable.
-`Redactor::strict()` hides it as well. What is taken out, and why, is listed in
+`redact_secrets` is the filter the session uses. It leaves an SNMP community readable, because an
+SNMP community is not a secret. What is taken out, and why, is listed in
 [Filter](Filter.md#the-read-filter--secrets-in-what-you-fetch).
 
 ---

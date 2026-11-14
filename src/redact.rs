@@ -5,7 +5,7 @@
 //! `ConfigPolicy` is the *write* side: what may be CHANGED. This is the *read* side.
 //! When we fetch something from the device — a `show | compare` diff, a
 //! `get-configuration`, the output of a `command` — the reply can carry **the
-//! device's** secrets: `$9$`-obfuscated passwords, SNMP communities, RADIUS and
+//! device's** secrets: `$9$`-obfuscated passwords, RADIUS and
 //! TACACS+ secrets, IPsec and BGP keys, SSH keys, PEM certificates. That text is
 //! shown to an operator, stored in an audit trail, and can end up in a log. Without
 //! redaction we would leak the equipment's secrets.
@@ -178,52 +178,16 @@ const SSH_BLOB_PREFIXES: &[&str] = &[
     "AAAAE2VjZHNh", // ecdsa-sha2-*
 ];
 
-/// The redaction engine. [`Default`] redacts everything that is a real secret, but
-/// leaves the **SNMP v2c community readable**.
+/// The redaction engine: the one redaction, which [`redact_secrets`] uses. A
+/// community, SNMP or BGP, is not a secret, and no rule redacts it for being one.
 ///
-/// The fields are private, so new choices can be added without breaking the API.
-#[derive(Debug, Clone)]
-pub struct Redactor {
-    snmp_community: bool,
-}
-
-impl Default for Redactor {
-    /// SNMP v2c is not sensitive, and it has to remain readable for the people who
-    /// use it against the network. The community string is a shared secret, not
-    /// something hidden from whoever runs the network — and it is never encrypted on
-    /// the wire anyway, so redacting it here would offer false comfort. To hide it as
-    /// well, use [`Redactor::strict`].
-    fn default() -> Self {
-        Redactor::strict().snmp_community_visible()
-    }
-}
+/// It is built with [`Default`]; `#[non_exhaustive]` keeps a struct literal out of
+/// other crates.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Redactor {}
 
 impl Redactor {
-    /// The strictest mode: everything that could be a secret is redacted,
-    /// **including SNMP community strings**.
-    ///
-    /// Note that this is *not* the default behaviour — see [`Redactor::default`] and
-    /// [`snmp_community_visible`](Self::snmp_community_visible). Use it only where the
-    /// community string is to be hidden from the operators as well.
-    pub fn strict() -> Self {
-        Redactor {
-            snmp_community: true,
-        }
-    }
-
-    /// Leave SNMP community strings readable — **this is the default**.
-    ///
-    /// SNMP v2c is not sensitive, and it has to remain readable for the people who
-    /// query the network with it. Redacting it would make the compare diff useless to
-    /// exactly those who need it — and a v2c community is never encrypted on the wire
-    /// anyway, so redacting it here offers false comfort.
-    ///
-    /// It also turns off the false match on BGP's `policy-options community`.
-    pub fn snmp_community_visible(mut self) -> Self {
-        self.snmp_community = false;
-        self
-    }
-
     /// Redact secrets out of configuration, diff or command text.
     /// The line structure — the number of lines, the indentation, the line endings —
     /// is preserved exactly.
@@ -520,7 +484,7 @@ impl Redactor {
     ///
     /// The first statement decides what follows it, and that is a security choice:
     /// a secret *value* can itself look like a statement name (`... secret
-    /// cleartext-secret`, `... community my-secret-community`). Read as a
+    /// cleartext-secret`). Read as a
     /// statement, the value would pass through unredacted; inside the value of a
     /// statement before it, a name adds nothing. «First» at worst redacts slightly
     /// too much of the rest of the line — which is the right direction to err in.
@@ -556,7 +520,6 @@ impl Redactor {
         }
         let words = words(doc);
         let names = statement_words(doc, &words);
-        let in_policy_options = path.in_policy_options(&names);
         let is_name = |k: usize| !element_name[k] && (b[k].is_ascii_alphanumeric() || b[k] == b'-');
         // The tag that begins at `k`.
         let tag_at_k = |k: usize| tags.binary_search_by_key(&k, |g| g.start).is_ok();
@@ -564,7 +527,7 @@ impl Redactor {
         let mut hits = Vec::new();
         let mut before = path.words();
         for (w, name) in words.iter().zip(&names) {
-            if self.secret_word(name, &before, in_policy_options) {
+            if self.secret_word(name, &before) {
                 hits.push(Hit {
                     at: w.start,
                     value: w.start + w.text.len(),
@@ -579,7 +542,7 @@ impl Redactor {
             let end = t.start + t.text.len();
             // A quoted token is one name, as written.
             if t.text.starts_with('"') {
-                if self.secret_name(normalize(t.text), in_policy_options) {
+                if self.secret_name(normalize(t.text)) {
                     hits.push(Hit {
                         at: t.start,
                         value: end,
@@ -600,7 +563,7 @@ impl Redactor {
                     k += 1;
                 }
                 let name = line[s..k].trim_matches('-');
-                if !name.is_empty() && self.secret_name(name, in_policy_options) {
+                if !name.is_empty() && self.secret_name(name) {
                     hits.push(Hit {
                         at: s,
                         value: k,
@@ -647,11 +610,10 @@ impl Redactor {
     fn statement_word_with_value(&self, doc: &Doc, path: &Path) -> bool {
         let words = words(doc);
         let names = statement_words(doc, &words);
-        let in_policy_options = path.in_policy_options(&names);
         let mut before = path.words();
         let mut first = None;
         for (i, name) in names.iter().enumerate() {
-            if self.secret_word(name, &before, in_policy_options) {
+            if self.secret_word(name, &before) {
                 first = Some(i);
                 break;
             }
@@ -678,34 +640,23 @@ impl Redactor {
     }
 
     /// Whether the word `name`, with the words before it, is a secret statement.
-    fn secret_word(&self, name: &str, before: &[&str], in_policy_options: bool) -> bool {
-        self.community(name, in_policy_options)
-            || SECRETS.iter().any(|s| {
-                s.name == name
-                    && (s.after.is_empty() || s.after.iter().any(|p| ends_with(before, p)))
-            })
+    fn secret_word(&self, name: &str, before: &[&str]) -> bool {
+        SECRETS.iter().any(|s| {
+            s.name == name && (s.after.is_empty() || s.after.iter().any(|p| ends_with(before, p)))
+        })
     }
 
     /// Whether the element `name`, under `parent`, is a secret statement.
-    fn secret_element(&self, name: &str, parent: Option<&str>, in_policy_options: bool) -> bool {
+    fn secret_element(&self, name: &str, parent: Option<&str>) -> bool {
         let name = name.to_ascii_lowercase();
-        self.community(&name, in_policy_options)
-            || SECRETS.iter().any(|s| {
-                s.name == name
-                    && (s.after.is_empty() || parent.is_some_and(|p| s.parent.contains(&p)))
-            })
+        SECRETS.iter().any(|s| {
+            s.name == name && (s.after.is_empty() || parent.is_some_and(|p| s.parent.contains(&p)))
+        })
     }
 
     /// Whether `name` alone, wherever it stands, is a secret statement.
-    fn secret_name(&self, name: &str, in_policy_options: bool) -> bool {
-        self.community(name, in_policy_options)
-            || SECRETS.iter().any(|s| s.name == name && s.after.is_empty())
-    }
-
-    /// An SNMP community, under [`strict`](Self::strict). `policy-options community
-    /// <name>` is a BGP community name and is not secret, so it is excluded.
-    fn community(&self, name: &str, in_policy_options: bool) -> bool {
-        self.snmp_community && !in_policy_options && matches!(name, "community" | "community-name")
+    fn secret_name(&self, name: &str) -> bool {
+        SECRETS.iter().any(|s| s.name == name && s.after.is_empty())
     }
 
     /// `<tag>value</tag>` on one line, where `tag` without its namespace prefix is a
@@ -1786,15 +1737,6 @@ impl Path {
         self.text.iter().flatten().map(String::as_str).collect()
     }
 
-    /// Whether the line is under `policy-options`, where `community` is a BGP
-    /// community name and no secret: in the blocks or elements it is inside, or by
-    /// the word `policy-options` on the line, its `names`.
-    fn in_policy_options(&self, names: &[&str]) -> bool {
-        names.contains(&"policy-options")
-            || self.xml.iter().any(|n| n == "policy-options")
-            || self.text.iter().flatten().any(|w| w == "policy-options")
-    }
-
     /// Step past `doc`, a line as it goes out.
     fn advance(&mut self, doc: &Doc) {
         for g in tags(&doc.text, &doc.literal) {
@@ -1847,7 +1789,6 @@ struct Elements<'a> {
     redactor: &'a Redactor,
     starts: Vec<usize>,
     parents: Vec<Option<String>>,
-    in_policy_options: bool,
 }
 
 impl<'a> Elements<'a> {
@@ -1864,15 +1805,13 @@ impl<'a> Elements<'a> {
             redactor,
             starts,
             parents,
-            in_policy_options: path.in_policy_options(&[]),
         }
     }
 
     /// Whether the element `name`, whose tag begins at `at`, is a secret statement.
     fn secret(&self, name: &str, at: usize) -> bool {
         let parent = self.parents[self.starts.partition_point(|&s| s < at)].as_deref();
-        self.redactor
-            .secret_element(name, parent, self.in_policy_options)
+        self.redactor.secret_element(name, parent)
     }
 }
 
