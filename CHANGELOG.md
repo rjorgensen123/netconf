@@ -7,7 +7,11 @@ Every notable change to this crate is recorded here. The format follows
 > **Note:** before 1.0 the API can change between minor versions. `docs/API.md` names the
 > version its contract applies from, and that number moves only when the public surface does.
 
-## [0.7.0]
+## [0.7.0] — 2026-11-14
+
+The public surface changed, and the contract floor in `docs/API.md` is 0.7.0. Entries marked
+**Breaking** change a public type; others change what is refused or what an error says. A
+consumer needs krypto 0.8 and Rust 1.99.1.
 
 ### Security
 
