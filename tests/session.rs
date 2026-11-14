@@ -209,6 +209,47 @@ async fn a_message_id_that_is_not_the_requests_byte_for_byte_is_refused() {
     }
 }
 
+/// **A `message-id` that cannot be read is refused** (0.7.0), not taken for an
+/// absent one, which is tolerated.
+#[tokio::test]
+async fn a_reply_whose_message_id_cannot_be_read_is_refused() {
+    let reply = "<rpc-reply message-id=7><ok/></rpc-reply>";
+    let t = MockTransport::new(vec![hello(false), encode(Framing::Eom, reply.as_bytes())]);
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    match s.rpc("<get-configuration/>").await {
+        Err(netconf::NetconfError::Protocol { detail, received }) => {
+            assert_eq!(
+                detail,
+                "the <rpc-reply> has an attribute that cannot be read — its message-id \
+                 cannot be checked against the request's (1)"
+            );
+            assert_eq!(received.as_deref(), Some(reply));
+        }
+        other => panic!("expected a Protocol error, got {other:?}"),
+    }
+}
+
+/// **Any attribute of the `<rpc-reply>` that cannot be read refuses the reply**
+/// (0.7.0), also beside a `message-id` that matches: once one cannot be read, it
+/// cannot be told whether a `message-id` is there.
+#[tokio::test]
+async fn an_unreadable_attribute_beside_a_matching_message_id_is_refused() {
+    let reply = "<rpc-reply foo=bar message-id=\"1\"><ok/></rpc-reply>";
+    let t = MockTransport::new(vec![hello(false), encode(Framing::Eom, reply.as_bytes())]);
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    match s.rpc("<get-configuration/>").await {
+        Err(netconf::NetconfError::Protocol { detail, received }) => {
+            assert_eq!(
+                detail,
+                "the <rpc-reply> has an attribute that cannot be read — its message-id \
+                 cannot be checked against the request's (1)"
+            );
+            assert_eq!(received.as_deref(), Some(reply));
+        }
+        other => panic!("expected a Protocol error, got {other:?}"),
+    }
+}
+
 /// **A session id is read as RFC 6241 writes an `unsignedInt`.** `007`, `+7` and a
 /// signed or non-decimal form used to be read as a number; now the device has sent
 /// no usable id, which is tolerated as before.

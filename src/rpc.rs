@@ -7,7 +7,7 @@
 //! `<rpc-error>`.
 
 use quick_xml::Reader;
-use quick_xml::events::{BytesRef, Event};
+use quick_xml::events::{BytesRef, BytesStart, Event};
 
 use crate::error::{DeviceError, NetconfError};
 use crate::wire::{printable, strict_u32, strict_u64};
@@ -804,29 +804,68 @@ pub fn hello_session_id(xml: &str) -> Option<u64> {
 /// the attribute as a number at all: it compares the text with the one it sent,
 /// byte for byte, and tolerates only one that is absent.
 pub fn reply_message_id(xml: &str) -> Option<u64> {
-    strict_u64(&reply_message_id_raw(xml)?)
+    let tag = first_rpc_reply(xml)?;
+    let attr = tag
+        .attributes()
+        .flatten()
+        .find(|attr| local_eq(attr.key.local_name().as_ref(), b"message-id"))?;
+    strict_u64(&String::from_utf8_lossy(&attr.value))
+}
+
+/// What the first `<rpc-reply>` says of its `message-id` — see
+/// [`reply_message_id_raw`].
+pub(crate) enum ReplyMessageId {
+    /// The tag's attributes all read and none is `message-id` — the Junos quirk we
+    /// tolerate — or the reader finds no `<rpc-reply>`.
+    Absent,
+    /// The attribute's text as the device wrote it, whether or not it is a number.
+    Read(String),
+    /// An attribute of the tag cannot be read (0.7.0), so whether a `message-id` is
+    /// among them cannot be told.
+    Unreadable,
 }
 
 /// The `message-id` attribute of the first `<rpc-reply>`, as the device wrote it.
 ///
-/// `None` means the attribute is absent — the Junos quirk we tolerate. `Some` is
-/// the raw text whether or not it is a number, so a caller can tell a
-/// `message-id` that is missing from one that is there and malformed. Collapsing
-/// the two let a malformed id pass as a missing one, and a missing one is let
-/// through.
-pub(crate) fn reply_message_id_raw(xml: &str) -> Option<String> {
+/// [`Absent`](ReplyMessageId::Absent) is the Junos quirk we tolerate.
+/// [`Read`](ReplyMessageId::Read) is the raw text whether or not it is a number,
+/// so a caller can tell a `message-id` that is missing from one that is there and
+/// malformed. Collapsing the two let a malformed id pass as a missing one, and a
+/// missing one is let through.
+///
+/// An attribute of the tag that the XML reader cannot read — a value without
+/// quotes, an attribute written twice — is
+/// [`Unreadable`](ReplyMessageId::Unreadable) (0.7.0), not absent: once one cannot
+/// be read, it cannot be told whether a `message-id` is there.
+pub(crate) fn reply_message_id_raw(xml: &str) -> ReplyMessageId {
+    let Some(tag) = first_rpc_reply(xml) else {
+        return ReplyMessageId::Absent;
+    };
+    let mut found = None;
+    for attr in tag.attributes() {
+        let Ok(attr) = attr else {
+            return ReplyMessageId::Unreadable;
+        };
+        if found.is_none() && local_eq(attr.key.local_name().as_ref(), b"message-id") {
+            found = Some(String::from_utf8_lossy(&attr.value).into_owned());
+        }
+    }
+    match found {
+        Some(raw) => ReplyMessageId::Read(raw),
+        None => ReplyMessageId::Absent,
+    }
+}
+
+/// The start tag of the first `<rpc-reply>` in `xml`; `None` when the reader finds
+/// none before the end or an error.
+fn first_rpc_reply(xml: &str) -> Option<BytesStart<'_>> {
     let mut reader = Reader::from_str(xml);
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e))
                 if local_eq(e.local_name().as_ref(), b"rpc-reply") =>
             {
-                for attr in e.attributes().flatten() {
-                    if local_eq(attr.key.local_name().as_ref(), b"message-id") {
-                        return Some(String::from_utf8_lossy(&attr.value).into_owned());
-                    }
-                }
-                return None;
+                return Some(e);
             }
             Ok(Event::Eof) | Err(_) => return None,
             _ => {}

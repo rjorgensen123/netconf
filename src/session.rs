@@ -557,7 +557,22 @@ impl<T: NetconfTransport> NetconfSession<T> {
         //
         // The reply goes with the error, not only its id (0.5.13): what it answers
         // is in the reply.
-        if let Some(raw) = rpc::reply_message_id_raw(&xml)
+        //
+        // An attribute of the `<rpc-reply>` that cannot be read refuses the reply
+        // (0.7.0): whether a `message-id` is among them cannot be told, so it is not
+        // taken for an absent one.
+        let message_id = rpc::reply_message_id_raw(&xml);
+        if matches!(message_id, rpc::ReplyMessageId::Unreadable) {
+            return Err(NetconfError::protocol_with(
+                format!(
+                    "the <rpc-reply> has an attribute that cannot be read — its message-id \
+                     cannot be checked against the request's ({})",
+                    self.msg_id
+                ),
+                xml,
+            ));
+        }
+        if let rpc::ReplyMessageId::Read(raw) = message_id
             && raw != self.msg_id.to_string()
         {
             return Err(NetconfError::protocol_with(

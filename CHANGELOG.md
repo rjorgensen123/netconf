@@ -69,6 +69,9 @@ Every notable change to this crate is recorded here. The format follows
   redacted also when a control character or a character reference stands between the name and
   the value. It went out as it was. The API review entry below, from the same day, has it
   under «Known limits»; it was closed after that.
+- 2026-11-14 — A reply whose `<rpc-reply>` tag has an attribute that cannot be read, such as
+  `message-id=7` without quotes, is refused as `Protocol`. Its id counted as absent, and the
+  reply was accepted. The API review entry below, from the same day, describes it as it was.
 
 ### Added
 

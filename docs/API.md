@@ -377,8 +377,12 @@ message-id="N">` (N counts from 1 per session) and returns the raw reply. What i
   with: `reply message-id `<text>` does not match the request's (N) …`, the device's
   text filtered as the reply is and made printable.
   A reply **without** one is accepted — Junos omits it
-  on some replies — and a `message-id` that cannot be read as XML writes an attribute, one
-  without quotes such as `message-id=7`, counts as absent and is accepted too;
+  on some replies;
+- a reply whose `<rpc-reply>` tag has an attribute that cannot be read as XML writes one — a
+  value without quotes such as `message-id=7`, or an attribute written twice — whichever
+  attribute it is, since whether a `message-id` is among them cannot be told: `the <rpc-reply>
+  has an attribute that cannot be read — its message-id cannot be checked against the
+  request's (N)`;
 - a document that is not an `<rpc-reply>`: `reply is not an <rpc-reply> but a <root> — refusing
   to read it as one`, naming the root that stood there — an empty `<rpc-reply/>` is an ordinary
   answer;
@@ -387,7 +391,8 @@ message-id="N">` (N counts from 1 per session) and returns the raw reply. What i
   elements at all`;
 - XML that does not parse, or is incomplete at the end, or uses an entity other than the five
   predefined ones and character references — anywhere in the reply's text; attribute values are
-  not read, so an attribute XML would refuse, such as `message-id=7`, does not make the reply fail;
+  not read, so an attribute written against XML's rules makes the reply fail on the
+  `<rpc-reply>` tag, as above, and elsewhere only when the reader cannot read the tag at all;
 - a reply that is not UTF-8.
 
 An `<rpc-error>` becomes `Device` (§8): the first error of the reply, carrying every other
