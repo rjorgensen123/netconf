@@ -101,6 +101,8 @@ let timeouts = Timeouts {
 
 ```rust
 ssh_policy: SshPolicy::LegacyJunos,
+// or LegacyJunos without an algorithm you do not accept:
+ssh_policy: SshPolicy::LegacyJunos.without(&["ssh-dss"])?,
 ```
 
 Older devices require SSH algorithms that modern libraries have stopped offering. `LegacyJunos` is
@@ -108,8 +110,11 @@ a **superset** of `Modern`: the modern algorithms are still negotiated first, an
 exchange, `ssh-rsa`, `ssh-dss`, CBC ciphers and `hmac-sha1` are allowed in addition. No policy
 offers 3DES. Every policy asks for strict key exchange against the Terrapin attack; it takes effect
 only where the device supports it.
-`SshPolicy::Custom` is refused at connect: netconf does not negotiate with an algorithm list other
-than one it implements. It is planned for a coming release, with no promise of when.
+`SshPolicy::Custom` is your own lists of algorithms, chosen from the names `Modern` and
+`LegacyJunos` offer and in your order, so that a device that has only an algorithm you left out
+gets no connection; a list that breaks the rules is refused before connecting, and one that holds
+a legacy name is logged as `LegacyJunos` is. `without` gives a policy's lists without the names
+you give, as a `Custom`, as in the example above.
 
 **Set it per device, never globally.** A connection under `LegacyJunos` is logged with
 `legacy = true`; the first one to each device as a warning. To mark your own events by
@@ -557,7 +562,7 @@ an `event` field:
 
 | `event` | When |
 |---|---|
-| `ssh_connect` | a connection starts — with `legacy = true` under `LegacyJunos` |
+| `ssh_connect` | a connection starts — with `legacy = true` under `LegacyJunos`, and under a `Custom` policy that holds a legacy name |
 | `ssh_connect_refused`, `ssh_host_key_probe_refused` | the options were refused before connecting — `reason` says why; no start event precedes it |
 | `ssh_connect_failed`, `ssh_auth_failed` | the connection or the login failed |
 | `ssh_host_key_verified`, `ssh_host_key_mismatch` | the host key matched, or did not |
@@ -675,7 +680,7 @@ minutes, so put the slack you want for a slow device into `per_commit`.
 | `AuthRejected` | the login was refused; `remaining_methods` is what the device accepts, and `partial_success` says the password was accepted but more is required |
 | `SubsystemUnavailable` | logged in, but the device has no NETCONF over SSH |
 | `Closed` | the device ended the connection; `ssh` has what it said |
-| `InvalidOptions` | the options cannot be used; refused before anything was sent — a missing or wrongly formed `host_key`, `SshPolicy::Custom`, `Timeouts` outside their frames, a host or username that is empty or holds what it cannot |
+| `InvalidOptions` | the options cannot be used; refused before anything was sent — a missing or wrongly formed `host_key`, a `SshPolicy::Custom` list that breaks the rules, `Timeouts` outside their frames, a host or username that is empty or holds what it cannot |
 | `Io` | anything else on the way — the connection broke, the address was wrong |
 
 ```rust

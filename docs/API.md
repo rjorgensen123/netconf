@@ -210,6 +210,10 @@ pub enum SshPolicy {
  LegacyJunos,
  Custom { kex: Vec<String>, hostkey: Vec<String>, cipher: Vec<String>, mac: Vec<String> },
 }
+impl SshPolicy {
+ pub fn validate(&self) -> Result<(), String>; // Ok for Modern and LegacyJunos; the rules below for Custom; called by the transport before connecting
+ pub fn without(&self, names: &[&str]) -> Result<SshPolicy, String>; // this policy's lists without names, as a Custom
+}
 
 pub const LEGACY_ALGORITHMS: &[&str]; // diffie-hellman-group1-sha1, -group14-sha1, -group-exchange-sha1, ssh-rsa, ssh-dss, 3des-cbc, aes{128,192,256}-cbc, hmac-sha1, hmac-sha1-etm@openssh.com
 pub fn is_legacy(algorithm: &str) -> bool; // is this name in LEGACY_ALGORITHMS?
@@ -222,7 +226,8 @@ is logged (one warning per device — after that it stays visible through the ta
 allowed in addition. We do **not** forbid the old ones (the R14→Evo span requires them), but they
 must be **visible**: `is_legacy()` exists so the consumer can mark them in logs and audit. The
 transport's own `legacy` tag follows the **policy**, not the algorithm actually negotiated, which
-it does not learn.
+it does not learn: `LegacyJunos` is legacy, and a `Custom` policy is legacy when it holds a name
+`is_legacy()` knows.
 
 What each policy offers, in order of preference:
 
@@ -240,9 +245,36 @@ algorithm, and it has an effect only with a device that supports it.
 `3des-cbc` is in `LEGACY_ALGORITHMS`, so it is marked when seen, but **no policy offers it**.
  `LegacyJunos` offers everything russh 0.65 has for the R14 to Evo span;
  the two full-strength additions are not legacy, the SHA-1 group exchange and
-`ssh-dss` are. `Custom` is rejected at connect (not implemented — we refuse rather than
-negotiate with a different list than the one you asked for). It is planned for a coming release,
-with no promise of when.
+`ssh-dss` are.
+
+**`Custom` is your own lists**, for leaving out an algorithm you do not accept: a device that has
+nothing else then gets no connection. Each list may hold only names that `Modern` or `LegacyJunos`
+offers in that same list — `none`, `clear`, `3des-cbc` and the negotiation markers are refused, as
+is every other name. Each list needs at least one name, and no name twice. The order is yours: the
+first name is preferred. Strict key exchange is asked for after your key exchanges, as under the
+other policies; you do not list it and cannot remove it. No host certificate algorithm is offered,
+and compression is as under the other policies. `validate` checks the lists in the order key
+exchange, host key, cipher, MAC, and `connect`, `observe_host_key` and `check_device` call it and
+refuse a policy that breaks the rules as `Transport(InvalidOptions)` with its text, one of:
+
+- `SshPolicy::Custom: the list of <kinds> is empty — each list needs at least one name`
+- `SshPolicy::Custom: «<name>» is in the list of <kinds> twice`
+- `SshPolicy::Custom: «<name>» is not one of the <kinds> netconf offers — the names are those of Modern and LegacyJunos`
+
+where `<kinds>` is `key exchanges`, `host key algorithms`, `ciphers` or `MACs`, and `<name>` is
+made printable. `without` builds a `Custom` from a policy you have: `SshPolicy::LegacyJunos.without(&["ssh-dss"])`
+is `LegacyJunos`'s lists without `ssh-dss`, in the same order. A name that is in none of the
+policy's lists is refused with `SshPolicy::without: «<name>» is in none of this policy's lists, so
+there is nothing to leave out`, and a list left empty is refused by `validate` when it is used.
+
+Under every policy, the device's host key must be of a type the policy allows — `ssh-ed25519` an
+Ed25519 key, each `ecdsa-sha2-nistpNNN` an ECDSA key on that curve, `rsa-sha2-512`,
+`rsa-sha2-256` or `ssh-rsa` an RSA key, `ssh-dss` a DSA key — or it is refused like a host
+certificate, as `HostKey` (§9). The check is of the key's type: for an RSA key, the hash the device
+signs with is checked by russh, not by netconf, and russh accepts a SHA-1 signature from an RSA
+key, so leaving `ssh-rsa` out stops a device that follows the protocol, which finds no algorithm in
+common, but not a device that holds the pinned RSA key, announces `rsa-sha2-512` or `rsa-sha2-256`,
+and signs with SHA-1.
 
 ---
 
@@ -1463,11 +1495,11 @@ the contract:
 | Event | Level | When |
 |---|---|---|
 | `ssh_connect_refused` / `ssh_host_key_probe_refused` | warn | `connect` / `observe_host_key` refused before connecting: `reason`, the refusal text, with host and port — and username for `connect` — unless the host or username is what was refused. No start event precedes it |
-| `ssh_connect` / `ssh_connect_failed` | info/warn | `ssh_connect`: the attempt (host, port, username, policy, `host_key = "pinned"`), warn the first time per device under a legacy policy. `ssh_connect_failed` (host, port, `ssh_policy`, `error`): the TCP connection or the SSH handshake failed; a timeout, a rejected login or a refused subsystem are reported through their own errors, not this event |
+| `ssh_connect` / `ssh_connect_failed` | info/warn | `ssh_connect`: the attempt (host, port, username, policy, `host_key = "pinned"`), warn the first time per device under a legacy policy — `LegacyJunos`, or a `Custom` that holds a name `is_legacy` knows. `ssh_connect_failed` (host, port, `ssh_policy`, `error`): the TCP connection or the SSH handshake failed; a timeout, a rejected login or a refused subsystem are reported through their own errors, not this event |
 | `ssh_auth_failed` | warn | authentication rejected (the methods the device named, `partial_success`) |
 | `ssh_session_established` / `ssh_session_closed` | info | session lifecycle; established only once the device has opened the subsystem |
 | `ssh_session_failed` | warn | russh ended an established connection on an error — `error` is russh's text, redacted |
-| `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch or a host certificate (rejected) |
+| `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch, a host certificate, or a key of a type the policy does not allow (rejected) |
 | `ssh_host_key_enrollment` / `ssh_host_key_observed` | info | no pin — fingerprint observed |
 | `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run; `ssh_host_key_probe` only for a probe that goes on the wire |
 | `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr: `bytes`, how much, and `cut`, whether the cap was reached. Not the text |
@@ -1481,7 +1513,7 @@ that it wrote, and how much, and the text goes to the caller it concerns (§8). 
 the transport keeps are full, the event is logged a last time with `cut = true`, and no more. A legacy SSH policy is warned once per device; after
 that its `ssh_connect` event still carries `legacy = true`, and `ssh_connect_failed` and
 `ssh_session_established` name the policy in `ssh_policy`. The tag follows the policy, not the
-negotiated algorithm. Error messages can be logged as they are: the device's text in them is
+negotiated algorithm; for `custom`, it follows the names the policy holds. Error messages can be logged as they are: the device's text in them is
 made printable where it is taken in — stderr, the fields of an `rpc-error`, a `message-id`, an
 entity's name, the algorithm names a device announces (`Negotiation.offered`) and the
 tag names quick-xml quotes in a parse error. A `message-id` and what the parser quotes
@@ -1492,7 +1524,7 @@ made printable in its text as well; under a policy that lets secrets through it 
 them, as the reply would, and `redact_secrets` is the filter for such a log line. russh's text is
 redacted where the transport takes it in, in the errors and in the events. The
 `ssh_connect` event is logged
-after the refusals for a missing or wrongly formed pin, for `Custom` and for `Timeouts` outside their frames, so a
+after the refusals for a missing or wrongly formed pin, for a `Custom` policy that breaks its rules and for `Timeouts` outside their frames, so a
 refused connect does not spend the device's one legacy warning.
 
 ---
@@ -1547,7 +1579,7 @@ status — does not start it again, in `recv` or in the wait `close` does.
 connects, `connect` refuses — as `Transport(InvalidOptions)` — a missing `host_key`, a `host_key`
 that is not a fingerprint, with
 `the pinned host key is not a fingerprint — it is SHA256: followed by 43 base64 characters, the form observe_host_key() returns. Refused before anything is sent.`,
-`SshPolicy::Custom`, `Timeouts` outside their frames, and an empty host or username or one holding a
+a `SshPolicy::Custom` that breaks its rules (§1), `Timeouts` outside their frames, and an empty host or username or one holding a
 control character — a host may not hold whitespace either, and `observe_host_key` checks the host the
 same way. Authentication therefore always has a pinned key; observation has
 its own path. The password is taken out of the `SecretString` right before authentication, into a
@@ -1558,7 +1590,7 @@ What a failure becomes (classified by russh's error types, not its message text)
 
 | | Error |
 |---|---|
-| the key is not the pinned one, the device presented a host certificate, or the device's signature does not hold | `HostKey { observed }` |
+| the key is not the pinned one or not of a type the policy allows, the device presented a host certificate, or the device's signature does not hold | `HostKey { observed }` |
 | no common algorithm | `Negotiation { offered }` — what the device announced |
 | key exchange failed otherwise | `Negotiation { offered: [] }` |
 | the password was not accepted | `AuthRejected { username, remaining_methods, partial_success }` |
@@ -1624,8 +1656,8 @@ decides nothing from it.
 - **Always a report:** once the connection is started, the result is `Ok(DeviceCheck)`, whether
   every step answered or one stopped. `Err` is only what `connect` refuses before anything is
   connected, as `Transport(InvalidOptions)` — a missing `host_key` or one that is not a
-  fingerprint, `SshPolicy::Custom`, `Timeouts` outside their frames, a host or username that
-  cannot be right. Then nothing was checked.
+  fingerprint, a `SshPolicy::Custom` that breaks its rules, `Timeouts` outside their frames, a
+  host or username that cannot be right. Then nothing was checked.
 - **Nothing is left behind:** the connection is ended when the check is over, however it ended.
 - **What it holds:** `steps()` are the steps that answered, each with the time it took;
   `stopped()` is the step that did not, with the error — the device's own words in it, redacted,
@@ -1663,8 +1695,9 @@ signature, not a rule anyone must remember. It runs under `timeouts` as `connect
  they are validated the same way, and the TCP connection and key exchange end within
 `connect`, counted from the start, and never past `total`. Running out is `Timeout { op: "ssh-connect" }`,
 or `Timeout { op: "session-ttl" }` when `total` is what ran out. Before anything connects it
-refuses, as `Transport(InvalidOptions)`, what `connect` refuses of what it uses: `SshPolicy::Custom`
-and `Timeouts` outside their frames.
+refuses, as `Transport(InvalidOptions)`, what `connect` refuses of what it uses: a
+`SshPolicy::Custom` that breaks its rules and `Timeouts` outside their frames. A host key of a type
+the policy does not allow is refused here too.
 
 It **pins nothing**. The transition observed → approved belongs to the consumer and requires a
 human.
@@ -1714,8 +1747,12 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
 
 ## Known limits
 
-- `SshPolicy::Custom` is not implemented — refused by `connect` and `observe_host_key`. It is
-  planned for a coming release, with no promise of when.
+- `SshPolicy::Custom` chooses among the names `Modern` and `LegacyJunos` offer; it cannot add
+  another.
+- The check of the device's host key is of the key's type. For an RSA key, the hash the device
+  signs with is checked by russh, not by netconf, and russh accepts a SHA-1 signature from an RSA
+  key: leaving `ssh-rsa` out does not stop a device that holds the pinned RSA key, announces
+  `rsa-sha2-512` or `rsa-sha2-256`, and signs with SHA-1.
 - `platform_hint`/`Platform` is reserved and not read.
 - There is no keepalive.
 - Policy enforcement reads set payloads only: a `Text` or `Xml` load — and `prepare_change` with

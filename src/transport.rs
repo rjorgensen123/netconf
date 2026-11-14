@@ -13,6 +13,7 @@ use krypto::SecretString;
 use std::time::Duration;
 
 use crate::error::{NetconfError, SshMessages};
+use crate::wire::printable;
 
 /// A byte transport beneath the NETCONF layer — typically the SSH subsystem
 /// `netconf`.
@@ -147,10 +148,17 @@ pub fn is_legacy(algorithm: &str) -> bool {
 /// of `Modern`: the modern algorithms are still negotiated first, and legacy ones are
 /// *permitted*, not *preferred*.
 ///
-/// `Modern` and `LegacyJunos` genuinely affect the negotiation. `Modern` is today's
-/// recommendation; `LegacyJunos` appends SHA-1 key exchange, `ssh-rsa`, `ssh-dss`,
-/// CBC and `hmac-sha1` as a tail, so that older releases remain reachable. No policy
-/// offers 3DES (removed in 0.3.2). The exact lists are in `docs/API.md`.
+/// Every policy genuinely affects the negotiation: its lists are what is offered to
+/// the device. `Modern` is today's recommendation; `LegacyJunos` appends SHA-1 key
+/// exchange, `ssh-rsa`, `ssh-dss`, CBC and `hmac-sha1` as a tail, so that older
+/// releases remain reachable. No policy offers 3DES (removed in 0.3.2). The exact
+/// lists are in `docs/API.md`.
+///
+/// `Custom` is the caller's own lists, chosen from the names `Modern` and
+/// `LegacyJunos` offer and in the caller's order — to leave out an algorithm the
+/// caller does not accept. The transport checks them with
+/// [`validate`](Self::validate) before connecting, and [`without`](Self::without)
+/// makes one from another policy.
 ///
 /// Every policy asks for strict key exchange, the countermeasure to the Terrapin
 /// attack, which takes effect only where the device supports it.
@@ -163,10 +171,13 @@ pub enum SshPolicy {
     /// ssh-rsa with SHA-1 signatures, ssh-dss, aes-cbc as a last resort, and
     /// hmac-sha1. For older releases.
     LegacyJunos,
-    /// The caller's own algorithm lists. **Not built:** the SSH transport refuses it
-    /// before connecting — `connect`, `observe_host_key` and `check_device` alike —
-    /// as [`TransportError::InvalidOptions`](crate::TransportError::InvalidOptions).
-    /// It is planned for a coming release, with no promise of when.
+    /// The caller's own algorithm lists (0.7.0), each in order of preference: only
+    /// names `Modern` or `LegacyJunos` offers in that list, at least one in each,
+    /// none twice. Strict key exchange is asked for after the key exchanges, as
+    /// under the other policies. A list that breaks the rules is refused before
+    /// connecting — by `connect`, `observe_host_key` and `check_device` alike — as
+    /// [`TransportError::InvalidOptions`](crate::TransportError::InvalidOptions)
+    /// with the text of [`validate`](Self::validate).
     Custom {
         /// Key exchange algorithms.
         kex: Vec<String>,
@@ -177,6 +188,218 @@ pub enum SshPolicy {
         /// MAC algorithms.
         mac: Vec<String>,
     },
+}
+
+/// The key exchanges `SshPolicy::Modern` offers, in order of preference.
+pub(crate) const MODERN_KEX: &[&str] = &[
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "diffie-hellman-group16-sha512",
+    "diffie-hellman-group14-sha256",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+];
+
+/// The key exchanges `SshPolicy::LegacyJunos` offers after those of `Modern`: group
+/// 18 and group exchange at full strength, then the SHA-1 ones.
+pub(crate) const LEGACY_KEX_TAIL: &[&str] = &[
+    "diffie-hellman-group18-sha512",
+    "diffie-hellman-group-exchange-sha256",
+    "diffie-hellman-group14-sha1",
+    "diffie-hellman-group-exchange-sha1",
+    "diffie-hellman-group1-sha1",
+];
+
+/// The host key algorithms `SshPolicy::Modern` offers, in order of preference.
+pub(crate) const MODERN_HOSTKEY: &[&str] = &[
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "rsa-sha2-512",
+    "rsa-sha2-256",
+];
+
+/// The host key algorithms `SshPolicy::LegacyJunos` offers after those of `Modern`.
+pub(crate) const LEGACY_HOSTKEY_TAIL: &[&str] = &["ssh-rsa", "ssh-dss"];
+
+/// The ciphers `SshPolicy::Modern` offers, in order of preference.
+pub(crate) const MODERN_CIPHER: &[&str] = &[
+    "chacha20-poly1305@openssh.com",
+    "aes256-gcm@openssh.com",
+    "aes256-ctr",
+    "aes192-ctr",
+    "aes128-ctr",
+];
+
+/// The ciphers `SshPolicy::LegacyJunos` offers after those of `Modern`; `3des-cbc` is
+/// left out on purpose, as no device surveyed needed it.
+pub(crate) const LEGACY_CIPHER_TAIL: &[&str] = &["aes256-cbc", "aes192-cbc", "aes128-cbc"];
+
+/// The MACs `SshPolicy::Modern` offers, in order of preference.
+pub(crate) const MODERN_MAC: &[&str] = &[
+    "hmac-sha2-512-etm@openssh.com",
+    "hmac-sha2-256-etm@openssh.com",
+    "hmac-sha2-512",
+    "hmac-sha2-256",
+];
+
+/// The MACs `SshPolicy::LegacyJunos` offers after those of `Modern`.
+pub(crate) const LEGACY_MAC_TAIL: &[&str] = &["hmac-sha1-etm@openssh.com", "hmac-sha1"];
+
+/// The four lists of algorithm names a policy offers, each in order of preference.
+pub(crate) struct AlgorithmNames<'a> {
+    /// Key exchange algorithms, without the strict key exchange marker.
+    pub(crate) kex: Vec<&'a str>,
+    /// Host key algorithms.
+    pub(crate) hostkey: Vec<&'a str>,
+    /// Ciphers.
+    pub(crate) cipher: Vec<&'a str>,
+    /// MAC algorithms.
+    pub(crate) mac: Vec<&'a str>,
+}
+
+impl SshPolicy {
+    /// Check the lists of a `Custom` policy, fail-closed (0.7.0); `Modern` and
+    /// `LegacyJunos` are always `Ok`. The transport calls it before connecting.
+    ///
+    /// Each list must hold at least one name, only names `Modern` or `LegacyJunos`
+    /// offers in that list, and none twice. The lists are checked key exchange,
+    /// host key, cipher, MAC, and the message names the list and the name.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            SshPolicy::Modern | SshPolicy::LegacyJunos => Ok(()),
+            SshPolicy::Custom {
+                kex,
+                hostkey,
+                cipher,
+                mac,
+            } => {
+                check_custom_list("key exchanges", kex, MODERN_KEX, LEGACY_KEX_TAIL)?;
+                check_custom_list(
+                    "host key algorithms",
+                    hostkey,
+                    MODERN_HOSTKEY,
+                    LEGACY_HOSTKEY_TAIL,
+                )?;
+                check_custom_list("ciphers", cipher, MODERN_CIPHER, LEGACY_CIPHER_TAIL)?;
+                check_custom_list("MACs", mac, MODERN_MAC, LEGACY_MAC_TAIL)
+            }
+        }
+    }
+
+    /// This policy's lists without `names`, in the same order, as a `Custom` policy
+    /// (0.7.0): the way to leave out an algorithm the caller does not accept.
+    ///
+    /// A name that is in none of this policy's lists is an error, so a mistyped
+    /// name cannot pass as left out. A list left empty is returned as it is, and
+    /// [`validate`](Self::validate) refuses it.
+    pub fn without(&self, names: &[&str]) -> Result<SshPolicy, String> {
+        let lists = self.algorithm_names();
+        for name in names {
+            let listed = [&lists.kex, &lists.hostkey, &lists.cipher, &lists.mac]
+                .iter()
+                .any(|list| list.contains(name));
+            if !listed {
+                return Err(format!(
+                    "SshPolicy::without: «{}» is in none of this policy's lists, so there is \
+                     nothing to leave out",
+                    printable(name)
+                ));
+            }
+        }
+        let keep = |list: &[&str]| -> Vec<String> {
+            list.iter()
+                .filter(|name| !names.contains(*name))
+                .map(|name| name.to_string())
+                .collect()
+        };
+        Ok(SshPolicy::Custom {
+            kex: keep(&lists.kex),
+            hostkey: keep(&lists.hostkey),
+            cipher: keep(&lists.cipher),
+            mac: keep(&lists.mac),
+        })
+    }
+
+    /// The policy's four lists of names: the built-in lists for `Modern` and
+    /// `LegacyJunos`, and the caller's own for `Custom`, unchecked.
+    pub(crate) fn algorithm_names(&self) -> AlgorithmNames<'_> {
+        let legacy = |modern: &[&'static str], tail: &[&'static str]| -> Vec<&'static str> {
+            modern.iter().chain(tail).copied().collect()
+        };
+        match self {
+            SshPolicy::Modern => AlgorithmNames {
+                kex: MODERN_KEX.to_vec(),
+                hostkey: MODERN_HOSTKEY.to_vec(),
+                cipher: MODERN_CIPHER.to_vec(),
+                mac: MODERN_MAC.to_vec(),
+            },
+            SshPolicy::LegacyJunos => AlgorithmNames {
+                kex: legacy(MODERN_KEX, LEGACY_KEX_TAIL),
+                hostkey: legacy(MODERN_HOSTKEY, LEGACY_HOSTKEY_TAIL),
+                cipher: legacy(MODERN_CIPHER, LEGACY_CIPHER_TAIL),
+                mac: legacy(MODERN_MAC, LEGACY_MAC_TAIL),
+            },
+            SshPolicy::Custom {
+                kex,
+                hostkey,
+                cipher,
+                mac,
+            } => AlgorithmNames {
+                kex: kex.iter().map(String::as_str).collect(),
+                hostkey: hostkey.iter().map(String::as_str).collect(),
+                cipher: cipher.iter().map(String::as_str).collect(),
+                mac: mac.iter().map(String::as_str).collect(),
+            },
+        }
+    }
+
+    /// Whether any of the policy's names is one [`is_legacy`] knows: what makes a
+    /// `Custom` connection `legacy` in the log. Only the SSH transport logs that,
+    /// so it exists with its feature.
+    #[cfg(feature = "russh-transport")]
+    pub(crate) fn holds_legacy_name(&self) -> bool {
+        let names = self.algorithm_names();
+        [names.kex, names.hostkey, names.cipher, names.mac]
+            .iter()
+            .flatten()
+            .any(|name| is_legacy(name))
+    }
+}
+
+/// Check one list of a `Custom` policy: not empty, and each name, in order, one
+/// netconf offers in this list — `Modern`'s or the `LegacyJunos` tail — and not
+/// one already in it. `kinds` names the list in the message.
+fn check_custom_list(
+    kinds: &str,
+    list: &[String],
+    modern: &[&str],
+    legacy_tail: &[&str],
+) -> Result<(), String> {
+    if list.is_empty() {
+        return Err(format!(
+            "SshPolicy::Custom: the list of {kinds} is empty — each list needs at least one name"
+        ));
+    }
+    for (at, name) in list.iter().enumerate() {
+        let name = name.as_str();
+        if !modern.contains(&name) && !legacy_tail.contains(&name) {
+            return Err(format!(
+                "SshPolicy::Custom: «{}» is not one of the {kinds} netconf offers — the names \
+                 are those of Modern and LegacyJunos",
+                printable(name)
+            ));
+        }
+        if list[..at].iter().any(|before| before == name) {
+            return Err(format!(
+                "SshPolicy::Custom: «{}» is in the list of {kinds} twice",
+                printable(name)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Time limits for a session, at TWO levels:
@@ -372,4 +595,26 @@ pub struct ConnectOptions {
     /// `russh_transport::observe_host_key`, which runs the key exchange and
     /// disconnects without authenticating. It takes no credential parameter at all.
     pub host_key: Option<String>,
+}
+
+#[cfg(all(test, feature = "russh-transport"))]
+mod legacy_name_tests {
+    use super::SshPolicy;
+
+    /// **A `Custom` policy is legacy by what it holds** (0.7.0): with only modern
+    /// names it is not, with `ssh-rsa` it is. `Modern` holds no legacy name, and
+    /// `LegacyJunos` does.
+    #[test]
+    fn a_custom_policy_is_legacy_by_its_names() {
+        let custom = |hostkey: &str| SshPolicy::Custom {
+            kex: vec!["curve25519-sha256".into()],
+            hostkey: vec!["ssh-ed25519".into(), hostkey.into()],
+            cipher: vec!["aes256-gcm@openssh.com".into()],
+            mac: vec!["hmac-sha2-256-etm@openssh.com".into()],
+        };
+        assert!(!custom("rsa-sha2-512").holds_legacy_name());
+        assert!(custom("ssh-rsa").holds_legacy_name());
+        assert!(!SshPolicy::Modern.holds_legacy_name());
+        assert!(SshPolicy::LegacyJunos.holds_legacy_name());
+    }
 }

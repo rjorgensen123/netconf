@@ -63,6 +63,8 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-14 — A DSA host key (`ssh-dss`) is verified under `LegacyJunos`: russh is built
   with its `dsa` feature. The policy offered the algorithm, and its signature could not be
   checked.
+- 2026-11-14 — A device's host key must be of a type the SSH policy allows, under every
+  policy. One of another type is refused.
 
 ### Added
 
@@ -80,6 +82,9 @@ Every notable change to this crate is recorded here. The format follows
   request — and reports how far it got and how long each step took. The report (`DeviceCheck`) is
   read as one word (`Verdict`), one line, or in full. It is the tool for after a timeout:
   `connect` reports a timeout in any of its first steps under one name.
+- 2026-11-14 — `SshPolicy::Custom` works: the consumer's own lists of SSH algorithms, chosen
+  from the names `Modern` and `LegacyJunos` offer. `SshPolicy::validate` checks a policy, and
+  `SshPolicy::without` gives one with names left out. It was refused before connecting.
 
 ### Changed
 

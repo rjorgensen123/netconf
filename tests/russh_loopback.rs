@@ -724,6 +724,75 @@ async fn modern_finds_no_common_host_key_with_a_dsa_only_device() {
     }
 }
 
+/// **A `Custom` policy of one name in each list connects** (0.7.0): the device
+/// has each of them, and the session opens with its hello.
+#[tokio::test]
+async fn a_custom_policy_of_one_name_in_each_list_connects() {
+    let user = "custom-one-of-each";
+    let mut opts = start(Device::ClosesCleanly, Timeouts::default()).await;
+    opts.username = user.into();
+    opts.ssh_policy = SshPolicy::Custom {
+        kex: vec!["curve25519-sha256".into()],
+        hostkey: vec!["ssh-ed25519".into()],
+        cipher: vec!["chacha20-poly1305@openssh.com".into()],
+        mac: vec!["hmac-sha2-256-etm@openssh.com".into()],
+    };
+
+    let session = netconf::NetconfSession::<RusshTransport>::connect(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the device has every name of the policy");
+    assert_eq!(session.session_id(), Some(9));
+    let events = events_for(user);
+    assert!(
+        events.iter().any(|e| e == "ssh_session_established"),
+        "{events:?}"
+    );
+}
+
+/// **A `Custom` policy whose only host key algorithm the device lacks finds no
+/// common one** (0.7.0): `rsa-sha2-512` against a device with only an Ed25519
+/// key fails as `Negotiation`, carrying what the device offered.
+#[tokio::test]
+async fn a_custom_policy_without_the_devices_host_key_algorithm_finds_none_in_common() {
+    let mut opts = start(Device::ClosesCleanly, Timeouts::default()).await;
+    opts.username = "custom-rsa-only".into();
+    opts.ssh_policy = SshPolicy::Custom {
+        kex: vec!["curve25519-sha256".into()],
+        hostkey: vec!["rsa-sha2-512".into()],
+        cipher: vec!["chacha20-poly1305@openssh.com".into()],
+        mac: vec!["hmac-sha2-256-etm@openssh.com".into()],
+    };
+
+    match RusshTransport::connect(&opts).await {
+        Err(NetconfError::Transport(TransportError::Negotiation { offered, .. })) => {
+            assert_eq!(offered, ["ssh-ed25519"]);
+        }
+        Err(e) => panic!("expected Negotiation, got {e}"),
+        Ok(_) => panic!("a policy of rsa-sha2-512 alone connected to an Ed25519 key"),
+    }
+}
+
+/// **`LegacyJunos` without `ssh-dss` does not reach a device that has only a DSA
+/// host key** (0.7.0): leaving the name out leaves the device out, and the connect
+/// fails as `Negotiation`.
+#[tokio::test]
+async fn legacy_junos_without_ssh_dss_finds_no_common_host_key_with_a_dsa_only_device() {
+    let mut opts = start(Device::DsaHostKey, Timeouts::default()).await;
+    opts.username = "legacy-without-dss".into();
+    opts.ssh_policy = SshPolicy::LegacyJunos
+        .without(&["ssh-dss"])
+        .expect("ssh-dss is a LegacyJunos name");
+
+    match RusshTransport::connect(&opts).await {
+        Err(NetconfError::Transport(TransportError::Negotiation { offered, .. })) => {
+            assert_eq!(offered, ["ssh-dss"]);
+        }
+        Err(e) => panic!("expected Negotiation, got {e}"),
+        Ok(_) => panic!("a policy without ssh-dss negotiated a DSA host key"),
+    }
+}
+
 /// A device that sends its banner and never goes further: the key exchange stalls.
 /// It reads what it is sent and throws it away, and `closed` reports when the client
 /// ended the connection — when a read came back empty or failed.

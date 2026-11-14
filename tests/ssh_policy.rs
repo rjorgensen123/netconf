@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Locks down the legacy classification of SSH algorithms.
-//!
-//! Old algorithms are not forbidden — the span of Junos releases we target needs
-//! some of them. They are made *visible* instead, by being marked `legacy`, so a
-//! consumer can log when one is in use. These tests keep that list from drifting
-//! quietly.
+//! The options a connection is checked against: the legacy classification of SSH
+//! algorithms, `SshPolicy` with `validate` and `without`, and `Timeouts`. With
+//! `russh-transport`, also what `RusshTransport` refuses before connecting, and the
+//! events it logs on the way.
 
 use netconf::{LEGACY_ALGORITHMS, is_legacy};
 
@@ -77,43 +75,352 @@ fn legacy_list_is_not_empty_and_has_no_duplicates() {
     );
 }
 
-/// `SshPolicy::Custom` must **refuse**, not quietly do something else.
-///
-/// This arm used to return the legacy lists, so a consumer who chose `Custom`
-/// in order to *tighten* things got `3des-cbc`, `ssh-rsa` and
-/// `diffie-hellman-group1-sha1` switched on instead — fail-open, in a crate
-/// whose floor is fail-closed. Refusing is the honest answer until the arm can
-/// deliver what the API promises.
+// --- SshPolicy::Custom: the caller's own lists (0.7.0) ---
+
+/// Every name `LegacyJunos` offers, in its order: key exchange, host key, cipher,
+/// MAC. `Modern`'s are the first of each.
+const LEGACY_JUNOS_KEX: &[&str] = &[
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "diffie-hellman-group16-sha512",
+    "diffie-hellman-group14-sha256",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+    "diffie-hellman-group18-sha512",
+    "diffie-hellman-group-exchange-sha256",
+    "diffie-hellman-group14-sha1",
+    "diffie-hellman-group-exchange-sha1",
+    "diffie-hellman-group1-sha1",
+];
+const LEGACY_JUNOS_HOSTKEY: &[&str] = &[
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "rsa-sha2-512",
+    "rsa-sha2-256",
+    "ssh-rsa",
+    "ssh-dss",
+];
+const LEGACY_JUNOS_CIPHER: &[&str] = &[
+    "chacha20-poly1305@openssh.com",
+    "aes256-gcm@openssh.com",
+    "aes256-ctr",
+    "aes192-ctr",
+    "aes128-ctr",
+    "aes256-cbc",
+    "aes192-cbc",
+    "aes128-cbc",
+];
+const LEGACY_JUNOS_MAC: &[&str] = &[
+    "hmac-sha2-512-etm@openssh.com",
+    "hmac-sha2-256-etm@openssh.com",
+    "hmac-sha2-512",
+    "hmac-sha2-256",
+    "hmac-sha1-etm@openssh.com",
+    "hmac-sha1",
+];
+
+/// The names as owned strings, the type `Custom` holds.
+fn owned(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+/// A `Custom` policy of one ordinary name in each list.
+fn one_of_each() -> netconf::SshPolicy {
+    netconf::SshPolicy::Custom {
+        kex: owned(&["curve25519-sha256"]),
+        hostkey: owned(&["ssh-ed25519"]),
+        cipher: owned(&["aes256-gcm@openssh.com"]),
+        mac: owned(&["hmac-sha2-256-etm@openssh.com"]),
+    }
+}
+
+/// `one_of_each` with its list of `kinds` — as the refusal texts name it — replaced
+/// by `list`.
+fn one_of_each_but(kinds: &str, list: &[&str]) -> netconf::SshPolicy {
+    let [mut kex, mut hostkey, mut cipher, mut mac] = lists(&one_of_each());
+    match kinds {
+        "key exchanges" => kex = owned(list),
+        "host key algorithms" => hostkey = owned(list),
+        "ciphers" => cipher = owned(list),
+        "MACs" => mac = owned(list),
+        other => panic!("no list of {other}"),
+    }
+    netconf::SshPolicy::Custom {
+        kex,
+        hostkey,
+        cipher,
+        mac,
+    }
+}
+
+/// The four lists of a `Custom` policy: key exchange, host key, cipher, MAC.
+fn lists(policy: &netconf::SshPolicy) -> [Vec<String>; 4] {
+    match policy {
+        netconf::SshPolicy::Custom {
+            kex,
+            hostkey,
+            cipher,
+            mac,
+        } => [kex.clone(), hostkey.clone(), cipher.clone(), mac.clone()],
+        _ => panic!("expected a Custom policy"),
+    }
+}
+
+/// **`validate` accepts the built-in policies, and a `Custom` of names netconf
+/// offers.** A `Custom` that holds every name of `LegacyJunos` is valid.
+#[test]
+fn validate_accepts_the_built_in_policies_and_every_name_netconf_offers() {
+    use netconf::SshPolicy;
+
+    SshPolicy::Modern.validate().expect("Modern");
+    SshPolicy::LegacyJunos.validate().expect("LegacyJunos");
+    one_of_each().validate().expect("one name of each");
+    SshPolicy::Custom {
+        kex: owned(LEGACY_JUNOS_KEX),
+        hostkey: owned(LEGACY_JUNOS_HOSTKEY),
+        cipher: owned(LEGACY_JUNOS_CIPHER),
+        mac: owned(LEGACY_JUNOS_MAC),
+    }
+    .validate()
+    .expect("every name of LegacyJunos");
+}
+
+/// **`validate` refuses a `Custom` that breaks the rules, and says what broke
+/// them**: an empty list, a name twice, and a name netconf does not offer in that
+/// list — `none` and `clear`, `3des-cbc`, the negotiation markers, a made-up name,
+/// and a known name in the wrong list.
+#[test]
+fn validate_refuses_a_custom_that_breaks_the_rules() {
+    let not_offered = |name: &str, kinds: &str| {
+        format!(
+            "SshPolicy::Custom: «{name}» is not one of the {kinds} netconf offers — the \
+             names are those of Modern and LegacyJunos"
+        )
+    };
+    let empty = |kinds: &str| {
+        format!(
+            "SshPolicy::Custom: the list of {kinds} is empty — each list needs at least one name"
+        )
+    };
+    for kinds in ["key exchanges", "host key algorithms", "ciphers", "MACs"] {
+        assert_eq!(
+            one_of_each_but(kinds, &[]).validate(),
+            Err(empty(kinds)),
+            "{kinds}"
+        );
+    }
+    assert_eq!(
+        one_of_each_but("ciphers", &["aes256-ctr", "aes128-ctr", "aes256-ctr"]).validate(),
+        Err("SshPolicy::Custom: «aes256-ctr» is in the list of ciphers twice".to_string())
+    );
+    for (kinds, name) in [
+        ("key exchanges", "none"),
+        ("ciphers", "none"),
+        ("ciphers", "clear"),
+        ("MACs", "none"),
+        ("ciphers", "3des-cbc"),
+        ("key exchanges", "kex-strict-c-v00@openssh.com"),
+        ("key exchanges", "ext-info-c"),
+        ("host key algorithms", "foo@example.com"),
+        ("MACs", "aes256-ctr"),
+    ] {
+        assert_eq!(
+            one_of_each_but(kinds, &[name]).validate(),
+            Err(not_offered(name, kinds)),
+            "{name} among the {kinds}"
+        );
+    }
+}
+
+/// **The lists are checked in order, and the first fault is the one named**: key
+/// exchange before host key, cipher and MAC; within a list each name in order, and
+/// for one name, not offered before twice.
+#[test]
+fn validate_names_the_first_fault_in_order() {
+    use netconf::SshPolicy;
+
+    let faults_everywhere = SshPolicy::Custom {
+        kex: owned(&["curve25519-sha256", "none"]),
+        hostkey: owned(&[]),
+        cipher: owned(&["clear"]),
+        mac: owned(&["none"]),
+    };
+    assert_eq!(
+        faults_everywhere.validate(),
+        Err(
+            "SshPolicy::Custom: «none» is not one of the key exchanges netconf offers — the \
+             names are those of Modern and LegacyJunos"
+                .to_string()
+        )
+    );
+    let twice_then_unknown = one_of_each_but(
+        "key exchanges",
+        &["curve25519-sha256", "curve25519-sha256", "none"],
+    );
+    assert_eq!(
+        twice_then_unknown.validate(),
+        Err(
+            "SshPolicy::Custom: «curve25519-sha256» is in the list of key exchanges twice"
+                .to_string()
+        )
+    );
+    let unknown_twice = one_of_each_but("MACs", &["none", "none"]);
+    assert_eq!(
+        unknown_twice.validate(),
+        Err(
+            "SshPolicy::Custom: «none» is not one of the MACs netconf offers — the names \
+             are those of Modern and LegacyJunos"
+                .to_string()
+        )
+    );
+}
+
+/// **A name in a refusal is made printable**: a control character in it cannot
+/// break the line the text is logged on.
+#[test]
+fn a_name_in_a_refusal_is_made_printable() {
+    use netconf::SshPolicy;
+
+    let policy = one_of_each_but("host key algorithms", &["ssh-ed25519\nevent=forged"]);
+    let text = policy.validate().expect_err("a name that is not offered");
+    assert_eq!(
+        text,
+        "SshPolicy::Custom: «ssh-ed25519\\nevent=forged» is not one of the host key \
+         algorithms netconf offers — the names are those of Modern and LegacyJunos"
+    );
+    assert!(!text.contains('\n'), "{text}");
+
+    let text = match SshPolicy::Modern.without(&["hmac-sha1\r"]) {
+        Err(text) => text,
+        Ok(_) => panic!("a name in none of Modern's lists was left out"),
+    };
+    assert!(
+        text.contains("«hmac-sha1\\r»") && !text.contains('\r'),
+        "{text}"
+    );
+}
+
+/// **`without` leaves names out of a policy's lists, in the same order**, and
+/// the result is a `Custom` that validates.
+#[test]
+fn without_leaves_names_out_in_the_same_order() {
+    use netconf::SshPolicy;
+
+    let policy = SshPolicy::LegacyJunos
+        .without(&["diffie-hellman-group1-sha1", "ssh-dss"])
+        .expect("both are LegacyJunos names");
+    assert_eq!(
+        lists(&policy),
+        [
+            owned(&LEGACY_JUNOS_KEX[..LEGACY_JUNOS_KEX.len() - 1]),
+            owned(&LEGACY_JUNOS_HOSTKEY[..LEGACY_JUNOS_HOSTKEY.len() - 1]),
+            owned(LEGACY_JUNOS_CIPHER),
+            owned(LEGACY_JUNOS_MAC),
+        ]
+    );
+    policy.validate().expect("what is left validates");
+}
+
+/// **`without` refuses a name that is in none of the policy's lists**: a
+/// mistyped name must not pass as left out. `ssh-dss` is not one of `Modern`'s.
+#[test]
+fn without_refuses_a_name_the_policy_does_not_hold() {
+    use netconf::SshPolicy;
+
+    match SshPolicy::Modern.without(&["ssh-dss"]) {
+        Err(text) => assert_eq!(
+            text,
+            "SshPolicy::without: «ssh-dss» is in none of this policy's lists, so there is \
+             nothing to leave out"
+        ),
+        Ok(_) => panic!("Modern holds no ssh-dss to leave out"),
+    }
+}
+
+/// **`without` works on a `Custom` policy too**, and keeps the caller's order.
+#[test]
+fn without_works_on_a_custom_policy() {
+    use netconf::SshPolicy;
+
+    let custom = SshPolicy::Custom {
+        kex: owned(&["diffie-hellman-group14-sha256", "curve25519-sha256"]),
+        hostkey: owned(&["rsa-sha2-256", "ssh-rsa", "ssh-ed25519"]),
+        cipher: owned(&["aes128-ctr", "chacha20-poly1305@openssh.com"]),
+        mac: owned(&["hmac-sha1", "hmac-sha2-256"]),
+    };
+    let policy = custom
+        .without(&["ssh-rsa", "hmac-sha1"])
+        .expect("both are in the lists");
+    assert_eq!(
+        lists(&policy),
+        [
+            owned(&["diffie-hellman-group14-sha256", "curve25519-sha256"]),
+            owned(&["rsa-sha2-256", "ssh-ed25519"]),
+            owned(&["aes128-ctr", "chacha20-poly1305@openssh.com"]),
+            owned(&["hmac-sha2-256"]),
+        ]
+    );
+}
+
+/// **A list left empty by `without` is returned, and `validate` refuses it.**
+#[test]
+fn a_list_left_empty_by_without_is_refused_by_validate() {
+    use netconf::SshPolicy;
+
+    let no_ciphers = SshPolicy::Modern
+        .without(&[
+            "chacha20-poly1305@openssh.com",
+            "aes256-gcm@openssh.com",
+            "aes256-ctr",
+            "aes192-ctr",
+            "aes128-ctr",
+        ])
+        .expect("all are Modern's ciphers");
+    assert!(lists(&no_ciphers)[2].is_empty());
+    assert_eq!(
+        no_ciphers.validate(),
+        Err(
+            "SshPolicy::Custom: the list of ciphers is empty — each list needs at least one name"
+                .to_string()
+        )
+    );
+}
+
+/// **A `Custom` policy that asks for what netconf does not offer is refused, before
+/// anything connects**, not negotiated with something else: `3des-cbc` among the
+/// ciphers is refused with `validate`'s text, and no connection is attempted.
 #[cfg(feature = "russh-transport")]
 #[tokio::test]
-async fn custom_policy_is_denied_instead_of_yielding_legacy() {
+async fn a_custom_policy_netconf_cannot_honour_is_refused_before_connecting() {
     use netconf::russh_transport::RusshTransport;
-    use netconf::{Auth, ConnectOptions, NetconfTransport, SshPolicy, Timeouts};
+    use netconf::{Auth, ConnectOptions, NetconfTransport, Timeouts};
 
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
     let opts = ConnectOptions {
         host: "127.0.0.1".into(),
-        port: 1,
+        port,
         username: "x".into(),
         auth: Auth::Password(krypto::SecretString::from_string("test-password".into()).unwrap()),
-        ssh_policy: SshPolicy::Custom {
-            kex: vec!["curve25519-sha256".into()],
-            hostkey: vec!["ssh-ed25519".into()],
-            cipher: vec!["aes256-gcm@openssh.com".into()],
-            mac: vec!["hmac-sha2-256-etm@openssh.com".into()],
-        },
+        ssh_policy: one_of_each_but("ciphers", &["aes256-gcm@openssh.com", "3des-cbc"]),
         timeouts: Timeouts::default(),
         platform_hint: None,
         host_key: Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()),
     };
     let m = match RusshTransport::connect(&opts).await {
-        Ok(_) => panic!("Custom should have been refused"),
+        Ok(_) => panic!("3des-cbc should have been refused"),
         Err(e) => e.to_string(),
     };
-    assert!(
-        m.contains("Custom"),
-        "the message does not say what is wrong: {m}"
+    assert_eq!(
+        m,
+        "transport: invalid options: SshPolicy::Custom: «3des-cbc» is not one of the ciphers \
+         netconf offers — the names are those of Modern and LegacyJunos"
     );
-    assert!(m.contains("not implemented"), "{m}");
+    let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+    assert!(accepted.is_err(), "a connection was attempted");
 }
 
 /// Blind trust-on-first-use is closed: `connect()` authenticates, which means it
@@ -148,27 +455,19 @@ async fn connect_without_pinned_hostkey_is_denied() {
 }
 
 /// `observe_host_key` refuses what `connect()` refuses, for what it uses, before
-/// anything goes on the wire. `Custom` used to fall back to russh's default list
-/// without saying so, and a zero `connect` timeout failed as though the device had
-/// not answered.
+/// anything goes on the wire: a `Custom` policy that breaks its rules, and a zero
+/// `connect` timeout, which would fail as though the device had not answered.
 #[cfg(feature = "russh-transport")]
 #[tokio::test]
 async fn observe_host_key_refuses_what_connect_refuses() {
     use netconf::russh_transport::observe_host_key;
     use netconf::{SshPolicy, Timeouts};
 
-    let custom = SshPolicy::Custom {
-        kex: vec!["curve25519-sha256".into()],
-        hostkey: vec!["ssh-ed25519".into()],
-        cipher: vec!["aes256-gcm@openssh.com".into()],
-        mac: vec!["hmac-sha2-256-etm@openssh.com".into()],
-    };
-    let m = match observe_host_key("127.0.0.1", 1, &custom, &Timeouts::default()).await {
-        Ok(fp) => panic!("Custom should have been refused, got {fp}"),
+    let m = match observe_host_key("127.0.0.1", 1, &custom(), &Timeouts::default()).await {
+        Ok(fp) => panic!("a Custom that breaks its rules should have been refused, got {fp}"),
         Err(e) => e.to_string(),
     };
-    assert!(m.contains("Custom"), "{m}");
-    assert!(m.contains("not implemented"), "{m}");
+    assert_eq!(m, format!("transport: invalid options: {CUSTOM_REFUSED}"));
 
     let zero_connect = Timeouts {
         connect: Duration::ZERO,
@@ -236,24 +535,18 @@ async fn connect_refuses_a_bad_host_or_username_before_anything_else() {
 
 /// **`observe_host_key()` refuses a host that cannot be right, first** — before the
 /// probe's own log event, and before its other refusals: the `Custom` policy here
-/// would otherwise be what refuses it.
+/// breaks its rules, and would otherwise be what refuses it.
 #[cfg(feature = "russh-transport")]
 #[tokio::test]
 async fn observe_host_key_refuses_a_bad_host_before_anything_else() {
+    use netconf::Timeouts;
     use netconf::russh_transport::observe_host_key;
-    use netconf::{SshPolicy, Timeouts};
 
-    let custom = SshPolicy::Custom {
-        kex: vec!["curve25519-sha256".into()],
-        hostkey: vec!["ssh-ed25519".into()],
-        cipher: vec!["aes256-gcm@openssh.com".into()],
-        mac: vec!["hmac-sha2-256-etm@openssh.com".into()],
-    };
     for (host, problem) in [
         ("", "host is empty"),
         ("pe1\nx", "host contains whitespace or a control character"),
     ] {
-        let m = match observe_host_key(host, 1, &custom, &Timeouts::default()).await {
+        let m = match observe_host_key(host, 1, &custom(), &Timeouts::default()).await {
             Ok(fp) => panic!("{host:?} was let through, got {fp}"),
             Err(e) => e.to_string(),
         };
@@ -466,16 +759,17 @@ fn options() -> netconf::ConnectOptions {
     }
 }
 
-/// A `SshPolicy::Custom`, which is refused.
+/// A `SshPolicy::Custom` that breaks its rules, and so is refused: `none` as its
+/// cipher.
 #[cfg(feature = "russh-transport")]
 fn custom() -> netconf::SshPolicy {
-    netconf::SshPolicy::Custom {
-        kex: vec!["curve25519-sha256".into()],
-        hostkey: vec!["ssh-ed25519".into()],
-        cipher: vec!["aes256-gcm@openssh.com".into()],
-        mac: vec!["hmac-sha2-256-etm@openssh.com".into()],
-    }
+    one_of_each_but("ciphers", &["none"])
 }
+
+/// What `custom()` is refused with.
+#[cfg(feature = "russh-transport")]
+const CUSTOM_REFUSED: &str = "SshPolicy::Custom: «none» is not one of the ciphers netconf \
+                              offers — the names are those of Modern and LegacyJunos";
 
 /// The text of the `InvalidOptions` that `result` must be.
 #[cfg(feature = "russh-transport")]
@@ -530,10 +824,11 @@ async fn connect_refuses_a_missing_pin_as_invalid_options() {
     assert!(text.starts_with("no pinned host key"), "{text}");
 }
 
-/// `SshPolicy::Custom` is `InvalidOptions` from `connect()`.
+/// A `SshPolicy::Custom` that breaks its rules is `InvalidOptions` from
+/// `connect()`, with `validate`'s text.
 #[cfg(feature = "russh-transport")]
 #[tokio::test]
-async fn connect_refuses_custom_as_invalid_options() {
+async fn connect_refuses_a_custom_that_breaks_its_rules_as_invalid_options() {
     use netconf::russh_transport::RusshTransport;
     use netconf::{ConnectOptions, NetconfTransport};
 
@@ -542,10 +837,7 @@ async fn connect_refuses_custom_as_invalid_options() {
         ..options()
     };
     let text = invalid_options(RusshTransport::connect(&opts).await);
-    assert!(
-        text.starts_with("SshPolicy::Custom is not implemented"),
-        "{text}"
-    );
+    assert_eq!(text, CUSTOM_REFUSED);
 }
 
 /// `Timeouts` outside their frames are `InvalidOptions` from `connect()`.
@@ -567,7 +859,8 @@ async fn connect_refuses_timeouts_outside_their_frames_as_invalid_options() {
 }
 
 /// What `observe_host_key()` refuses before connecting is `InvalidOptions`: a bad
-/// host, `SshPolicy::Custom`, and `Timeouts` outside their frames.
+/// host, a `SshPolicy::Custom` that breaks its rules, and `Timeouts` outside their
+/// frames.
 #[cfg(feature = "russh-transport")]
 #[tokio::test]
 async fn observe_host_key_refuses_as_invalid_options() {
@@ -580,10 +873,7 @@ async fn observe_host_key_refuses_as_invalid_options() {
 
     let text =
         invalid_options(observe_host_key("127.0.0.1", 1, &custom(), &Timeouts::default()).await);
-    assert!(
-        text.starts_with("SshPolicy::Custom is not implemented"),
-        "{text}"
-    );
+    assert_eq!(text, CUSTOM_REFUSED);
 
     let zero_connect = Timeouts {
         connect: Duration::ZERO,
@@ -686,6 +976,21 @@ async fn check_device_returns_invalid_options_for_a_refusal_before_connecting() 
         let text = invalid_options(check_device(&opts).await);
         assert!(text.starts_with(starts), "{text}");
     }
+}
+
+/// `check_device` returns `Err(Transport(InvalidOptions))` for a `SshPolicy::Custom`
+/// that breaks its rules, as `connect()` does.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn check_device_refuses_a_custom_that_breaks_its_rules() {
+    use netconf::ConnectOptions;
+    use netconf::russh_transport::check_device;
+
+    let opts = ConnectOptions {
+        ssh_policy: custom(),
+        ..options()
+    };
+    assert_eq!(invalid_options(check_device(&opts).await), CUSTOM_REFUSED);
 }
 
 /// The fields of one captured event, by name, as text.
@@ -813,4 +1118,74 @@ async fn a_refused_host_key_probe_is_one_log_line() {
     for field in ["reason", "host", "port"] {
         assert!(e.contains_key(field), "{field}: {e:?}");
     }
+    assert_eq!(e["reason"], CUSTOM_REFUSED, "{e:?}");
+}
+
+/// **A `connect()` refused for its `Custom` policy is one log line**:
+/// `ssh_connect_refused` with `validate`'s text as the reason, and no
+/// `ssh_connect`.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn a_connect_refused_for_its_custom_policy_is_one_log_line() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfTransport};
+
+    let opts = ConnectOptions {
+        ssh_policy: custom(),
+        ..options()
+    };
+    capture_events();
+    let _ = RusshTransport::connect(&opts).await;
+    let events = captured();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let e = &events[0];
+    assert_eq!(e["event"], "ssh_connect_refused", "{e:?}");
+    for field in ["reason", "host", "port", "username"] {
+        assert!(e.contains_key(field), "{field}: {e:?}");
+    }
+    assert_eq!(e["reason"], CUSTOM_REFUSED, "{e:?}");
+}
+
+/// **A `Custom` connection is logged as legacy by its names** (0.7.0): with only
+/// modern names its `ssh_connect` event has no `legacy` tag, and with `ssh-rsa` it
+/// has `legacy = true`. Both name the policy `custom`. Nothing listens on the port,
+/// so each connect fails after the event.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn a_custom_connection_is_logged_as_legacy_by_its_names() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfTransport, Timeouts};
+
+    // A port nothing listens on: bound, then let go.
+    let port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let connect_event = |hostkey: &[&str]| {
+        let opts = ConnectOptions {
+            port,
+            ssh_policy: one_of_each_but("host key algorithms", hostkey),
+            timeouts: Timeouts {
+                connect: Duration::from_secs(5),
+                ..Timeouts::default()
+            },
+            ..options()
+        };
+        async move {
+            capture_events();
+            assert!(RusshTransport::connect(&opts).await.is_err());
+            captured()
+                .into_iter()
+                .find(|e| e.get("event").map(String::as_str) == Some("ssh_connect"))
+                .expect("an ssh_connect event")
+        }
+    };
+
+    let modern = connect_event(&["ssh-ed25519", "rsa-sha2-512"]).await;
+    assert_eq!(modern["ssh_policy"], "custom", "{modern:?}");
+    assert!(!modern.contains_key("legacy"), "{modern:?}");
+
+    let legacy = connect_event(&["ssh-ed25519", "ssh-rsa"]).await;
+    assert_eq!(legacy["ssh_policy"], "custom", "{legacy:?}");
+    assert_eq!(legacy["legacy"], "true", "{legacy:?}");
 }

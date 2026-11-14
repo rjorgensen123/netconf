@@ -109,6 +109,10 @@ type Failed = Arc<StdMutex<Option<String>>>;
 struct ClientHandler {
     /// The pinned fingerprint, from the consumer. `None` means enrollment mode.
     pinned: Option<String>,
+    /// The policy's host key algorithms (0.7.0). A key of a type none of them
+    /// allows is refused: russh verifies the device's signature with whatever key
+    /// arrives, and does not check it against the algorithm that was negotiated.
+    host_key_algorithms: Vec<russh::keys::Algorithm>,
     /// The observed fingerprint, filled in while connecting.
     observed: Arc<StdMutex<Option<String>>>,
     /// What the device has said over SSH.
@@ -192,6 +196,21 @@ impl russh::client::Handler for ClientHandler {
             );
             return Ok(false);
         }
+        // A key of a type the policy does not allow is refused, pinned or not
+        // (0.7.0), so leaving an algorithm out of the policy leaves its keys out.
+        let key = server_key.public_key();
+        if !self
+            .host_key_algorithms
+            .iter()
+            .any(|algorithm| allows_host_key(algorithm, key.key_data()))
+        {
+            tracing::warn!(
+                event = "ssh_host_key_mismatch",
+                observed = %fp,
+                "the device presented a host key of a type the policy does not allow — connection rejected"
+            );
+            return Ok(false);
+        }
         match &self.pinned {
             // Pinned: accept ONLY on an exact match — never a silent accept, never
             // trust-on-first-use.
@@ -233,6 +252,26 @@ impl russh::client::Handler for ClientHandler {
                 Ok(true)
             }
         }
+    }
+}
+
+/// Whether the host key algorithm `algorithm` allows a key of the type of `key`:
+/// `ssh-ed25519` an Ed25519 key, `ecdsa-sha2-nistpNNN` an ECDSA key on that curve,
+/// every RSA algorithm an RSA key, and `ssh-dss` a DSA key. Any other key is
+/// allowed by none.
+fn allows_host_key(
+    algorithm: &russh::keys::Algorithm,
+    key: &russh::keys::ssh_key::public::KeyData,
+) -> bool {
+    use russh::keys::Algorithm;
+    use russh::keys::ssh_key::public::KeyData;
+
+    match (algorithm, key) {
+        (Algorithm::Ed25519, KeyData::Ed25519(_))
+        | (Algorithm::Rsa { .. }, KeyData::Rsa(_))
+        | (Algorithm::Dsa, KeyData::Dsa(_)) => true,
+        (Algorithm::Ecdsa { curve }, KeyData::Ecdsa(ecdsa)) => ecdsa.curve() == *curve,
+        _ => false,
     }
 }
 
@@ -281,12 +320,6 @@ fn is_fingerprint(pin: &str) -> bool {
             && b64.ends_with(|c: char| "AEIMQUYcgkosw048".contains(c))
     })
 }
-
-/// Why `SshPolicy::Custom` is refused — by `connect()` and `observe_host_key()`
-/// alike, in the same words.
-const CUSTOM_REFUSED: &str = "SshPolicy::Custom is not implemented yet — use Modern or \
-                              LegacyJunos. We refuse rather than negotiate with a \
-                              different algorithm list than the one you asked for.";
 
 /// A cap on how much of the subsystem's stderr we keep in a session. Enough to
 /// carry an explanation, too little for a device that floods it to fill our memory.
@@ -884,14 +917,19 @@ impl RusshTransport {
 
         // A legacy SSH policy is ALWAYS per device, never global, and every use should
         // be traceable. So we log which policy this connection actually runs with —
-        // `LegacyJunos` and `Custom` at `warn`, because they are a deliberate weakening
-        // that someone should be able to see afterwards. Never the password.
+        // `LegacyJunos`, and a `Custom` that holds a legacy name, at `warn`, because
+        // they are a deliberate weakening that someone should be able to see
+        // afterwards. Never the password.
         let policy_name = match &opts.ssh_policy {
             SshPolicy::Modern => "modern",
             SshPolicy::LegacyJunos => "legacy-junos",
             SshPolicy::Custom { .. } => "custom",
         };
-        let legacy_allowed = !matches!(opts.ssh_policy, SshPolicy::Modern);
+        let legacy_allowed = match &opts.ssh_policy {
+            SshPolicy::Modern => false,
+            SshPolicy::LegacyJunos => true,
+            SshPolicy::Custom { .. } => opts.ssh_policy.holds_legacy_name(),
+        };
 
         // BLIND TRUST-ON-FIRST-USE IS CLOSED.
         //
@@ -927,12 +965,11 @@ impl RusshTransport {
             ));
         }
 
-        // `Custom` is not built: its names would have to be resolved against russh's
-        // typed constants, and that mapping does not exist. So it is refused, not
-        // negotiated with another list than the one the caller asked for.
-        if matches!(opts.ssh_policy, SshPolicy::Custom { .. }) {
-            return Err(refuse(CUSTOM_REFUSED.into()));
-        }
+        // A `Custom` policy holds only names netconf offers, each list at least one
+        // and none twice (0.7.0); the lists then become russh's, or the name russh
+        // cannot use is refused.
+        opts.ssh_policy.validate().map_err(refuse)?;
+        let preferred = preferred_for(&opts.ssh_policy).map_err(refuse)?;
 
         // The session TTL, fail-closed: the range is validated BEFORE anything
         // connects — and before the logging below (0.7.0; it came after it, and a
@@ -1009,7 +1046,8 @@ impl RusshTransport {
             inactivity_timeout: Some(opts.timeouts.total),
             ..Default::default()
         };
-        config.preferred = preferred_for(&opts.ssh_policy);
+        let host_key_algorithms = preferred.key.to_vec();
+        config.preferred = preferred;
         let config = Arc::new(config);
 
         let observed = Arc::new(StdMutex::new(None));
@@ -1017,6 +1055,7 @@ impl RusshTransport {
         let failed = Failed::default();
         let handler = ClientHandler {
             pinned: opts.host_key.clone(),
+            host_key_algorithms,
             observed: observed.clone(),
             said: said.clone(),
             failed: failed.clone(),
@@ -1198,10 +1237,12 @@ fn warn_legacy_once(host: &str) -> bool {
     }
 }
 
-/// The preferred algorithms for each policy.
+/// The preferred algorithms for `policy`: its names as russh's types, in its order,
+/// with the request for strict key exchange last (0.7.0).
 ///
 /// russh's `Preferred::DEFAULT` has `ssh-rsa`, but no SHA-1 key exchange and no CBC
-/// or 3DES, and **fails against older releases**, so the lists are set explicitly here.
+/// or 3DES, and **fails against older releases**, so the lists are set explicitly,
+/// from the names in `transport.rs`.
 ///
 /// `LegacyJunos` is a **superset**: the modern algorithms come first and the legacy
 /// ones form the tail. SSH uses the first algorithm in the client's list that the
@@ -1211,146 +1252,82 @@ fn warn_legacy_once(host: &str) -> bool {
 /// A known limit of the library beneath us: russh 0.65 has no `hmac-md5`. A device
 /// offering ONLY that cannot be reached through this transport at all, and would need
 /// a different SSH implementation behind the same trait.
-fn preferred_for(policy: &SshPolicy) -> russh::Preferred {
+///
+/// It takes a policy that has passed [`SshPolicy::validate`]. A name russh has no
+/// type for is an error that names it, never skipped.
+fn preferred_for(policy: &SshPolicy) -> Result<russh::Preferred, String> {
     use russh::keys::{Algorithm, EcdsaCurve, HashAlg};
     use russh::{cipher, kex, mac};
 
-    // Today's recommendation. It extends the russh default with ecdh-nistp, which
-    // Junos offers.
-    const MODERN_KEX: &[kex::Name] = &[
-        kex::CURVE25519,
-        kex::CURVE25519_PRE_RFC_8731,
-        kex::DH_G16_SHA512,
-        kex::DH_G14_SHA256,
-        kex::ECDH_SHA2_NISTP256,
-        kex::ECDH_SHA2_NISTP384,
-        kex::ECDH_SHA2_NISTP521,
-        // Not an algorithm: it asks the device for strict key exchange, the
-        // countermeasure to the Terrapin attack (CVE-2023-48795), and has an effect
-        // only when the device supports it.
-        kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
-    ];
-    const MODERN_KEY: &[Algorithm] = &[
-        Algorithm::Ed25519,
-        Algorithm::Ecdsa {
-            curve: EcdsaCurve::NistP256,
-        },
-        Algorithm::Ecdsa {
-            curve: EcdsaCurve::NistP384,
-        },
-        Algorithm::Ecdsa {
-            curve: EcdsaCurve::NistP521,
-        },
-        Algorithm::Rsa {
-            hash: Some(HashAlg::Sha512),
-        },
-        Algorithm::Rsa {
-            hash: Some(HashAlg::Sha256),
-        },
-    ];
-    const MODERN_CIPHER: &[cipher::Name] = &[
-        cipher::CHACHA20_POLY1305,
-        cipher::AES_256_GCM,
-        cipher::AES_256_CTR,
-        cipher::AES_192_CTR,
-        cipher::AES_128_CTR,
-    ];
-    const MODERN_MAC: &[mac::Name] = &[
-        mac::HMAC_SHA512_ETM,
-        mac::HMAC_SHA256_ETM,
-        mac::HMAC_SHA512,
-        mac::HMAC_SHA256,
-    ];
-
-    // The superset: modern first, then what russh has besides — group exchange and
-    // group 18 at full strength, then the SHA-1 tail for older releases. The span is
-    // R14 to Evo, and nothing russh can do is held back from it.
-    const LEGACY_KEX: &[kex::Name] = &[
-        kex::CURVE25519,
-        kex::CURVE25519_PRE_RFC_8731,
-        kex::DH_G16_SHA512,
-        kex::DH_G14_SHA256,
-        kex::ECDH_SHA2_NISTP256,
-        kex::ECDH_SHA2_NISTP384,
-        kex::ECDH_SHA2_NISTP521,
-        kex::DH_G18_SHA512,
-        kex::DH_GEX_SHA256,
-        kex::DH_G14_SHA1,
-        kex::DH_GEX_SHA1,
-        kex::DH_G1_SHA1,
-        // Not an algorithm: the request for strict key exchange, as in `MODERN_KEX`.
-        kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
-    ];
-    const LEGACY_KEY: &[Algorithm] = &[
-        Algorithm::Ed25519,
-        Algorithm::Ecdsa {
-            curve: EcdsaCurve::NistP256,
-        },
-        Algorithm::Ecdsa {
-            curve: EcdsaCurve::NistP384,
-        },
-        Algorithm::Ecdsa {
-            curve: EcdsaCurve::NistP521,
-        },
-        Algorithm::Rsa {
-            hash: Some(HashAlg::Sha512),
-        },
-        Algorithm::Rsa {
-            hash: Some(HashAlg::Sha256),
-        },
-        // `ssh-rsa` (SHA-1) and `ssh-dss` — the legacy tail, for old Junos.
-        Algorithm::Rsa { hash: None },
-        Algorithm::Dsa,
-    ];
-    // 3des-cbc is DELIBERATELY absent. A survey of four real devices showed that the
-    // modern list alone covered all of them: the 3DES tail protected nothing and was
-    // pure attack surface. Should a device turn up that can do nothing else, that is
-    // a deliberate decision to take then, not a default.
-    const LEGACY_CIPHER: &[cipher::Name] = &[
-        cipher::CHACHA20_POLY1305,
-        cipher::AES_256_GCM,
-        cipher::AES_256_CTR,
-        cipher::AES_192_CTR,
-        cipher::AES_128_CTR,
-        cipher::AES_256_CBC,
-        cipher::AES_192_CBC,
-        cipher::AES_128_CBC,
-    ];
-    const LEGACY_MAC: &[mac::Name] = &[
-        mac::HMAC_SHA512_ETM,
-        mac::HMAC_SHA256_ETM,
-        mac::HMAC_SHA512,
-        mac::HMAC_SHA256,
-        mac::HMAC_SHA1_ETM,
-        mac::HMAC_SHA1,
-    ];
-
-    // No host certificate algorithm is advertised under any policy, whatever
-    // russh's default (0.6.1): the pin is a key, and `check_server_key` refuses
-    // a certificate.
-    let base = russh::Preferred {
-        host_key_certificates: std::borrow::Cow::Borrowed(&[]),
-        ..russh::Preferred::default()
-    };
-    match policy {
-        SshPolicy::Modern => russh::Preferred {
-            kex: MODERN_KEX.into(),
-            key: MODERN_KEY.into(),
-            cipher: MODERN_CIPHER.into(),
-            mac: MODERN_MAC.into(),
-            ..base
-        },
-        SshPolicy::LegacyJunos => russh::Preferred {
-            kex: LEGACY_KEX.into(),
-            key: LEGACY_KEY.into(),
-            cipher: LEGACY_CIPHER.into(),
-            mac: LEGACY_MAC.into(),
-            ..base
-        },
-        // Never reached: `connect()` and `observe_host_key()` refuse `Custom` before
-        // they get here. It returns the base list, never a legacy one.
-        SshPolicy::Custom { .. } => base,
+    /// `names` as russh's type, in the same order. A name `lookup` has no value for
+    /// is an error naming it and the list.
+    fn convert<T>(
+        names: &[&str],
+        kinds: &str,
+        lookup: impl Fn(&str) -> Option<T>,
+    ) -> Result<Vec<T>, String> {
+        names
+            .iter()
+            .map(|name| {
+                lookup(name).ok_or_else(|| {
+                    format!(
+                        "SshPolicy: «{}» is not one of the {kinds} this SSH library can use",
+                        printable(name)
+                    )
+                })
+            })
+            .collect()
     }
+
+    // The eight host key names netconf offers, matched one by one: `Algorithm`'s
+    // `FromStr` takes any `name@domain` it does not know as `Other`.
+    let host_key = |name: &str| match name {
+        "ssh-ed25519" => Some(Algorithm::Ed25519),
+        "ecdsa-sha2-nistp256" => Some(Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        }),
+        "ecdsa-sha2-nistp384" => Some(Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP384,
+        }),
+        "ecdsa-sha2-nistp521" => Some(Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP521,
+        }),
+        "rsa-sha2-512" => Some(Algorithm::Rsa {
+            hash: Some(HashAlg::Sha512),
+        }),
+        "rsa-sha2-256" => Some(Algorithm::Rsa {
+            hash: Some(HashAlg::Sha256),
+        }),
+        "ssh-rsa" => Some(Algorithm::Rsa { hash: None }),
+        "ssh-dss" => Some(Algorithm::Dsa),
+        _ => None,
+    };
+
+    let names = policy.algorithm_names();
+    let mut kex = convert(&names.kex, "key exchanges", |name| {
+        kex::Name::try_from(name).ok()
+    })?;
+    // Not an algorithm: it asks the device for strict key exchange, the
+    // countermeasure to the Terrapin attack (CVE-2023-48795), and has an effect
+    // only when the device supports it.
+    kex.push(kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT);
+    let key = convert(&names.hostkey, "host key algorithms", host_key)?;
+    let cipher = convert(&names.cipher, "ciphers", |name| {
+        cipher::Name::try_from(name).ok()
+    })?;
+    let mac = convert(&names.mac, "MACs", |name| mac::Name::try_from(name).ok())?;
+
+    Ok(russh::Preferred {
+        kex: kex.into(),
+        key: key.into(),
+        // No host certificate algorithm is advertised under any policy, whatever
+        // russh's default (0.6.1): the pin is a key, and `check_server_key` refuses
+        // a certificate.
+        host_key_certificates: std::borrow::Cow::Borrowed(&[]),
+        cipher: cipher.into(),
+        mac: mac.into(),
+        ..russh::Preferred::default()
+    })
 }
 
 impl RusshTransport {
@@ -1656,11 +1633,9 @@ pub async fn observe_host_key(
     };
 
     // The refusals `connect()` makes, for what the probe uses, before anything goes
-    // on the wire. `Custom` used to fall back to russh's default list here without
-    // saying so.
-    if matches!(ssh_policy, SshPolicy::Custom { .. }) {
-        return Err(refuse(CUSTOM_REFUSED.into()));
-    }
+    // on the wire.
+    ssh_policy.validate().map_err(refuse)?;
+    let preferred = preferred_for(ssh_policy).map_err(refuse)?;
 
     // The same limits as `connect()`, on the same clock: the frame is validated
     // before anything connects, and the probe is a connection phase like the one in
@@ -1694,13 +1669,15 @@ pub async fn observe_host_key(
         inactivity_timeout: Some(timeouts.connect.min(timeouts.total)),
         ..Default::default()
     };
-    config.preferred = preferred_for(ssh_policy);
+    let host_key_algorithms = preferred.key.to_vec();
+    config.preferred = preferred;
 
     let observed = Arc::new(StdMutex::new(None));
     let handler = ClientHandler {
         // No pin: we are here precisely because there is none. With one, a probe would
         // be pointless — a differing key already stops the connection.
         pinned: None,
+        host_key_algorithms,
         observed: observed.clone(),
         // The probe ends before the login, so there is nothing for the device to say.
         said: Arc::default(),
@@ -1997,8 +1974,9 @@ impl std::fmt::Display for DeviceCheck {
 /// [`DeviceCheck`], whether every step answered or one stopped — the step, and the
 /// error `connect` would have returned, are in it. `Err` is only what `connect`
 /// refuses before anything is connected, as `Transport(InvalidOptions)` — no pinned
-/// host key or one that is not a fingerprint, `SshPolicy::Custom`, time limits out
-/// of range, a host or username that cannot be right: then nothing was checked.
+/// host key or one that is not a fingerprint, a `Custom` policy that breaks its
+/// rules, time limits out of range, a host or username that cannot be right: then
+/// nothing was checked.
 ///
 /// **Nothing is left behind.** The connection is ended when the check is over,
 /// however it ended.
@@ -2258,7 +2236,8 @@ mod classification_tests {
 
 #[cfg(test)]
 mod host_key_tests {
-    use super::ClientHandler;
+    use super::{ClientHandler, preferred_for};
+    use crate::transport::SshPolicy;
     use russh::client::Handler;
     use russh::keys::ssh_key::certificate::{Builder, CertType};
     use russh::keys::ssh_key::private::{Ed25519Keypair, PrivateKey};
@@ -2277,17 +2256,37 @@ mod host_key_tests {
         k.public_key().fingerprint(HashAlg::Sha256).to_string()
     }
 
-    /// The handler `connect()` builds, with `pinned` as the pin, and the slot it
-    /// records the presented key in.
+    /// The handler `connect()` builds under `Modern`, with `pinned` as the pin, and
+    /// the slot it records the presented key in.
     fn handler(pinned: &str) -> (ClientHandler, Arc<Mutex<Option<String>>>) {
+        handler_under(&SshPolicy::Modern, Some(pinned))
+    }
+
+    /// The handler `connect()` builds under `policy`, with `pinned` as the pin, or
+    /// the one `observe_host_key()` builds when it is `None`.
+    fn handler_under(
+        policy: &SshPolicy,
+        pinned: Option<&str>,
+    ) -> (ClientHandler, Arc<Mutex<Option<String>>>) {
         let observed = Arc::new(Mutex::new(None));
         let h = ClientHandler {
-            pinned: Some(pinned.to_string()),
+            pinned: pinned.map(str::to_string),
+            host_key_algorithms: preferred_for(policy).expect("a valid policy").key.to_vec(),
             observed: observed.clone(),
             said: Arc::default(),
             failed: Default::default(),
         };
         (h, observed)
+    }
+
+    /// A DSA host key made from small numbers: no device, and nothing here
+    /// verifies a signature with it.
+    fn dsa_key() -> PublicKeyOrCertificate {
+        use russh::keys::ssh_key::Mpint;
+        use russh::keys::ssh_key::public::DsaPublicKey;
+        let number = |n: u8| Mpint::from_positive_bytes(&[n]);
+        PublicKey::from(DsaPublicKey::new(number(23), number(11), number(4), number(8)).unwrap())
+            .into()
     }
 
     /// **Only the pinned key is accepted.** The pin is the whole of what stands
@@ -2361,6 +2360,7 @@ mod host_key_tests {
         let observed = Arc::new(Mutex::new(None));
         let mut enrolling = ClientHandler {
             pinned: None,
+            host_key_algorithms: preferred_for(&SshPolicy::Modern).unwrap().key.to_vec(),
             observed: observed.clone(),
             said: Arc::default(),
             failed: Default::default(),
@@ -2390,6 +2390,51 @@ mod host_key_tests {
         assert_eq!(
             seen.lock().unwrap_or_else(|p| p.into_inner()).as_deref(),
             Some(fingerprint(&device).as_str())
+        );
+    }
+
+    /// **A host key of a type the policy does not allow is refused** (0.7.0), even
+    /// when it is the pinned one, and in enrollment too: russh verifies the
+    /// signature with whatever key arrives. What the device presented is recorded.
+    /// A key of an allowed type with the right pin is accepted as before.
+    #[tokio::test]
+    async fn a_host_key_of_a_type_the_policy_does_not_allow_is_refused() {
+        let ed25519 = key(6);
+        let rsa_only = SshPolicy::Custom {
+            kex: vec!["curve25519-sha256".into()],
+            hostkey: vec!["rsa-sha2-512".into()],
+            cipher: vec!["aes256-ctr".into()],
+            mac: vec!["hmac-sha2-256".into()],
+        };
+        let pin = fingerprint(&ed25519);
+        let (mut h, seen) = handler_under(&rsa_only, Some(&pin));
+        assert!(
+            !h.check_server_key(&ed25519).await.unwrap(),
+            "an Ed25519 key under a policy that allows only rsa-sha2-512"
+        );
+        assert_eq!(seen.lock().unwrap().as_deref(), Some(pin.as_str()));
+        let (mut enrolling, seen) = handler_under(&rsa_only, None);
+        assert!(
+            !enrolling.check_server_key(&ed25519).await.unwrap(),
+            "the same key for enrollment"
+        );
+        assert_eq!(seen.lock().unwrap().as_deref(), Some(pin.as_str()));
+
+        let dsa = dsa_key();
+        let (mut h, seen) = handler(&fingerprint(&dsa));
+        assert!(
+            !h.check_server_key(&dsa).await.unwrap(),
+            "a DSA key under Modern"
+        );
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some(fingerprint(&dsa).as_str())
+        );
+
+        let (mut h, _) = handler(&pin);
+        assert!(
+            h.check_server_key(&ed25519).await.unwrap(),
+            "an Ed25519 key under Modern with the right pin"
         );
     }
 }
@@ -2729,7 +2774,8 @@ mod empty_data_tests {
 mod preference_tests {
     use super::preferred_for;
     use crate::transport::SshPolicy;
-    use russh::kex;
+    use russh::keys::{Algorithm, EcdsaCurve, HashAlg};
+    use russh::{cipher, kex, mac};
 
     /// **Every policy asks for strict key exchange** (0.7.0), the countermeasure to
     /// the Terrapin attack. The marker is in the key exchange list once and last, and
@@ -2760,11 +2806,164 @@ mod preference_tests {
             (SshPolicy::Modern, "Modern", &modern[..]),
             (SshPolicy::LegacyJunos, "LegacyJunos", &legacy[..]),
         ] {
-            let list = preferred_for(&policy).kex;
+            let list = preferred_for(&policy).expect(name).kex;
             assert_eq!(list.iter().filter(|k| **k == marker).count(), 1, "{name}");
             assert_eq!(list.last(), Some(&marker), "{name}");
             assert!(!list.contains(&kex::EXTENSION_SUPPORT_AS_CLIENT), "{name}");
             assert_eq!(&list[..list.len() - 1], algorithms, "{name}");
+        }
+    }
+
+    /// **The built-in policies keep their lists** (0.7.0): built from names, they
+    /// are the russh values they were, in the same order; no host certificate
+    /// algorithm is offered, and compression is russh's default.
+    #[test]
+    fn the_built_in_policies_are_the_russh_values_in_order() {
+        let modern_key = [
+            Algorithm::Ed25519,
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP256,
+            },
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP384,
+            },
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP521,
+            },
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512),
+            },
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha256),
+            },
+        ];
+        let legacy_key: Vec<Algorithm> = modern_key
+            .iter()
+            .cloned()
+            .chain([Algorithm::Rsa { hash: None }, Algorithm::Dsa])
+            .collect();
+        let modern_cipher = [
+            cipher::CHACHA20_POLY1305,
+            cipher::AES_256_GCM,
+            cipher::AES_256_CTR,
+            cipher::AES_192_CTR,
+            cipher::AES_128_CTR,
+        ];
+        let legacy_cipher: Vec<cipher::Name> = modern_cipher
+            .iter()
+            .copied()
+            .chain([
+                cipher::AES_256_CBC,
+                cipher::AES_192_CBC,
+                cipher::AES_128_CBC,
+            ])
+            .collect();
+        let modern_mac = [
+            mac::HMAC_SHA512_ETM,
+            mac::HMAC_SHA256_ETM,
+            mac::HMAC_SHA512,
+            mac::HMAC_SHA256,
+        ];
+        let legacy_mac: Vec<mac::Name> = modern_mac
+            .iter()
+            .copied()
+            .chain([mac::HMAC_SHA1_ETM, mac::HMAC_SHA1])
+            .collect();
+
+        for (policy, name, key, ciphers, macs) in [
+            (
+                SshPolicy::Modern,
+                "Modern",
+                &modern_key[..],
+                &modern_cipher[..],
+                &modern_mac[..],
+            ),
+            (
+                SshPolicy::LegacyJunos,
+                "LegacyJunos",
+                &legacy_key[..],
+                &legacy_cipher[..],
+                &legacy_mac[..],
+            ),
+        ] {
+            let preferred = preferred_for(&policy).expect(name);
+            assert_eq!(&preferred.key[..], key, "{name}");
+            assert_eq!(&preferred.cipher[..], ciphers, "{name}");
+            assert_eq!(&preferred.mac[..], macs, "{name}");
+            assert!(preferred.host_key_certificates.is_empty(), "{name}");
+            assert_eq!(
+                preferred.compression,
+                russh::Preferred::default().compression,
+                "{name}"
+            );
+        }
+    }
+
+    /// **A `Custom` policy is exactly the caller's lists** (0.7.0), in the caller's
+    /// order, with strict key exchange asked for last; no host certificate
+    /// algorithm, and compression as under the other policies.
+    #[test]
+    fn a_custom_policy_is_the_callers_lists_in_the_callers_order() {
+        let custom = SshPolicy::Custom {
+            kex: vec![
+                "diffie-hellman-group14-sha256".into(),
+                "curve25519-sha256".into(),
+            ],
+            hostkey: vec!["rsa-sha2-256".into(), "ssh-ed25519".into()],
+            cipher: vec!["aes128-ctr".into(), "chacha20-poly1305@openssh.com".into()],
+            mac: vec![
+                "hmac-sha2-256".into(),
+                "hmac-sha2-512-etm@openssh.com".into(),
+            ],
+        };
+        let preferred = preferred_for(&custom).expect("a valid Custom");
+        assert_eq!(
+            &preferred.kex[..],
+            [
+                kex::DH_G14_SHA256,
+                kex::CURVE25519,
+                kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT
+            ]
+        );
+        assert_eq!(
+            &preferred.key[..],
+            [
+                Algorithm::Rsa {
+                    hash: Some(HashAlg::Sha256)
+                },
+                Algorithm::Ed25519
+            ]
+        );
+        assert_eq!(
+            &preferred.cipher[..],
+            [cipher::AES_128_CTR, cipher::CHACHA20_POLY1305]
+        );
+        assert_eq!(&preferred.mac[..], [mac::HMAC_SHA256, mac::HMAC_SHA512_ETM]);
+        assert!(preferred.host_key_certificates.is_empty());
+        assert_eq!(
+            preferred.compression,
+            russh::Preferred::default().compression
+        );
+    }
+
+    /// **A name russh has no type for is an error that names it** (0.7.0), not a
+    /// panic and not a name skipped. The transport calls `validate` first, which
+    /// refuses every such name; here `preferred_for` is called without it.
+    #[test]
+    fn a_name_russh_cannot_use_is_an_error_naming_it() {
+        let unknown = SshPolicy::Custom {
+            kex: vec!["curve25519-sha256".into()],
+            hostkey: vec!["ssh-ed25519".into(), "foo@example.com".into()],
+            cipher: vec!["aes256-ctr".into()],
+            mac: vec!["hmac-sha2-256".into()],
+        };
+        match preferred_for(&unknown) {
+            Err(text) => assert_eq!(
+                text,
+                "SshPolicy: «foo@example.com» is not one of the host key algorithms this \
+                 SSH library can use"
+            ),
+            Ok(_) => panic!("an unknown host key name was taken"),
         }
     }
 }

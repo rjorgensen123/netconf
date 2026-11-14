@@ -248,9 +248,9 @@ pub enum TransportError {
         ssh: Box<SshMessages>,
     },
     /// The options given cannot be used, and the call was refused before anything
-    /// was sent (0.7.0): a missing or wrongly formed pinned host key,
-    /// `SshPolicy::Custom`, `Timeouts` outside their frames, or a host or username
-    /// that is empty or holds what it cannot.
+    /// was sent (0.7.0): a missing or wrongly formed pinned host key, a
+    /// `SshPolicy::Custom` list the crate cannot use, `Timeouts` outside their
+    /// frames, or a host or username that is empty or holds what it cannot.
     InvalidOptions(String),
 }
 
