@@ -138,6 +138,13 @@ Every notable change to this crate is recorded here. The format follows
   as a verb is. A path refused only for its case names the word, `«Interfaces» is not
   «interfaces», which a rule allows`, also under a logical system and when the rule holds an
   upper-case name. The text replaces `the same path in lowercase would be allowed`.
+- 2026-11-14 — **Breaking:** `NetconfError::Timeout` has two new fields, `limit` and `during`,
+  and its text says what ran out and when: `timeout: session-ttl after 180s, while waiting for
+  an answer — request 3 (<commit-configuration>)`.
+- 2026-11-14 — An empty SSH data message is skipped and logged as `ssh_empty_data`. It was read
+  as the device closing.
+- 2026-11-14 — The docs say what the session lifetime ends and what it does not, and that
+  `SshPolicy::Custom` is not built but planned.
 
 ## [0.6.1] — 2026-10-05
 

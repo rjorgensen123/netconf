@@ -13,6 +13,8 @@
 //! Remove either from the rendered text and the crate is back where it started,
 //! while every other test stays green.
 
+use std::time::Duration;
+
 use netconf::error::{
     ConfirmedCheck, DeviceChanged, DeviceError, NetconfError, SshMessages, TransportError,
 };
@@ -31,6 +33,8 @@ fn protocol(detail: &str) -> NetconfError {
 fn timeout(op: &'static str) -> NetconfError {
     NetconfError::Timeout {
         op,
+        limit: Duration::from_secs(30),
+        during: String::new(),
         partial: String::new(),
         stderr: String::new(),
     }
@@ -242,6 +246,8 @@ fn the_devices_content_is_in_the_text() {
 
     let s = text(NetconfError::Timeout {
         op: "rpc-recv",
+        limit: Duration::from_secs(30),
+        during: String::new(),
         partial: "<rpc-reply><data>".into(),
         stderr: String::new(),
     });
@@ -254,13 +260,15 @@ fn the_devices_content_is_in_the_text() {
     // connection (0.7.0).
     let s = text(NetconfError::Timeout {
         op: "rpc-recv",
+        limit: Duration::from_secs(30),
+        during: "while waiting for an answer".into(),
         partial: "<rpc-reply><data>".into(),
         stderr: "commit: database locked".into(),
     });
     assert_eq!(
         s,
-        "timeout: rpc-recv; the incomplete message so far: <rpc-reply><data>; \
-         the device wrote on stderr: commit: database locked"
+        "timeout: rpc-recv after 30s, while waiting for an answer; the incomplete message \
+         so far: <rpc-reply><data>; the device wrote on stderr: commit: database locked"
     );
     let s = text(NetconfError::Transport(TransportError::Closed {
         detail: "the device closed the netconf subsystem".into(),
@@ -354,8 +362,83 @@ fn change_flow_reports_say_what_happened_and_carry_what_came_back() {
     });
     assert!(t.starts_with("drift:"), "{t}");
     assert!(
-        t.contains("discard-changes: timeout: rpc-recv; unlock: timeout: rpc-recv"),
+        t.contains(
+            "discard-changes: timeout: rpc-recv after 30s; unlock: timeout: rpc-recv after 30s"
+        ),
         "{t}"
+    );
+}
+
+/// **A timeout says which limit ran out, how long it was, and what was going on**
+/// (0.7.0): the whole text, with the request a session names, with the incomplete
+/// message, with no `during`, with a control character in `during`, and with limits
+/// under a second.
+#[test]
+fn a_timeout_says_what_ran_out_and_when() {
+    let timed_out = |op, limit, during: &str, partial: &str| {
+        text(NetconfError::Timeout {
+            op,
+            limit,
+            during: during.into(),
+            partial: partial.into(),
+            stderr: String::new(),
+        })
+    };
+    let secs = Duration::from_secs;
+    assert_eq!(
+        timed_out(
+            "session-ttl",
+            secs(180),
+            "while waiting for an answer — request 3 (<commit-configuration>)",
+            ""
+        ),
+        "timeout: session-ttl after 180s, while waiting for an answer — request 3 \
+         (<commit-configuration>)"
+    );
+    assert_eq!(
+        timed_out(
+            "session-ttl",
+            secs(180),
+            "before the request was sent — nothing was sent — request 4 (<lock>)",
+            ""
+        ),
+        "timeout: session-ttl after 180s, before the request was sent — nothing was sent \
+         — request 4 (<lock>)"
+    );
+    assert_eq!(
+        timed_out("ssh-connect", secs(10), "while connecting", ""),
+        "timeout: ssh-connect after 10s, while connecting"
+    );
+    assert_eq!(
+        timed_out(
+            "rpc-recv",
+            secs(30),
+            "while waiting for an answer — request 2 (<get-configuration>)",
+            "<rpc-reply message-id=\"2\"><configuration>"
+        ),
+        "timeout: rpc-recv after 30s, while waiting for an answer — request 2 \
+         (<get-configuration>); the incomplete message so far: <rpc-reply \
+         message-id=\"2\"><configuration>"
+    );
+    // A transport that does not say what was going on.
+    assert_eq!(
+        timed_out("rpc-recv", secs(30), "", ""),
+        "timeout: rpc-recv after 30s"
+    );
+    // What a transport outside the crate says is made printable, so it stays on its
+    // line.
+    assert_eq!(
+        timed_out("rpc-recv", secs(30), "while\nwaiting\u{2028}", ""),
+        "timeout: rpc-recv after 30s, while\\nwaiting\\u{2028}"
+    );
+    // The limit as `Duration` writes itself.
+    assert_eq!(
+        timed_out("rpc-send", Duration::from_millis(1500), "", ""),
+        "timeout: rpc-send after 1.5s"
+    );
+    assert_eq!(
+        timed_out("rpc-recv", Duration::from_millis(500), "", ""),
+        "timeout: rpc-recv after 500ms"
     );
 }
 

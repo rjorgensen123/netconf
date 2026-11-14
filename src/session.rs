@@ -432,16 +432,27 @@ impl<T: NetconfTransport> NetconfSession<T> {
         }
         self.transport.reply_budget(budget);
         self.msg_id += 1;
-        let answer = self.send_and_read(inner).await;
+        let mut answer = self.send_and_read(inner).await;
         let why = match &answer {
             Ok(_) | Err(NetconfError::Device(_)) => return answer,
             Err(NetconfError::Timeout { .. }) => "it got no answer within its time limit",
             Err(NetconfError::Transport(_)) => "the connection failed or ended before its answer",
             Err(_) => "what came back could not be read as its answer",
         };
+        let operation = operation_of(inner);
+        // A timeout names the request it cut off (0.7.0), as the record below does:
+        // after what the transport said was going on, or alone when it said nothing.
+        if let Err(NetconfError::Timeout { during, .. }) = &mut answer {
+            let request = format!("request {} (<{operation}>)", self.msg_id);
+            if during.is_empty() {
+                *during = request;
+            } else {
+                during.push_str(&format!(" — {request}"));
+            }
+        }
         self.unanswered = Some(Unanswered::Request {
             message_id: self.msg_id,
-            operation: operation_of(inner),
+            operation,
             why,
         });
         answer
@@ -766,8 +777,16 @@ async fn read_message<T: NetconfTransport>(
 fn with_partial(e: NetconfError, decoder: &Decoder) -> NetconfError {
     let held = || bytes_as_text(decoder.buffered());
     match e {
-        NetconfError::Timeout { op, stderr, .. } => NetconfError::Timeout {
+        NetconfError::Timeout {
             op,
+            limit,
+            during,
+            stderr,
+            ..
+        } => NetconfError::Timeout {
+            op,
+            limit,
+            during,
             partial: held(),
             stderr,
         },
@@ -796,10 +815,15 @@ pub(crate) fn redact_content(e: NetconfError) -> NetconfError {
         },
         NetconfError::Timeout {
             op,
+            limit,
+            during,
             partial,
             stderr,
         } => NetconfError::Timeout {
             op,
+            limit,
+            // Not the device's: the crate's own words and the request's element name.
+            during,
             partial: redact(&partial),
             // Redacted and made printable by the transport, like the `stderr` of
             // `SubsystemUnavailable` below. Its lines are one line now, and a

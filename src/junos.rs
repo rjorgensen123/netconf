@@ -1419,8 +1419,9 @@ mod commit_budget_tests {
             let Some((after, reply)) = self.inbound.pop_front() else {
                 return Ok(Bytes::new());
             };
-            if after > self.timeouts.per_read(self.budget) {
-                return Err(NetconfError::timeout("rpc-recv"));
+            let per_read = self.timeouts.per_read(self.budget);
+            if after > per_read {
+                return Err(NetconfError::timeout("rpc-recv", per_read, ""));
             }
             Ok(Bytes::from(reply))
         }

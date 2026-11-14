@@ -51,6 +51,15 @@ pub enum NetconfError {
         /// The operation that ran out: `"ssh-connect"`, `"ssh-subsystem"`,
         /// `"rpc-recv"`, `"rpc-send"` or `"session-ttl"`.
         op: &'static str,
+        /// The time limit that ran out (0.7.0): `Timeouts::total` for `"session-ttl"`,
+        /// and otherwise the limit the operation ran under — `connect` while
+        /// connecting and in `check_device`, `per_rpc` or `per_commit` for a request.
+        limit: std::time::Duration,
+        /// What was going on when it ran out, in words (0.7.0): `while connecting`, or
+        /// `while waiting for an answer — request 2 (<get-configuration>)` where the
+        /// session has named the request. Empty when neither the transport nor the
+        /// session said.
+        during: String,
         /// The part of a message the session had received when time ran out, as the
         /// device sent it — in chunked framing with its chunk headers — redacted as a
         /// reply is (0.5.13). Empty when nothing was waiting to be completed.
@@ -462,11 +471,18 @@ impl NetconfError {
         }
     }
 
-    /// A `Timeout` for `op`, with nothing received yet; the session adds what it had.
+    /// A `Timeout` for `op`, after `limit` ran out `during` what it says, with
+    /// nothing received yet; the session adds what it had.
     #[cfg_attr(not(feature = "russh-transport"), allow(dead_code))]
-    pub(crate) fn timeout(op: &'static str) -> Self {
+    pub(crate) fn timeout(
+        op: &'static str,
+        limit: std::time::Duration,
+        during: impl Into<String>,
+    ) -> Self {
         NetconfError::Timeout {
             op,
+            limit,
+            during: during.into(),
             partial: String::new(),
             stderr: String::new(),
         }
@@ -543,10 +559,15 @@ impl fmt::Display for NetconfError {
             NetconfError::Device(d) => write!(f, "device: {d}"),
             NetconfError::Timeout {
                 op,
+                limit,
+                during,
                 partial,
                 stderr,
             } => {
-                write!(f, "timeout: {op}")?;
+                write!(f, "timeout: {op} after {limit:?}")?;
+                if !during.is_empty() {
+                    write!(f, ", {}", printable(during))?;
+                }
                 write_partial(f, partial)?;
                 write_stderr(f, stderr)
             }

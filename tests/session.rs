@@ -359,6 +359,8 @@ async fn an_incomplete_message_goes_with_a_timeout_and_a_close() {
         inbound: pieces().into(),
         end: || NetconfError::Timeout {
             op: "rpc-recv",
+            limit: std::time::Duration::ZERO,
+            during: String::new(),
             partial: String::new(),
             stderr: "commit: database locked".into(),
         },
@@ -369,6 +371,7 @@ async fn an_incomplete_message_goes_with_a_timeout_and_a_close() {
             op,
             partial: held,
             stderr,
+            ..
         }) => {
             assert_eq!(op, "rpc-recv");
             assert!(held.contains("<system><root-authentication>"), "{held}");
@@ -1037,6 +1040,8 @@ async fn after_a_timeout_the_session_sends_nothing_more() {
         inbound: vec![hello(false)].into(),
         end: || NetconfError::Timeout {
             op: "rpc-recv",
+            limit: std::time::Duration::ZERO,
+            during: String::new(),
             partial: String::new(),
             stderr: String::new(),
         },
@@ -1060,6 +1065,69 @@ async fn after_a_timeout_the_session_sends_nothing_more() {
         }
         other => panic!("expected the out-of-step refusal, got {other:?}"),
     }
+}
+
+/// **A timeout names the request it cut off** (0.7.0): the session puts the request's
+/// message-id and operation at the end of what the transport said was going on, or
+/// alone when it said nothing, and the limit stays the one the transport gave.
+#[tokio::test]
+async fn a_timeout_names_the_request_it_cut_off() {
+    use netconf::NetconfError;
+    use std::time::Duration;
+    let t = StopsWith {
+        inbound: vec![hello(false)].into(),
+        end: || NetconfError::Timeout {
+            op: "session-ttl",
+            limit: Duration::from_secs(180),
+            during: "while waiting for an answer".into(),
+            partial: String::new(),
+            stderr: String::new(),
+        },
+    };
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    let e = s.rpc("<get-configuration/>").await.unwrap_err();
+    let text = e.to_string();
+    let NetconfError::Timeout {
+        op, limit, during, ..
+    } = e
+    else {
+        panic!("expected a Timeout, got {text}");
+    };
+    assert_eq!(op, "session-ttl");
+    assert_eq!(limit, Duration::from_secs(180));
+    assert_eq!(
+        during,
+        "while waiting for an answer — request 1 (<get-configuration>)"
+    );
+    assert_eq!(
+        text,
+        "timeout: session-ttl after 180s, while waiting for an answer — request 1 \
+         (<get-configuration>)"
+    );
+    // The same numbers and name as the record of the unanswered request.
+    let unanswered = s.unanswered().expect("the request is unanswered");
+    assert!(
+        unanswered.starts_with("request 1 (<get-configuration>)"),
+        "{unanswered}"
+    );
+
+    // A transport that does not say what was going on: the request stands alone.
+    let t = StopsWith {
+        inbound: vec![hello(false)].into(),
+        end: || NetconfError::Timeout {
+            op: "rpc-recv",
+            limit: Duration::from_secs(5),
+            during: String::new(),
+            partial: String::new(),
+            stderr: String::new(),
+        },
+    };
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    let e = s.rpc("<lock/>").await.unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "timeout: rpc-recv after 5s, request 1 (<lock>)"
+    );
 }
 
 /// **A refusal from the device is an answer** (0.7.0): the session is in step after

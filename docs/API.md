@@ -105,7 +105,10 @@ pub trait NetconfTransport: Send + Sized {
 
 The trait is declared with `#[async_trait]` (the `async-trait` crate), so an implementation outside
 the crate is written `#[async_trait::async_trait] impl NetconfTransport for …`. `recv` hands back
-pieces of any size; `Decoder` (§3) puts them together.
+pieces of any size; `Decoder` (§3) puts them together. `RusshTransport` skips an empty SSH data
+message and logs it as `ssh_empty_data`: it is not read as a close. A transport outside the crate
+that returns a `Timeout` fills `limit` with the limit that ran out and `during` with what it was
+doing, or leaves `during` empty (§8).
 
 **`reply_budget` is sealed**. It is how the session tells the transport which budget the
 request it is about to send runs under — `ReplyBudget::PerCommit` for a commit RPC,
@@ -154,9 +157,10 @@ transport's. `close()` reports a `Timeout` like any request, in `CloseFailed`.
 
 - **`max_total` — the absolute ceiling.** Your adoption choice, set once when you take the
   crate into use (default **5 minutes**; frame **1–10 minutes**,
-  `MIN_CEILING`..=`MAX_CEILING`). No session can ever live longer than this. **The ceiling is
-  a failsafe:** even if something crashes in the consumer mid-task, the session dies by itself
-  within the ceiling.
+  `MIN_CEILING`..=`MAX_CEILING`). Once a session's deadline is reached, every further send and
+  read is refused as `session-ttl`, whatever the activity, so no request is sent or answered
+  after it. The connection itself ends when the session is closed or dropped; a session that is
+  held and left unused is ended by the SSH layer after `total` without traffic.
 - **`total` — THIS session's TTL.** Your per-task message about how long this particular
   session gets to live: **≥ 1 s and ≤ the ceiling**. Small tasks do not need long lives; a
   sequence that must span a commit-confirmed window needs more.
@@ -232,7 +236,8 @@ What each policy offers, in order of preference:
  `LegacyJunos` offers everything russh 0.65 has for the R14 to Evo span;
  the two full-strength additions are not legacy, the SHA-1 group exchange and
 `ssh-dss` are. `Custom` is rejected at connect (not implemented — we refuse rather than
-negotiate with a different list than the one you asked for).
+negotiate with a different list than the one you asked for). It is planned for a coming release,
+with no promise of when.
 
 ---
 
@@ -392,7 +397,7 @@ come, and a request sent now would read it as its own. Junos leaves `message-id`
 replies, so nothing would tell. An `<rpc-error>` is the device's answer, and changes nothing.
 
 - The failure comes back as it is: `Timeout`, `Transport`, `Protocol`, and `CommitUnanswered` for a
-  commit.
+  commit. A `Timeout` names the request at the end of its `during` (§8).
 - `unanswered()` then says which request it was: `request <message-id> (<element>) on session
   <session-id> to <username>@<host>:<port>: <what happened>` — the session part as far as it is
   known — where what happened is `it got no answer within its time limit`, `the connection failed
@@ -1239,7 +1244,7 @@ pub enum NetconfError { // #[non_exhaustive]
  Transport(TransportError), // the network failed
  Protocol { detail: String, received: Option<String> }, // we spoke wrongly; received = what the device sent
  Device(Box<DeviceError>), // Junos said no — boxed
- Timeout { op: &'static str, partial: String, stderr: String }, // op: "ssh-connect" · "ssh-subsystem" · "rpc-recv" · "rpc-send" · "session-ttl"; partial = the incomplete message; stderr = what the device wrote on stderr, empty when nothing
+ Timeout { op: &'static str, limit: Duration, during: String, partial: String, stderr: String }, // op: "ssh-connect" · "ssh-subsystem" · "rpc-recv" · "rpc-send" · "session-ttl"; limit = the time limit that ran out; during = what was going on, and through a session which request, empty when nothing said; partial = the incomplete message; stderr = what the device wrote on stderr, empty when nothing
  Policy(String), // our own policy stopped it — before anything was sent
  Drift { fresh: String }, // the diff changed between approval and commit; fresh = the fresh diff
  ChangedSinceConfirmed(Box<DeviceChanged>), // the device changed between a confirmed commit and its confirming commit, which was withheld
@@ -1356,7 +1361,20 @@ the password was never the problem; and `partial_success`, which means the devic
 password and requires further authentication. `username` is the one the login was attempted as.
 
 `Timeout { op: "session-ttl", .. }` means the session's hard lifetime was reached —
-routing, not a network failure: open a new session for the next task. Error texts are English.
+routing, not a network failure: open a new session for the next task. **A timeout says what ran
+out, and what was going on** (0.7.0). `limit` is the time limit that ran out: `Timeouts::total` for
+`session-ttl`; `connect` for `ssh-connect` and `ssh-subsystem`, and for the two `rpc-recv` of
+`check_device`, which runs under it; the per-read limit — `per_rpc`, or `per_commit` during a
+commit — for `rpc-recv` and `rpc-send`. `during` is what the transport said was going on — `while
+connecting` (the TCP connection, the handshake, the login, opening the channel), `while waiting for
+the netconf subsystem`, `before the request was sent — nothing was sent`, `while the request was
+being sent` or `while waiting for an answer`, and in `check_device` `while waiting for the device's
+hello` or `while closing the session` — and empty when it said nothing. Through a session, a request
+sent for a call that times out has ` — request <message-id> (<element>)` put after it, or `request
+<message-id> (<element>)` alone when it is empty, the same number and name `unanswered()` gives;
+the `<close-session/>` that `close()` sends is not named. The lifetime running out before request 4
+was sent reads `timeout: session-ttl after 180s, before the request was sent — nothing was sent —
+request 4 (<lock>)`. Error texts are English.
 
 **The device's content is data, beside the words**. `Protocol::received`,
 `Timeout::partial`, `Closed::partial`, `Drift::fresh`, `CommittedThenFailed::reply`,
@@ -1418,7 +1436,7 @@ a control character, or U+2028/U+2029, is written out as an escape (`\n`, `\r`, 
 
 | Type | Text |
 |---|---|
-| `NetconfError` | `transport: …` · `protocol: <detail>`, then `; the device sent: <received>` when it is `Some` · `device: <DeviceError>` · `timeout: <op>`, then `; the incomplete message so far: <partial>` when it is not empty, then `; the device wrote on stderr: <stderr>` when it is not empty · `policy: …` · `drift: a fresh show\|compare deviates from the approved one; the fresh diff: <fresh>` · `changed since the confirmed commit: <DeviceChanged>` · `committed: the commit succeeded, then this failed: <error>`, then `; the device's answer to the commit: <reply>` · `commit unanswered: a commit was sent and no readable answer came back: <error>` · `<error>; the cleanup after it failed too: <step>: <error>; …` (`CleanupFailed`, 0.5.7) · `<error>`, then `; the device's answer to <step>: <reply>` for each in `replies` (`WithReplies`, 0.5.13) · `close: <error>`, then `; the session held this <severity>: <DeviceError>` for each warning, then what the device said over SSH as for `Closed` (`CloseFailed`, 0.5.13) |
+| `NetconfError` | `transport: …` · `protocol: <detail>`, then `; the device sent: <received>` when it is `Some` · `device: <DeviceError>` · `timeout: <op> after <limit>`, with `<limit>` written as `Duration` writes itself (`180s`, `1.5s`, `500ms`), then `, <during>`, made printable, when it is not empty, then `; the incomplete message so far: <partial>` when it is not empty, then `; the device wrote on stderr: <stderr>` when it is not empty · `policy: …` · `drift: a fresh show\|compare deviates from the approved one; the fresh diff: <fresh>` · `changed since the confirmed commit: <DeviceChanged>` · `committed: the commit succeeded, then this failed: <error>`, then `; the device's answer to the commit: <reply>` · `commit unanswered: a commit was sent and no readable answer came back: <error>` · `<error>; the cleanup after it failed too: <step>: <error>; …` (`CleanupFailed`, 0.5.7) · `<error>`, then `; the device's answer to <step>: <reply>` for each in `replies` (`WithReplies`, 0.5.13) · `close: <error>`, then `; the session held this <severity>: <DeviceError>` for each warning, then what the device said over SSH as for `Closed` (`CloseFailed`, 0.5.13) |
 | `DeviceChanged` | `the device's last commit is no longer the confirmed one — it was «<confirmed>», it is «<now>»; the confirming commit is withheld, and the device rolls the confirmed commit back by itself when its timeout runs out`, or `the candidate holds <n> line(s) of changes that are not the confirmed commit's; …`; then `; the diff against rollback <N>: <diff>`, `; the diff against rollback <N> could not be fetched: <error>`, or `; the confirmed commit is no longer in the device's commit history, so there is no rollback to compare with` |
 | `DeviceError` | `<tag>: <message> [path: <path>]` (`unknown` / `(no message)` when absent); for a translated tag `<tag> — <meaning> (RFC 6241, Appendix A): <message> …`; then ` [info: <info>]`, ` [app-tag: <app_tag>]` and ` [type: <error_type>]` for each that is present, and ` [<name>: <text>]` for each entry in `other`; then `; also <severity>: <DeviceError>` for each entry in `also`; then `; the reply besides its errors: <rest>` when `rest` is present |
 | `TransportError` | `io: …` · `invalid options: …` · `negotiation (<detail>); peer offered: <a, b>` · `host key: <detail>; device presented: <fingerprint>`, or without the second part when `observed` is `None` · ``the device did not offer the NETCONF subsystem — NETCONF over SSH is not enabled on the device (Junos: `set system services netconf ssh`)``, then `; the device said: <stderr>` when `stderr` is not empty · `SSH password authentication rejected by the device — <methods>`, or `the device ACCEPTED the password but requires further authentication — <methods>` under `partial_success`, where `<methods>` is `the device says it accepts: <a, b>` or `the device named no other method` · `closed: <detail>`, then the incomplete message as for `Timeout`. `SubsystemUnavailable` and `Closed` then add what the device said over SSH, each part present: `; the device wrote on stderr: <stderr>`, `; the subsystem's exit status: <n>`, `; the subsystem's exit signal: <name>[, core dumped][, the device said: <message>]`, `; the device disconnected, reason code <n>[, and said: <description>]`, `; the device's login banner: <banner>` |
@@ -1440,6 +1458,7 @@ the contract:
 | `ssh_host_key_enrollment` / `ssh_host_key_observed` | info | no pin — fingerprint observed |
 | `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run; `ssh_host_key_probe` only for a probe that goes on the wire |
 | `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr: `bytes`, how much, and `cut`, whether the cap was reached. Not the text |
+| `ssh_empty_data` | warn | the device sent an empty SSH data message: skipped, and not read as a close; once per transport |
 | `secrets_in_diff` | warn | the compare diff `prepare_change` fetched carries device secrets (only a fingerprint is logged); `compare()` on its own emits nothing |
 
 **The rules:** no event carries passwords, keys or unredacted config/diff content —
@@ -1682,7 +1701,8 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
 
 ## Known limits
 
-- `SshPolicy::Custom` is not implemented — refused by `connect` and `observe_host_key`.
+- `SshPolicy::Custom` is not implemented — refused by `connect` and `observe_host_key`. It is
+  planned for a coming release, with no promise of when.
 - `platform_hint`/`Platform` is reserved and not read.
 - There is no keepalive.
 - Policy enforcement reads set payloads only: a `Text` or `Xml` load — and `prepare_change` with

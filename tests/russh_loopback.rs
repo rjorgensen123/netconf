@@ -62,6 +62,8 @@ enum Device {
     /// A small NETCONF device like `ClosesCleanly` that writes on stderr as well:
     /// with its hello, and again at the client's EOF.
     Chatty,
+    /// Sends its hello when the subsystem opens, and answers nothing after it.
+    HelloThenSilent,
 }
 
 /// What the devices that explain themselves write on stderr: a line to read, and
@@ -91,6 +93,7 @@ impl Device {
             Device::ExplainsAndNeverOpens => "explains-and-never-opens",
             Device::DripsOnStderr => "drips-on-stderr",
             Device::Chatty => "chatty",
+            Device::HelloThenSilent => "hello-then-silent",
         }
     }
 }
@@ -165,7 +168,7 @@ impl russh::server::Handler for Handler {
             | Device::EndsTheSubsystem
             | Device::Disconnects
             | Device::DataAfterEof => session.channel_success(channel),
-            Device::ClosesCleanly | Device::Chatty => {
+            Device::ClosesCleanly | Device::Chatty | Device::HelloThenSilent => {
                 session.channel_success(channel)?;
                 if let Device::Chatty = self.device {
                     session.extended_data(channel, 1, &b"warning: chatty-hello\n"[..])?;
@@ -469,15 +472,61 @@ async fn a_send_to_a_device_that_never_reads_times_out_within_its_budget() {
     .expect("the send outlived its budget");
     let elapsed = started.elapsed();
 
-    assert!(
-        matches!(result, Err(NetconfError::Timeout { op: "rpc-send", .. })),
-        "{:?}",
-        result.map_err(|e| e.to_string())
-    );
+    match result {
+        Err(NetconfError::Timeout {
+            op: "rpc-send",
+            limit,
+            during,
+            ..
+        }) => {
+            assert_eq!(limit, per_rpc);
+            assert_eq!(during, "while the request was being sent");
+        }
+        other => panic!(
+            "expected an rpc-send timeout, got {:?}",
+            other.map_err(|e| e.to_string())
+        ),
+    }
     assert!(
         elapsed >= per_rpc && elapsed < per_rpc + Duration::from_secs(3),
         "the send gave up after {elapsed:?}, with a budget of {per_rpc:?}"
     );
+}
+
+/// **A send after the session's deadline says that nothing was sent** (0.7.0): the
+/// lifetime ran out before the request went out, and the timeout says so, with the
+/// lifetime as the limit that ran out.
+#[tokio::test]
+async fn a_send_after_the_deadline_says_nothing_was_sent() {
+    let total = Duration::from_secs(1);
+    let opts = start(
+        Device::NeverReads,
+        Timeouts {
+            total,
+            ..Timeouts::default()
+        },
+    )
+    .await;
+    let mut transport = RusshTransport::connect(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the device opens the subsystem");
+    tokio::time::sleep(total).await;
+    match transport.send(b"<hello/>").await {
+        Err(NetconfError::Timeout {
+            op: "session-ttl",
+            limit,
+            during,
+            ..
+        }) => {
+            assert_eq!(limit, total);
+            assert_eq!(during, "before the request was sent — nothing was sent");
+        }
+        other => panic!(
+            "expected a session-ttl timeout, got {:?}",
+            other.map_err(|e| e.to_string())
+        ),
+    }
 }
 
 /// **Wrong credentials are their own error**, carrying what the device said. They
@@ -549,13 +598,14 @@ async fn the_host_key_probe_runs_under_the_same_limits_as_connect() {
     };
     assert!(m.contains("Timeouts::total"), "{m}");
 
-    for (timeouts, tag) in [
+    for (timeouts, tag, limit) in [
         (
             Timeouts {
                 connect: Duration::from_secs(2),
                 ..Timeouts::default()
             },
             "ssh-connect",
+            Duration::from_secs(2),
         ),
         (
             Timeouts {
@@ -564,6 +614,7 @@ async fn the_host_key_probe_runs_under_the_same_limits_as_connect() {
                 ..Timeouts::default()
             },
             "session-ttl",
+            Duration::from_secs(1),
         ),
     ] {
         let (port, _closed) = stalling_device().await;
@@ -576,11 +627,21 @@ async fn the_host_key_probe_runs_under_the_same_limits_as_connect() {
         .await
         .expect("the probe outlived its budget");
         let elapsed = started.elapsed();
-        assert!(
-            matches!(result, Err(NetconfError::Timeout { op, .. }) if op == tag),
-            "expected Timeout({tag:?}), got {:?}",
-            result.map_err(|e| e.to_string())
-        );
+        match result {
+            Err(NetconfError::Timeout {
+                op,
+                limit: ran_out,
+                during,
+                ..
+            }) if op == tag => {
+                assert_eq!(ran_out, limit, "{tag}");
+                assert_eq!(during, "while connecting", "{tag}");
+            }
+            other => panic!(
+                "expected Timeout({tag:?}), got {:?}",
+                other.map_err(|e| e.to_string())
+            ),
+        }
         assert!(
             elapsed >= bound && elapsed < bound + Duration::from_secs(1),
             "the probe gave up after {elapsed:?}, with a bound of {bound:?}"
@@ -668,17 +729,21 @@ async fn a_device_that_never_answers_the_login_times_out_within_the_connect_budg
         .expect("connect outlived its budget");
     let elapsed = started.elapsed();
 
-    assert!(
-        matches!(
-            result,
-            Err(NetconfError::Timeout {
-                op: "ssh-connect",
-                ..
-            })
+    match result {
+        Err(NetconfError::Timeout {
+            op: "ssh-connect",
+            limit,
+            during,
+            ..
+        }) => {
+            assert_eq!(limit, connect);
+            assert_eq!(during, "while connecting");
+        }
+        other => panic!(
+            "expected an ssh-connect timeout, got {:?}",
+            other.map(|_| ()).map_err(|e| e.to_string())
         ),
-        "{:?}",
-        result.map(|_| ()).map_err(|e| e.to_string())
-    );
+    }
     assert!(
         elapsed >= connect && elapsed < connect + Duration::from_secs(3),
         "connect gave up after {elapsed:?}, with a budget of {connect:?}"
@@ -909,10 +974,63 @@ async fn a_device_check_names_the_step_that_ran_out_of_time() {
         Some((
             CheckStep::Login,
             NetconfError::Timeout {
-                op: "ssh-connect", ..
+                op: "ssh-connect",
+                limit: ran_out,
+                during,
+                ..
             },
-        )) => {}
+        )) => {
+            assert_eq!(*ran_out, limit);
+            assert_eq!(during, "while connecting");
+        }
         other => panic!("expected the login to run out of time, got {other:?}"),
+    }
+}
+
+/// **A check that runs out of time after the connection says what it was waiting
+/// for** (0.7.0): the device's hello, or the answer to closing the session — under
+/// `connect`, the one clock of the check.
+#[tokio::test]
+async fn a_device_check_says_what_it_was_waiting_for_when_time_ran_out() {
+    use netconf::russh_transport::{CheckStep, check_device};
+    let limit = Duration::from_secs(2);
+    let timeouts = Timeouts {
+        connect: limit,
+        ..Timeouts::default()
+    };
+    for (device, step, waiting) in [
+        (
+            Device::NeverReads,
+            CheckStep::Hello,
+            "while waiting for the device's hello",
+        ),
+        (
+            Device::HelloThenSilent,
+            CheckStep::Request,
+            "while closing the session",
+        ),
+    ] {
+        let opts = start(device, timeouts).await;
+        let check = tokio::time::timeout(Duration::from_secs(20), check_device(&opts))
+            .await
+            .expect("the check outlived its limit")
+            .map_err(|e| e.to_string())
+            .unwrap();
+        match check.stopped() {
+            Some((
+                stopped,
+                NetconfError::Timeout {
+                    op: "rpc-recv",
+                    limit: ran_out,
+                    during,
+                    ..
+                },
+            )) if stopped == step => {
+                assert_eq!(*ran_out, limit, "{check}");
+                assert_eq!(during, waiting, "{check}");
+            }
+            other => panic!("expected {step} to run out of time, got {other:?}"),
+        }
     }
 }
 
@@ -1022,12 +1140,27 @@ async fn a_timeout_carries_what_the_device_wrote_on_stderr() {
         .expect("the read outlived its budget")
         .expect_err("the device never answers");
     let text = e.to_string();
-    let NetconfError::Timeout { op, stderr, .. } = e else {
+    let NetconfError::Timeout {
+        op,
+        limit,
+        during,
+        stderr,
+        ..
+    } = e
+    else {
         panic!("expected Timeout, got {text}");
     };
     assert_eq!(op, "rpc-recv");
+    assert_eq!(limit, Duration::from_secs(1));
+    assert_eq!(during, "while waiting for an answer");
     assert_explained(&stderr);
-    assert!(text.starts_with("timeout: rpc-recv; the device wrote on stderr: netconf: "));
+    assert!(
+        text.starts_with(
+            "timeout: rpc-recv after 1s, while waiting for an answer; the device wrote on \
+             stderr: netconf: "
+        ),
+        "{text}"
+    );
 
     match transport.recv().await {
         Err(NetconfError::Timeout { op, stderr, .. }) => {
@@ -1108,10 +1241,19 @@ async fn a_timeout_opening_the_subsystem_carries_what_the_device_wrote_on_stderr
         .err()
         .expect("the device never opens the subsystem");
     let text = e.to_string();
-    let NetconfError::Timeout { op, stderr, .. } = e else {
+    let NetconfError::Timeout {
+        op,
+        limit,
+        during,
+        stderr,
+        ..
+    } = e
+    else {
         panic!("expected Timeout, got {text}");
     };
     assert_eq!(op, "ssh-subsystem");
+    assert_eq!(limit, Duration::from_secs(2));
+    assert_eq!(during, "while waiting for the netconf subsystem");
     assert_explained(&stderr);
 }
 
@@ -1170,10 +1312,18 @@ async fn a_device_that_keeps_writing_on_stderr_does_not_hold_a_read() {
         .await
         .expect("the read ran past its limit")
         .expect_err("the device never answers");
-    assert!(
-        matches!(e, NetconfError::Timeout { op: "rpc-recv", .. }),
-        "{e}"
-    );
+    match &e {
+        NetconfError::Timeout {
+            op: "rpc-recv",
+            limit,
+            during,
+            ..
+        } => {
+            assert_eq!(*limit, timeouts.per_rpc, "{e}");
+            assert_eq!(during, "while waiting for an answer", "{e}");
+        }
+        other => panic!("expected an rpc-recv timeout, got {other}"),
+    }
     assert!(
         started.elapsed() < Duration::from_secs(4),
         "{:?}",

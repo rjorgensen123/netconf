@@ -27,6 +27,8 @@ pub trait NetconfTransport: Send + Sized {
     /// Send raw bytes, already framed by the caller.
     async fn send(&mut self, bytes: &[u8]) -> Result<(), NetconfError>;
     /// Receive the next piece of bytes. An empty `Bytes` means the peer closed.
+    /// `RusshTransport` skips an empty SSH data message and logs it as
+    /// `ssh_empty_data`: it is not read as a close (0.7.0).
     async fn recv(&mut self) -> Result<Bytes, NetconfError>;
     /// Close the transport, and return what the device said over SSH, beside the
     /// NETCONF stream — empty for a transport that is not SSH (0.5.13; `()`
@@ -141,10 +143,10 @@ pub fn is_legacy(algorithm: &str) -> bool {
 /// of `Modern`: the modern algorithms are still negotiated first, and legacy ones are
 /// *permitted*, not *preferred*.
 ///
-/// The variants genuinely affect the negotiation. `Modern` is today's recommendation;
-/// `LegacyJunos` appends SHA-1 key exchange, `ssh-rsa`, CBC and `hmac-sha1` as a
-/// tail, so that older releases remain reachable. No policy offers 3DES (removed in
-/// 0.3.2). The exact lists are in `docs/API.md`.
+/// `Modern` and `LegacyJunos` genuinely affect the negotiation. `Modern` is today's
+/// recommendation; `LegacyJunos` appends SHA-1 key exchange, `ssh-rsa`, CBC and
+/// `hmac-sha1` as a tail, so that older releases remain reachable. No policy offers
+/// 3DES (removed in 0.3.2). The exact lists are in `docs/API.md`.
 pub enum SshPolicy {
     /// curve25519, ecdh-nistp and SHA-2 Diffie-Hellman; ed25519, ecdsa and rsa-sha2
     /// host keys; chacha20, aes-gcm and aes-ctr; hmac-sha2, encrypt-then-MAC first.
@@ -154,7 +156,10 @@ pub enum SshPolicy {
     /// ssh-rsa with SHA-1 signatures, aes-cbc as a last resort, and hmac-sha1. For
     /// older releases.
     LegacyJunos,
-    /// Full manual control.
+    /// The caller's own algorithm lists. **Not built:** the SSH transport refuses it
+    /// before connecting — `connect`, `observe_host_key` and `check_device` alike —
+    /// as [`TransportError::InvalidOptions`](crate::TransportError::InvalidOptions).
+    /// It is planned for a coming release, with no promise of when.
     Custom {
         /// Key exchange algorithms.
         kex: Vec<String>,
@@ -171,10 +176,12 @@ pub enum SshPolicy {
 ///
 /// 1. **`max_total` — the absolute ceiling.** A setting the consumer chooses ONCE,
 ///    when it adopts this crate (5 minutes by default; the permitted range is
-///    [`Timeouts::MIN_CEILING`]..=[`Timeouts::MAX_CEILING`], 1 to 10 minutes). No
-///    session can ever live longer than this. The ceiling is a FAILSAFE: if
-///    something crashes on the consumer's side mid-task, the session still dies on
-///    its own within it.
+///    [`Timeouts::MIN_CEILING`]..=[`Timeouts::MAX_CEILING`], 1 to 10 minutes). Once
+///    a session's deadline is reached, every further send and read is refused as
+///    `session-ttl`, whatever the activity, so no request is sent or answered after
+///    it. The connection itself ends when the session is closed or dropped; a
+///    session that is held and left unused is ended by the SSH layer after `total`
+///    without traffic.
 /// 2. **`total` — THIS session's TTL.** The consumer saying how long this particular
 ///    task may live. Many small tasks need very little; seconds are allowed. It must
 ///    fall within the ceiling.

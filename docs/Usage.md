@@ -106,7 +106,7 @@ Older devices require SSH algorithms that modern libraries have stopped offering
 a **superset** of `Modern`: the modern algorithms are still negotiated first, and SHA-1 key
 exchange, `ssh-rsa`, CBC ciphers and `hmac-sha1` are allowed in addition. No policy offers 3DES.
 `SshPolicy::Custom` is refused at connect: netconf does not negotiate with an algorithm list other
-than one it implements.
+than one it implements. It is planned for a coming release, with no promise of when.
 
 **Set it per device, never globally.** A connection under `LegacyJunos` is logged with
 `legacy = true`; the first one to each device as a warning. To mark your own events by
@@ -617,7 +617,7 @@ verify that the framing is handled.
 | `Device` | the device said no | read `message`, `path` and `explanation()` — that is Junos answering; further errors are in `also` |
 | `Transport` | the network, SSH, the login or the host key | see below |
 | `Protocol` | the device's answer could not be read, or did not belong to the request | `received` is what the device sent |
-| `Timeout` | a time limit ran out | `op` says which; `partial` is what had arrived; `stderr` is what the device wrote on stderr |
+| `Timeout` | a time limit ran out | `op` says which, `limit` how long it was, and `during` what was going on — through a session with the request a call sent, not the `<close-session/>` of `close()`, `while waiting for an answer — request 3 (<commit-configuration>)`; `partial` is what had arrived; `stderr` is what the device wrote on stderr |
 | `CommittedThenFailed` | the commit went in, then a later step failed | the change is live; `reply` is the device's answer to the commit |
 | `CommitUnanswered` | a commit was sent and no readable answer came back | the device has not said whether it took effect — see «A request that got no answer» below |
 | `WithReplies` | an operation failed after some of its requests went through | handle `error`; `replies` are the device's answers to those |

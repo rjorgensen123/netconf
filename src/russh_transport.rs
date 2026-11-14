@@ -434,7 +434,8 @@ impl Stderr {
 ///
 /// A failure, or a channel that ends before the answer, is `SubsystemUnavailable`
 /// with what the device wrote on stderr. Data before the answer can only come from
-/// a subsystem that runs, so it counts as open and is kept for the first `recv`.
+/// a subsystem that runs, so it counts as open and is kept for the first `recv`; an
+/// empty data message does not count, and is skipped (0.7.0).
 /// The wait is bounded by the caller, as one step of the connection phase — see
 /// `in_connect_phase`.
 ///
@@ -444,12 +445,16 @@ async fn await_subsystem(
     channel: &mut russh::Channel<russh::client::Msg>,
     stderr: &mut Stderr,
     said: &StdMutex<SshMessages>,
+    empty_data_logged: &mut bool,
 ) -> Result<Option<Bytes>, NetconfError> {
     loop {
         match channel.wait().await {
             Some(russh::ChannelMsg::Success) => return Ok(None),
             Some(russh::ChannelMsg::Data { data }) => {
-                return Ok(Some(Bytes::copy_from_slice(&data)));
+                // An empty one is no answer, and the wait goes on.
+                if !skip_empty_data(&data, empty_data_logged) {
+                    return Ok(Some(Bytes::copy_from_slice(&data)));
+                }
             }
             Some(russh::ChannelMsg::ExtendedData { data, ext }) => {
                 stderr.keep(&data, ext);
@@ -469,6 +474,27 @@ async fn await_subsystem(
             Some(other) => note_exit(said, &other),
         }
     }
+}
+
+/// Whether a data message from the device is skipped rather than handed on
+/// (0.7.0): one with no bytes, which SSH allows. An empty read is what says the
+/// peer closed, so handed on it would be read as a close. The first one a
+/// transport skips is logged, and `logged` records that it was.
+///
+/// A separate function so the decision can be unit-tested without SSH: russh
+/// sends no empty data message, so the loopback device cannot send one.
+fn skip_empty_data(data: &[u8], logged: &mut bool) -> bool {
+    if !data.is_empty() {
+        return false;
+    }
+    if !*logged {
+        *logged = true;
+        tracing::warn!(
+            event = "ssh_empty_data",
+            "the device sent an empty data message — skipped"
+        );
+    }
+    true
 }
 
 /// What a closed channel means. **If the device said something — on stderr, or over
@@ -531,8 +557,16 @@ fn late_detail(kept: usize, dropped: usize) -> String {
 /// (0.7.0).
 fn with_stderr(e: NetconfError, said: Option<String>) -> NetconfError {
     match e {
-        NetconfError::Timeout { op, partial, .. } => NetconfError::Timeout {
+        NetconfError::Timeout {
             op,
+            limit,
+            during,
+            partial,
+            ..
+        } => NetconfError::Timeout {
+            op,
+            limit,
+            during,
             partial,
             stderr: said.unwrap_or_default(),
         },
@@ -562,6 +596,9 @@ pub struct RusshTransport {
     eof: bool,
     /// Whether the channel has closed, so `close` has nothing more to read.
     closed: bool,
+    /// Whether an empty data message from the device has been logged: once per
+    /// transport — see `skip_empty_data`.
+    empty_data_logged: bool,
     /// The session's limits. `per_rpc` — or `per_commit` while a commit is in
     /// flight — bounds how long a single `recv()` or `send()` may block, more tightly
     /// than russh's own `inactivity_timeout`.
@@ -574,6 +611,22 @@ pub struct RusshTransport {
     /// `Timeout { op: "session-ttl" }` — regardless of activity.
     deadline: std::time::Instant,
 }
+
+/// What a [`NetconfError::Timeout`] says was going on, in `during` (0.7.0): the TCP
+/// connection, the handshake, the login or opening the channel.
+const WHILE_CONNECTING: &str = "while connecting";
+/// The device's answer to the subsystem request.
+const WHILE_OPENING_SUBSYSTEM: &str = "while waiting for the netconf subsystem";
+/// A send the session's deadline refused before it began.
+const BEFORE_SENDING: &str = "before the request was sent — nothing was sent";
+/// A send that had begun.
+const WHILE_SENDING: &str = "while the request was being sent";
+/// A read.
+const WHILE_WAITING: &str = "while waiting for an answer";
+/// `check_device` waiting for the hello.
+const WHILE_WAITING_FOR_HELLO: &str = "while waiting for the device's hello";
+/// `check_device` closing the session.
+const WHILE_CLOSING: &str = "while closing the session";
 
 /// The remaining waiting budget for one read: the smaller of the per-read limit —
 /// `per_rpc`, or `per_commit` during a commit — and the time left until the session
@@ -591,10 +644,26 @@ fn recv_budget(
     Some(per_read.min(deadline - now))
 }
 
+/// The clock of a connection phase: when it must be done by and when the session
+/// ends, with the two limits they were counted from, which a timeout reports.
+#[derive(Clone, Copy)]
+struct ConnectClock {
+    /// `Timeouts::connect` after the phase began, or `deadline` when that sum overflows;
+    /// it can lie past `deadline`, and `in_connect_phase` caps the wait there.
+    connect_by: std::time::Instant,
+    /// The session's deadline: `Timeouts::total` after the phase began.
+    deadline: std::time::Instant,
+    /// `Timeouts::connect`.
+    connect: std::time::Duration,
+    /// `Timeouts::total`.
+    total: std::time::Duration,
+}
+
 /// Run `step`, one wait while the connection is being established, under what is
-/// left of the connection phase: it ends at `connect_by` — `Timeouts::connect` after
-/// the phase began — and never past the session's `deadline`. Running out is
-/// `Timeout { op: tag }`, or `Timeout { op: "session-ttl" }` when the deadline is what ran out.
+/// left of the connection phase: it ends at `clock.connect_by` — `Timeouts::connect`
+/// after the phase began — and never past the session's `clock.deadline`. Running out
+/// is `Timeout { op: tag }`, or `Timeout { op: "session-ttl" }` when the deadline is
+/// what ran out, with the limit that ran out — `connect` or `total` — and `during`.
 ///
 /// Every wait in `connect` and in `observe_host_key` goes through here. russh bounds
 /// none of them itself, beyond an inactivity timer that restarts on activity and is
@@ -607,21 +676,24 @@ fn recv_budget(
 /// password included — is sent after it.
 async fn in_connect_phase<T>(
     step: impl std::future::Future<Output = T>,
-    connect_by: std::time::Instant,
-    deadline: std::time::Instant,
+    clock: ConnectClock,
     tag: &'static str,
+    during: &'static str,
 ) -> Result<T, NetconfError> {
+    let lifetime_over = || NetconfError::timeout("session-ttl", clock.total, during);
+    let phase_over = || NetconfError::timeout(tag, clock.connect, during);
     let now = std::time::Instant::now();
-    let budget = match recv_budget(connect_by.saturating_duration_since(now), deadline, now) {
-        None => return Err(NetconfError::timeout("session-ttl")),
-        Some(left) if left.is_zero() => return Err(NetconfError::timeout(tag)),
+    let phase_left = clock.connect_by.saturating_duration_since(now);
+    let budget = match recv_budget(phase_left, clock.deadline, now) {
+        None => return Err(lifetime_over()),
+        Some(left) if left.is_zero() => return Err(phase_over()),
         Some(left) => left,
     };
     timeout(budget, step).await.map_err(|_| {
-        if std::time::Instant::now() >= deadline {
-            NetconfError::timeout("session-ttl")
+        if std::time::Instant::now() >= clock.deadline {
+            lifetime_over()
         } else {
-            NetconfError::timeout(tag)
+            phase_over()
         }
     })
 }
@@ -679,16 +751,15 @@ async fn open_ssh(
     port: u16,
     config: Arc<russh::client::Config>,
     handler: ClientHandler,
-    connect_by: std::time::Instant,
-    deadline: std::time::Instant,
+    clock: ConnectClock,
     progress: &mut Progress,
 ) -> Result<Result<(russh::client::Handle<ClientHandler>, Tether), russh::Error>, NetconfError> {
     progress.begin();
     let tcp = in_connect_phase(
         tokio::net::TcpStream::connect((host, port)),
-        connect_by,
-        deadline,
+        clock,
         "ssh-connect",
+        WHILE_CONNECTING,
     )
     .await?;
     let (tcp, tether) = match tcp.and_then(Tether::hold) {
@@ -698,9 +769,9 @@ async fn open_ssh(
     progress.done(CheckStep::Tcp);
     let handle = in_connect_phase(
         russh::client::connect_stream(config, tcp, handler),
-        connect_by,
-        deadline,
+        clock,
         "ssh-connect",
+        WHILE_CONNECTING,
     )
     .await?;
     Ok(handle.map(|handle| (handle, tether)))
@@ -856,11 +927,9 @@ impl RusshTransport {
             ));
         }
 
-        // `Custom` promises «full manual control» in the API, but the names have to be
-        // resolved against russh's typed constants, and that mapping is not built. We
-        // cannot deliver what the API promises — and then we must **refuse**, not
-        // quietly do something else. The previous choice, falling back to legacy, did
-        // the opposite of what a consumer tightening things would expect.
+        // `Custom` is not built: its names would have to be resolved against russh's
+        // typed constants, and that mapping does not exist. So it is refused, not
+        // negotiated with another list than the one the caller asked for.
         if matches!(opts.ssh_policy, SshPolicy::Custom { .. }) {
             return Err(refuse(CUSTOM_REFUSED.into()));
         }
@@ -923,6 +992,12 @@ impl RusshTransport {
         let connect_by = started
             .checked_add(opts.timeouts.connect)
             .unwrap_or(deadline);
+        let clock = ConnectClock {
+            connect_by,
+            deadline,
+            connect: opts.timeouts.connect,
+            total: opts.timeouts.total,
+        };
 
         let mut config = russh::client::Config {
             // Not what bounds any wait: `in_connect_phase` bounds each one while
@@ -950,28 +1025,27 @@ impl RusshTransport {
         // The TCP connection, the handshake and the host key check. From here until
         // `connect` returns `Ok`, every way out — a phase running out, a refusal, an
         // error — drops `tether`, and the device sees the connection end.
-        let (mut handle, tether) = open_ssh(
-            &opts.host, opts.port, config, handler, connect_by, deadline, progress,
-        )
-        .await?
-        // Classify: a host key pin mismatch becomes HostKey, a key exchange or
-        // algorithm failure becomes Negotiation.
-        .map_err(|e| {
-            // `check_server_key` has already put the fingerprint here if it got
-            // as far as seeing the key. We read it BEFORE building the error, so
-            // it travels out with it.
-            let seen = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            let err = classify_connect_err(e, seen);
-            tracing::warn!(
-                event = "ssh_connect_failed",
-                host = %opts.host,
-                port = opts.port,
-                ssh_policy = policy_name,
-                error = %err,
-                "SSH connection failed"
-            );
-            err
-        })?;
+        let (mut handle, tether) =
+            open_ssh(&opts.host, opts.port, config, handler, clock, progress)
+                .await?
+                // Classify: a host key pin mismatch becomes HostKey, a key exchange or
+                // algorithm failure becomes Negotiation.
+                .map_err(|e| {
+                    // `check_server_key` has already put the fingerprint here if it got
+                    // as far as seeing the key. We read it BEFORE building the error, so
+                    // it travels out with it.
+                    let seen = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                    let err = classify_connect_err(e, seen);
+                    tracing::warn!(
+                        event = "ssh_connect_failed",
+                        host = %opts.host,
+                        port = opts.port,
+                        ssh_policy = policy_name,
+                        error = %err,
+                        "SSH connection failed"
+                    );
+                    err
+                })?;
         progress.done(CheckStep::Ssh);
         progress.fingerprint = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
 
@@ -985,9 +1059,9 @@ impl RusshTransport {
         // said over SSH goes with it (0.5.13).
         let authed = in_connect_phase(
             handle.authenticate_password(opts.username.as_str(), password.as_str()),
-            connect_by,
-            deadline,
+            clock,
             "ssh-connect",
+            WHILE_CONNECTING,
         )
         .await?
         .map_err(|e| ended(e, said_now(&said)))?;
@@ -1018,9 +1092,9 @@ impl RusshTransport {
 
         let mut channel = in_connect_phase(
             handle.channel_open_session(),
-            connect_by,
-            deadline,
+            clock,
             "ssh-connect",
+            WHILE_CONNECTING,
         )
         .await?
         .map_err(|e| ended(e, said_now(&said)))?;
@@ -1029,17 +1103,18 @@ impl RusshTransport {
         // not answered: the device's answer is read here, and the session is
         // established only once it is a yes.
         let mut stderr = Stderr::new();
+        let mut empty_data_logged = false;
         let answer = in_connect_phase(
             async {
                 channel
                     .request_subsystem(true, "netconf")
                     .await
                     .map_err(|e| ended(e, said_now(&said)))?;
-                await_subsystem(&mut channel, &mut stderr, &said).await
+                await_subsystem(&mut channel, &mut stderr, &said, &mut empty_data_logged).await
             },
-            connect_by,
-            deadline,
+            clock,
             "ssh-subsystem",
+            WHILE_OPENING_SUBSYSTEM,
         )
         .await;
         // A device that wrote why and then never answered: the attempt ends here,
@@ -1070,6 +1145,7 @@ impl RusshTransport {
             said,
             eof: false,
             closed: false,
+            empty_data_logged,
             timeouts: opts.timeouts,
             budget: ReplyBudget::PerRpc,
             deadline,
@@ -1265,17 +1341,8 @@ fn preferred_for(policy: &SshPolicy) -> russh::Preferred {
             mac: LEGACY_MAC.into(),
             ..base
         },
-        // Custom is NOT implemented, and therefore falls back to the STRICTEST list,
-        // not the loosest.
-        //
-        // This arm used to return the legacy lists, which meant a consumer choosing
-        // `Custom` in order to *tighten* things got `3des-cbc`, `ssh-rsa` and
-        // `diffie-hellman-group1-sha1` switched on instead — fail-open, in a crate
-        // whose floor is fail-closed.
-        //
-        // `connect()` and `observe_host_key()` refuse `Custom` with a clear error, so
-        // this branch should not be reached in practice. It reads `Modern` because a
-        // defence in depth must never point at the weakest option.
+        // Never reached: `connect()` and `observe_host_key()` refuse `Custom` before
+        // they get here. It returns the base list, never a legacy one.
         SshPolicy::Custom { .. } => base,
     }
 }
@@ -1312,10 +1379,19 @@ impl RusshTransport {
         close_outcome(self.said(true), failed)
     }
 
-    /// A `Timeout` for `op`, with what the device wrote on stderr (0.7.0). The
-    /// session goes on, so it is the lines the device has ended.
-    fn timed_out(&mut self, op: &'static str) -> NetconfError {
-        with_stderr(NetconfError::timeout(op), self.stderr.take(false))
+    /// A `Timeout` for `op`, after `limit` ran out `during` what it says, with what
+    /// the device wrote on stderr (0.7.0). The session goes on, so it is the lines
+    /// the device has ended.
+    fn timed_out(
+        &mut self,
+        op: &'static str,
+        limit: std::time::Duration,
+        during: &'static str,
+    ) -> NetconfError {
+        with_stderr(
+            NetconfError::timeout(op, limit, during),
+            self.stderr.take(false),
+        )
     }
 }
 
@@ -1335,12 +1411,9 @@ impl NetconfTransport for RusshTransport {
         // `channel.data` then waits for space that never comes. Before, only
         // russh's inactivity timer bounded that wait — and it is set to the whole
         // TTL, so a stuck send held the session for its entire lifetime.
-        let Some(budget) = recv_budget(
-            self.timeouts.per_read(self.budget),
-            self.deadline,
-            std::time::Instant::now(),
-        ) else {
-            return Err(self.timed_out("session-ttl"));
+        let per_read = self.timeouts.per_read(self.budget);
+        let Some(budget) = recv_budget(per_read, self.deadline, std::time::Instant::now()) else {
+            return Err(self.timed_out("session-ttl", self.timeouts.total, BEFORE_SENDING));
         };
         // &[u8] implements AsyncRead, so russh sends it as channel data. A send that
         // fails has found the channel or the connection gone; what the device said
@@ -1352,9 +1425,9 @@ impl NetconfTransport for RusshTransport {
                 None => Err(ended(e, self.said(true))),
             },
             Err(_) if std::time::Instant::now() >= self.deadline => {
-                Err(self.timed_out("session-ttl"))
+                Err(self.timed_out("session-ttl", self.timeouts.total, WHILE_SENDING))
             }
-            Err(_) => Err(self.timed_out("rpc-send")),
+            Err(_) => Err(self.timed_out("rpc-send", per_read, WHILE_SENDING)),
         }
     }
 
@@ -1367,7 +1440,8 @@ impl NetconfTransport for RusshTransport {
         // every message on the channel, and the ones that carry no data — stderr,
         // an exit status — do not end the read: a device that kept sending those
         // held one read until the session's deadline.
-        let read_by = std::time::Instant::now() + self.timeouts.per_read(self.budget);
+        let per_read = self.timeouts.per_read(self.budget);
+        let read_by = std::time::Instant::now() + per_read;
         loop {
             // Both the per-read deadline AND the session deadline: never wait longer
             // than the smaller of what is left of the per-read limit — `per_rpc`, or
@@ -1381,8 +1455,10 @@ impl NetconfTransport for RusshTransport {
                 // After the device's EOF, the wait for what follows it ends in the
                 // close outcome, however it ends.
                 _ if self.eof => return self.ended_read(),
-                Some(_) => return Err(self.timed_out("rpc-recv")),
-                None => return Err(self.timed_out("session-ttl")),
+                Some(_) => return Err(self.timed_out("rpc-recv", per_read, WHILE_WAITING)),
+                None => {
+                    return Err(self.timed_out("session-ttl", self.timeouts.total, WHILE_WAITING));
+                }
             };
             if let Some(data) = self.pending.take() {
                 return Ok(data);
@@ -1393,12 +1469,17 @@ impl NetconfTransport for RusshTransport {
                     return self.ended_read();
                 }
                 Err(_) if std::time::Instant::now() >= self.deadline => {
-                    return Err(self.timed_out("session-ttl"));
+                    return Err(self.timed_out("session-ttl", self.timeouts.total, WHILE_WAITING));
                 }
-                Err(_) => return Err(self.timed_out("rpc-recv")),
+                Err(_) => return Err(self.timed_out("rpc-recv", per_read, WHILE_WAITING)),
             };
             match msg {
+                // An empty one is not the peer closing: the read goes on, on the same
+                // clock.
                 Some(russh::ChannelMsg::Data { data }) => {
+                    if skip_empty_data(&data, &mut self.empty_data_logged) {
+                        continue;
+                    }
                     return Ok(Bytes::copy_from_slice(&data));
                 }
                 // **stderr from the subsystem — never discarded.** This is where Junos
@@ -1584,6 +1665,12 @@ pub async fn observe_host_key(
     let started = std::time::Instant::now();
     let deadline = started + timeouts.total;
     let connect_by = started.checked_add(timeouts.connect).unwrap_or(deadline);
+    let clock = ConnectClock {
+        connect_by,
+        deadline,
+        connect: timeouts.connect,
+        total: timeouts.total,
+    };
 
     // After the refusals above, so it is logged only for a probe that goes on the
     // wire (0.7.0).
@@ -1621,8 +1708,7 @@ pub async fn observe_host_key(
         port,
         Arc::new(config),
         handler,
-        connect_by,
-        deadline,
+        clock,
         &mut Progress::default(),
     )
     .await?
@@ -1970,7 +2056,7 @@ pub async fn check_device(opts: &ConnectOptions) -> Result<DeviceCheck, NetconfE
         Ok(Ok(session)) => session,
         Ok(Err(e)) => return Ok(stop(check, progress, CheckStep::Hello, e)),
         Err(_) => {
-            let e = NetconfError::timeout("rpc-recv");
+            let e = NetconfError::timeout("rpc-recv", limit, WHILE_WAITING_FOR_HELLO);
             return Ok(stop(check, progress, CheckStep::Hello, e));
         }
     };
@@ -1988,7 +2074,7 @@ pub async fn check_device(opts: &ConnectOptions) -> Result<DeviceCheck, NetconfE
         }
         Ok(Err(e)) => Ok(stop(check, progress, CheckStep::Request, e)),
         Err(_) => {
-            let e = NetconfError::timeout("rpc-recv");
+            let e = NetconfError::timeout("rpc-recv", limit, WHILE_CLOSING);
             Ok(stop(check, progress, CheckStep::Request, e))
         }
     }
@@ -2334,9 +2420,11 @@ mod target_tests {
 
 #[cfg(test)]
 mod stderr_tests {
+    use std::time::Duration;
+
     use super::{
-        MAX_STDERR, STDERR_CUT, Stderr, append_capped, close_outcome, ended, keep_late,
-        late_detail, with_stderr,
+        MAX_STDERR, STDERR_CUT, Stderr, WHILE_WAITING, append_capped, close_outcome, ended,
+        keep_late, late_detail, with_stderr,
     };
     use crate::error::{NetconfError, SshMessages, TransportError};
     use crate::redact::REDACTED;
@@ -2522,16 +2610,25 @@ mod stderr_tests {
     #[test]
     fn a_timeout_carries_what_the_device_wrote() {
         let e = with_stderr(
-            NetconfError::timeout("rpc-recv"),
+            NetconfError::timeout("rpc-recv", Duration::from_secs(30), WHILE_WAITING),
             wrote(&["commit: database locked\n"]).take(false),
         );
         assert_eq!(
             e.to_string(),
-            "timeout: rpc-recv; the device wrote on stderr: commit: database locked"
+            "timeout: rpc-recv after 30s, while waiting for an answer; the device wrote on \
+             stderr: commit: database locked"
         );
-        let NetconfError::Timeout { stderr, .. } = e else {
+        let NetconfError::Timeout {
+            limit,
+            during,
+            stderr,
+            ..
+        } = e
+        else {
             panic!("expected Timeout");
         };
+        assert_eq!(limit, Duration::from_secs(30));
+        assert_eq!(during, WHILE_WAITING);
         assert_eq!(stderr, "commit: database locked");
         let other = with_stderr(NetconfError::Policy("no".into()), Some("text".into()));
         assert!(matches!(other, NetconfError::Policy(_)), "{other:?}");
@@ -2599,5 +2696,25 @@ mod stderr_tests {
         assert_eq!(kept, "abcd");
         assert!(!append_capped(&mut kept, "ghi", 4));
         assert_eq!(kept, "abcd");
+    }
+}
+
+#[cfg(test)]
+mod empty_data_tests {
+    use super::skip_empty_data;
+
+    /// **An empty data message is skipped, not read as a close** (0.7.0). SSH allows
+    /// one, and an empty read is what says the peer closed. Data with bytes is handed
+    /// on, and only the first empty one is logged.
+    #[test]
+    fn an_empty_data_message_is_skipped_and_logged_once() {
+        let mut logged = false;
+        assert!(!skip_empty_data(b"<hello/>", &mut logged));
+        assert!(!logged, "data with bytes is not logged");
+        assert!(skip_empty_data(b"", &mut logged));
+        assert!(logged, "the first empty one is logged");
+        assert!(skip_empty_data(b"", &mut logged));
+        assert!(logged);
+        assert!(!skip_empty_data(b"]]>]]>", &mut logged));
     }
 }
