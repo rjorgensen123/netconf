@@ -120,7 +120,8 @@ impl russh::server::Handler for Handler {
         })
     }
 
-    async fn auth_password(&mut self, _: &str, _: &str) -> Result<ServerAuth, Self::Error> {
+    async fn auth_password(&mut self, user: &str, _: &str) -> Result<ServerAuth, Self::Error> {
+        LOGINS.lock().unwrap().push(user.to_string());
         Ok(match self.device {
             Device::RejectsPassword => ServerAuth::Reject {
                 proceed_with_methods: Some(MethodSet::from(
@@ -320,6 +321,20 @@ static SESSION_FAILED_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Every `netconf_subsystem_stderr` event, with all its fields as text, from every
 /// test in this file: the event has no `username`.
 static STDERR_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Every username a device was asked to let in with a password, in order, from
+/// every test in this file.
+static LOGINS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// How many times a device was asked to let `username` in with a password.
+fn logins_for(username: &str) -> usize {
+    LOGINS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|user| *user == username)
+        .count()
+}
 
 /// The events emitted for `username`.
 fn events_for(username: &str) -> Vec<String> {
@@ -558,6 +573,62 @@ async fn a_rejected_password_is_its_own_error_and_names_what_the_device_accepts(
             && text.contains("keyboard-interactive"),
         "{text}"
     );
+}
+
+/// **A device that presents another key than the pinned one is refused as
+/// `HostKey`, before the login**, through the transport and through the session:
+/// the error carries the key the device presented, and the password is never sent.
+/// The links of this chain have tests of their own with hand-made input; this one
+/// runs the chain against a device, so a russh that answered a refused key with
+/// another error would be seen here.
+#[tokio::test]
+async fn a_host_key_that_is_not_the_pinned_one_is_refused_before_the_login() {
+    let another_key = format!("SHA256:{}", "A".repeat(43));
+    let user = "pinned-another-key";
+
+    let mut opts = start(Device::ClosesCleanly, Timeouts::default()).await;
+    let presented = opts
+        .host_key
+        .replace(another_key.clone())
+        .expect("start pins the device's key");
+    opts.username = user.into();
+    match RusshTransport::connect(&opts).await {
+        Err(NetconfError::Transport(TransportError::HostKey { observed, .. })) => {
+            assert_eq!(observed.as_deref(), Some(presented.as_str()));
+        }
+        Err(e) => panic!("expected HostKey, got {e}"),
+        Ok(_) => panic!("a key that is not the pinned one was accepted"),
+    }
+    assert_eq!(
+        logins_for(user),
+        0,
+        "the password was sent after the key was refused"
+    );
+
+    let mut opts = start(Device::ClosesCleanly, Timeouts::default()).await;
+    opts.host_key = Some(another_key);
+    opts.username = user.into();
+    match netconf::NetconfSession::<RusshTransport>::connect(&opts).await {
+        Err(NetconfError::Transport(TransportError::HostKey { observed, .. })) => {
+            assert_eq!(observed.as_deref(), Some(presented.as_str()));
+        }
+        Err(e) => panic!("expected HostKey, got {e}"),
+        Ok(_) => panic!("a key that is not the pinned one was accepted"),
+    }
+    assert_eq!(
+        logins_for(user),
+        0,
+        "the password was sent after the key was refused"
+    );
+
+    // The record sees a login: with the device's own key pinned, the user is let in.
+    let mut opts = start(Device::ClosesCleanly, Timeouts::default()).await;
+    opts.username = user.into();
+    RusshTransport::connect(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the device's own key is pinned");
+    assert_eq!(logins_for(user), 1);
 }
 
 /// A device that sends its banner and never goes further: the key exchange stalls.
@@ -945,6 +1016,43 @@ async fn a_device_check_says_where_it_stopped_and_why() {
         )) => {}
         other => panic!("expected the subsystem to stop it, got {other:?}"),
     }
+}
+
+/// **A check against a device that presents another key than the pinned one stops at
+/// the SSH step**, with the `HostKey` error `connect` returns, and the report's
+/// fingerprint is the key the device presented.
+#[tokio::test]
+async fn a_device_check_stops_at_a_host_key_that_is_not_the_pinned_one() {
+    use netconf::russh_transport::{CheckStep, Verdict, check_device};
+    let mut opts = start(Device::ClosesCleanly, Timeouts::default()).await;
+    let presented = opts
+        .host_key
+        .replace(format!("SHA256:{}", "A".repeat(43)))
+        .expect("start pins the device's key");
+    let check = tokio::time::timeout(Duration::from_secs(20), check_device(&opts))
+        .await
+        .expect("the check outlived its limit")
+        .map_err(|e| e.to_string())
+        .expect("the check was started");
+
+    assert_eq!(check.verdict(), Verdict::Dead, "{check}");
+    match check.stopped() {
+        Some((
+            CheckStep::Ssh,
+            NetconfError::Transport(TransportError::HostKey { observed, .. }),
+        )) => assert_eq!(observed.as_deref(), Some(presented.as_str())),
+        other => panic!("expected the host key to stop it, got {other:?}"),
+    }
+    let steps: Vec<CheckStep> = check.steps().iter().map(|(step, _)| *step).collect();
+    assert_eq!(steps, [CheckStep::Tcp]);
+    assert_eq!(check.fingerprint(), Some(presented.as_str()));
+    assert!(
+        check
+            .summary()
+            .starts_with("dead — stopped at the SSH handshake and host key"),
+        "{}",
+        check.summary()
+    );
 }
 
 /// **A login that never answers stops the check at the login, within its limit**

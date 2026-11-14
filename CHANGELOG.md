@@ -148,6 +148,8 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-14 — The docs say what the code does: the error model beyond its three main
   branches, that the time limits are the transport's to keep, what `Policy` covers, and what
   the docs test checks. That test now also collects `pub async fn` and `pub const fn` names.
+- 2026-11-14 — Tests hold in place a host key that is not the pinned one, from end to end;
+  every outcome of `abort_change`; and the redaction of what a device says over SSH.
 
 ## [0.6.1] — 2026-10-05
 

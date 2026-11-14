@@ -768,6 +768,118 @@ async fn a_close_with_something_said_over_ssh_is_not_clean() {
     }
 }
 
+/// A transport that hands out its pieces, and when it is closed returns `said` as
+/// what the device said over SSH.
+struct SaysOverSsh {
+    inbound: std::collections::VecDeque<Vec<u8>>,
+    said: netconf::error::SshMessages,
+}
+
+#[async_trait::async_trait]
+impl netconf::NetconfTransport for SaysOverSsh {
+    async fn connect(_: &netconf::ConnectOptions) -> Result<Self, netconf::NetconfError> {
+        unreachable!("built directly and handed to establish")
+    }
+    async fn send(&mut self, _: &[u8]) -> Result<(), netconf::NetconfError> {
+        Ok(())
+    }
+    async fn recv(&mut self) -> Result<bytes::Bytes, netconf::NetconfError> {
+        Ok(self.inbound.pop_front().unwrap_or_default().into())
+    }
+    async fn close(self) -> Result<netconf::error::SshMessages, netconf::NetconfError> {
+        Ok(self.said)
+    }
+}
+
+/// The secret the devices here say over SSH, as Junos writes the value.
+const SAID_SECRET: &str = "\"$9$example-ssh-leak\"";
+
+/// What a device says over SSH, with `secret` as the value of a Junos `secret`
+/// statement in each text the session redacts under its policy: the login banner,
+/// an exit signal's message and a disconnect's description.
+fn said_over_ssh(secret: &str) -> netconf::error::SshMessages {
+    netconf::error::SshMessages {
+        banner: Some(format!(
+            "Authorized use only\nsecret {secret};\nmaintenance window"
+        )),
+        exit_signal: Some(netconf::error::ExitSignal {
+            name: "TERM".into(),
+            core_dumped: false,
+            message: format!("netconf stopped\nsecret {secret};\nby the operator"),
+            language: "en".into(),
+        }),
+        disconnect: Some(netconf::error::SshDisconnect {
+            code: 11,
+            description: format!("going down\nsecret {secret};\nfor maintenance"),
+            language: "en".into(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// What `close()` hands over under `policy`, from a device that answers
+/// `<close-session/>` and has said `said_over_ssh(SAID_SECRET)`.
+async fn close_having_said(policy: netconf::ConfigPolicy) -> netconf::session::SessionEnd {
+    let ok = format!("<rpc-reply xmlns=\"{}\"><ok/></rpc-reply>", rpc::BASE_1_0);
+    let t = SaysOverSsh {
+        inbound: vec![hello(false), encode(Framing::Eom, ok.as_bytes())].into(),
+        said: said_over_ssh(SAID_SECRET),
+    };
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    s.set_policy(policy);
+    s.close().await.expect("the device answers the close")
+}
+
+/// **What the device said over SSH is handed over by `close()` with its secrets
+/// redacted under the ordinary policy**: the banner, the exit signal's message and
+/// the disconnect's description, each with the secret replaced and the words around
+/// it kept.
+#[tokio::test]
+async fn what_the_device_said_over_ssh_is_redacted_in_the_close() {
+    let end = close_having_said(netconf::ConfigPolicy::with_default_floor()).await;
+    let redacted = said_over_ssh(netconf::REDACTED);
+    assert_eq!(end.ssh.banner, redacted.banner);
+    assert_eq!(end.ssh.exit_signal, redacted.exit_signal);
+    assert_eq!(end.ssh.disconnect, redacted.disconnect);
+}
+
+/// **Under a policy that lets secrets through, what the device said over SSH is
+/// handed over by `close()` as it was sent**: the banner, the exit signal's message
+/// and the disconnect's description.
+#[tokio::test]
+async fn what_the_device_said_over_ssh_comes_as_sent_under_allow_secrets() {
+    let end = close_having_said(netconf::ConfigPolicy::with_default_floor().allow_secrets()).await;
+    let sent = said_over_ssh(SAID_SECRET);
+    assert_eq!(end.ssh.banner, sent.banner);
+    assert_eq!(end.ssh.exit_signal, sent.exit_signal);
+    assert_eq!(end.ssh.disconnect, sent.disconnect);
+}
+
+/// **A `Closed` that carries what the device said over SSH reaches the caller with
+/// the banner's secret redacted** under the ordinary policy.
+#[tokio::test]
+async fn a_closed_connection_carries_the_banner_redacted() {
+    use netconf::{NetconfError, TransportError};
+    let t = StopsWith {
+        inbound: vec![hello(false)].into(),
+        end: || {
+            NetconfError::Transport(TransportError::Closed {
+                detail: "the device closed the netconf subsystem".into(),
+                partial: String::new(),
+                ssh: Box::new(said_over_ssh(SAID_SECRET)),
+            })
+        },
+    };
+    let mut s = NetconfSession::establish(t, true).await.unwrap();
+    s.set_policy(netconf::ConfigPolicy::with_default_floor());
+    match s.rpc("<get-configuration/>").await {
+        Err(NetconfError::Transport(TransportError::Closed { ssh, .. })) => {
+            assert_eq!(ssh.banner, said_over_ssh(netconf::REDACTED).banner);
+        }
+        other => panic!("expected Closed, got {other:?}"),
+    }
+}
+
 /// **The hello goes out through the policy's filter** (0.5.13), as a reply does:
 /// redacted without `allow_secrets`, as the device sent it with.
 #[tokio::test]

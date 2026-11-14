@@ -532,10 +532,128 @@ async fn an_abort_reports_a_failed_discard() {
     let (mut s, _log) = session(vec![ok_reply(), discard_error, ok_reply()]).await;
     s.lock().await.unwrap();
     // The unlock went through, and its answer goes with the discard's error (0.5.13).
-    match after_cleanup(s.abort_change().await) {
-        Err(NetconfError::Device(d)) => assert_eq!(d.message.as_deref(), Some("discard refused")),
-        other => panic!("expected the discard's Device error, got {other:?}"),
+    match s.abort_change().await {
+        Err(NetconfError::WithReplies { replies, error }) => {
+            let steps: Vec<_> = replies.iter().map(|(step, _)| *step).collect();
+            assert_eq!(steps, ["unlock"]);
+            match *error {
+                NetconfError::Device(d) => {
+                    assert_eq!(d.message.as_deref(), Some("discard refused"))
+                }
+                other => panic!("expected the discard's Device error, got {other:?}"),
+            }
+        }
+        other => panic!("expected WithReplies, got {other:?}"),
     }
+}
+
+/// A reply that refuses the request, in the device's words `message`.
+fn refusal(message: &str) -> Vec<u8> {
+    eom(&format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><rpc-error>\
+         <error-tag>operation-failed</error-tag>\
+         <error-message>{message}</error-message></rpc-error></rpc-reply>"
+    ))
+}
+
+/// An abort whose discard and unlock both go through returns the device's answer to
+/// each, by its RPC name, in the order they were sent.
+#[tokio::test]
+async fn an_abort_returns_the_answers_to_the_discard_and_the_unlock() {
+    let (mut s, log) = session(vec![ok_reply(), ok_reply(), ok_reply()]).await;
+    s.lock().await.unwrap();
+    let replies = s.abort_change().await.unwrap();
+    let steps: Vec<_> = replies.iter().map(|(step, _)| *step).collect();
+    assert_eq!(steps, ["discard-changes", "unlock"]);
+    let sent = sent_str(&log);
+    assert!(sent.contains("<discard-changes/>"), "{sent}");
+    assert!(sent.contains("<unlock>"), "{sent}");
+}
+
+/// An abort whose unlock fails reports the unlock's error, with the answer to the
+/// discard that went through before it.
+#[tokio::test]
+async fn an_abort_reports_a_failed_unlock_with_the_answer_to_the_discard() {
+    let (mut s, _log) = session(vec![ok_reply(), ok_reply(), refusal("unlock refused")]).await;
+    s.lock().await.unwrap();
+    match s.abort_change().await {
+        Err(NetconfError::WithReplies { replies, error }) => {
+            let steps: Vec<_> = replies.iter().map(|(step, _)| *step).collect();
+            assert_eq!(steps, ["discard-changes"]);
+            match *error {
+                NetconfError::Device(d) => {
+                    assert_eq!(d.message.as_deref(), Some("unlock refused"))
+                }
+                other => panic!("expected the unlock's Device error, got {other:?}"),
+            }
+        }
+        other => panic!("expected WithReplies, got {other:?}"),
+    }
+}
+
+/// An abort whose discard and unlock both fail reports both: the discard's error,
+/// and the unlock as the one cleanup step that failed after it, with its own error.
+#[tokio::test]
+async fn an_abort_reports_a_failed_discard_and_a_failed_unlock() {
+    let (mut s, _log) = session(vec![
+        ok_reply(),
+        refusal("discard refused"),
+        refusal("unlock refused"),
+    ])
+    .await;
+    s.lock().await.unwrap();
+    match s.abort_change().await {
+        Err(NetconfError::CleanupFailed { error, cleanup }) => {
+            match *error {
+                NetconfError::Device(d) => {
+                    assert_eq!(d.message.as_deref(), Some("discard refused"))
+                }
+                other => panic!("expected the discard's Device error, got {other:?}"),
+            }
+            let steps: Vec<_> = cleanup.iter().map(|(step, _)| *step).collect();
+            assert_eq!(steps, ["unlock"]);
+            match &cleanup[0].1 {
+                NetconfError::Device(d) => {
+                    assert_eq!(d.message.as_deref(), Some("unlock refused"))
+                }
+                other => panic!("expected the unlock's Device error, got {other:?}"),
+            }
+        }
+        other => panic!("expected CleanupFailed, got {other:?}"),
+    }
+}
+
+/// An abort whose discard gets no answer sends no unlock: the session is out of
+/// step, and refuses the unlock before anything is sent. The unlock is reported as
+/// the cleanup step that failed, with that refusal. The mock runs out of replies
+/// after the lock, which is what a connection breaking looks like from here.
+#[tokio::test]
+async fn an_abort_whose_discard_gets_no_answer_sends_no_unlock() {
+    let (mut s, log) = session(vec![ok_reply()]).await;
+    s.lock().await.unwrap();
+    match s.abort_change().await {
+        Err(NetconfError::CleanupFailed { error, cleanup }) => {
+            assert!(
+                matches!(
+                    *error,
+                    NetconfError::Transport(netconf::TransportError::Closed { .. })
+                ),
+                "the discard's failure comes back as it is: {error:?}"
+            );
+            let steps: Vec<_> = cleanup.iter().map(|(step, _)| *step).collect();
+            assert_eq!(steps, ["unlock"]);
+            match &cleanup[0].1 {
+                NetconfError::Protocol { detail, .. } => {
+                    assert!(detail.contains("out of step"), "{detail}");
+                    assert!(detail.contains("request 2 (<discard-changes>)"), "{detail}");
+                }
+                other => panic!("expected the out-of-step refusal, got {other:?}"),
+            }
+        }
+        other => panic!("expected CleanupFailed, got {other:?}"),
+    }
+    let sent = sent_str(&log);
+    assert!(!sent.contains("<unlock"), "{sent}");
 }
 
 /// **The candidate is discarded only under the session's own lock** (0.7.0). It is
