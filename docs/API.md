@@ -233,6 +233,10 @@ What each policy offers, in order of preference:
 | cipher | `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`, `aes256-ctr`, `aes192-ctr`, `aes128-ctr` | `aes256-cbc`, `aes192-cbc`, `aes128-cbc` |
 | MAC | `hmac-sha2-512-etm@openssh.com`, `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512`, `hmac-sha2-256` | `hmac-sha1-etm@openssh.com`, `hmac-sha1` |
 
+Every policy also asks for strict key exchange (`kex-strict-c-v00@openssh.com`), the countermeasure
+to the Terrapin attack (CVE-2023-48795). The name goes last in the key exchange list but is not an
+algorithm, and it has an effect only with a device that supports it.
+
 `3des-cbc` is in `LEGACY_ALGORITHMS`, so it is marked when seen, but **no policy offers it**.
  `LegacyJunos` offers everything russh 0.65 has for the R14 to Evo span;
  the two full-strength additions are not legacy, the SHA-1 group exchange and

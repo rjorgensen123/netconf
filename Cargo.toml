@@ -42,9 +42,10 @@ tracing = "0.1"
 # the ring backend the rest of the stack uses. We pick ring explicitly.
 #
 # `rsa` covers RSA host keys, which are common on Junos; `flate2` is SSH
-# compression and is a russh default. `des` is DELIBERATELY absent (since 0.3.2):
-# 3des-cbc protected nothing.
-russh = { version = "0.65", optional = true, default-features = false, features = ["ring", "rsa", "flate2"] }
+# compression and is a russh default. `dsa` covers DSA host keys (`ssh-dss`),
+# which `LegacyJunos` offers for old Junos. `des` is DELIBERATELY absent (since
+# 0.3.2): 3des-cbc protected nothing.
+russh = { version = "0.65", optional = true, default-features = false, features = ["ring", "rsa", "flate2", "dsa"] }
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros", "rt"], optional = true }
 # Zeroizes the transient copy of the password we have to make before russh takes
 # it (feature-gated, same as the transport itself).

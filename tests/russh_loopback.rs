@@ -64,6 +64,8 @@ enum Device {
     Chatty,
     /// Sends its hello when the subsystem opens, and answers nothing after it.
     HelloThenSilent,
+    /// Has only a DSA host key, so offers only `ssh-dss`, and opens the subsystem.
+    DsaHostKey,
 }
 
 /// What the devices that explain themselves write on stderr: a line to read, and
@@ -73,6 +75,42 @@ const EXPLANATION: &str = "netconf: database locked by another session\n\
 
 /// The banner the devices that say goodbye show before the login.
 const BANNER: &str = "Authorized use only\nmaintenance window 22:00-23:00";
+
+/// The host key of the `DsaHostKey` device: a DSA key made for this test and used
+/// nowhere else, built from its numbers.
+fn test_dsa_host_key() -> russh::keys::PrivateKey {
+    use russh::keys::ssh_key::Mpint;
+    use russh::keys::ssh_key::private::{DsaKeypair, DsaPrivateKey};
+    use russh::keys::ssh_key::public::DsaPublicKey;
+
+    // In big-endian hex: the prime modulus p, the prime divisor q of p - 1, the
+    // generator g, the public key y = g^x mod p, and the private key x.
+    let p = "9b3eef5f85dc9172e92b049bda218d98bdb762c7fe29cd74fc0dbab7ab991bcf\
+             7c2070dd549241913c13efa354aa77d5203e839191372911fbd71321946d193c\
+             b48bd70ef3e0338610c2a64a5bb3c248e5f36226d4de1821c489057e9755b0b0\
+             6970d8e1b7ec7cd3b320a1dea96dfc16635a2ec02b1d61deddfe56884bc5b861";
+    let q = "cc724b982e460ee56a965a086def102a18b47b3f";
+    let g = "1eb9c630cd32572d0fd8b7509bc661cbc818745f0c4c9bb488910dc6eb91460d\
+             4d1ea1c7282c66e8b7fc5c3a541ed05d355d8adfe8ff5c0b60f3894bcd575707\
+             7eb399d05ec5d94916065daf3f1ab04af386a29e9fd2b5e69cf0b7ff48ec8da5\
+             de3e4aed424eed8c6d6f20a04e9eb37cb70bf9d30a48bb33b503fa4ebe77a144";
+    let y = "9ad25a0d663bfe096081fcdf735c2273c52aee12def65794a05c480cab2f243d\
+             19e63d07eddf0040f13d27f0834939a31c33d4f18f4d6a4c8b5dd5879b353c81\
+             a3fd44c3fbc9f353dbe8f1a527d0091507e41e283abb8e2810f5a27e821c7686\
+             c996be41472be2bbda3c6f4feb6ed54dd1a74be322792ca8f122d0346b2b764c";
+    let x = "af289b19241e5e110f60f4e3ccf29166b7ec7c14";
+    let number = |hex: &str| {
+        assert!(hex.len().is_multiple_of(2), "an odd number of hex digits");
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        Mpint::from_positive_bytes(&bytes)
+    };
+    let public = DsaPublicKey::new(number(p), number(q), number(g), number(y)).unwrap();
+    let private = DsaPrivateKey::new(number(x)).unwrap();
+    DsaKeypair::new(public, private).unwrap().into()
+}
 
 impl Device {
     /// The username each device is connected to as, so the events of one test can
@@ -94,6 +132,7 @@ impl Device {
             Device::DripsOnStderr => "drips-on-stderr",
             Device::Chatty => "chatty",
             Device::HelloThenSilent => "hello-then-silent",
+            Device::DsaHostKey => "dsa-host-key",
         }
     }
 }
@@ -168,7 +207,8 @@ impl russh::server::Handler for Handler {
             | Device::NeverAnswersLogin
             | Device::EndsTheSubsystem
             | Device::Disconnects
-            | Device::DataAfterEof => session.channel_success(channel),
+            | Device::DataAfterEof
+            | Device::DsaHostKey => session.channel_success(channel),
             Device::ClosesCleanly | Device::Chatty | Device::HelloThenSilent => {
                 session.channel_success(channel)?;
                 if let Device::Chatty = self.device {
@@ -270,15 +310,30 @@ const WINDOW: u32 = 32 * 1024;
 /// host key pinned, and `timeouts` as given.
 async fn start(device: Device, timeouts: Timeouts) -> ConnectOptions {
     capture_events();
-    let key = russh::keys::PrivateKey::from(
-        russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[7; 32]),
-    );
+    let (key, preferred) = match device {
+        // russh's server offers only the host key algorithms in its own list, and its
+        // default list has no `ssh-dss`.
+        Device::DsaHostKey => (
+            test_dsa_host_key(),
+            russh::Preferred {
+                key: std::borrow::Cow::Borrowed(&[russh::keys::Algorithm::Dsa]),
+                ..Default::default()
+            },
+        ),
+        _ => (
+            russh::keys::PrivateKey::from(
+                russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[7; 32]),
+            ),
+            russh::Preferred::default(),
+        ),
+    };
     let pin = key
         .public_key()
         .fingerprint(russh::keys::HashAlg::Sha256)
         .to_string();
     let config = Arc::new(russh::server::Config {
         keys: vec![key],
+        preferred,
         window_size: WINDOW,
         auth_rejection_time: Duration::ZERO,
         ..Default::default()
@@ -629,6 +684,44 @@ async fn a_host_key_that_is_not_the_pinned_one_is_refused_before_the_login() {
         .map_err(|e| e.to_string())
         .expect("the device's own key is pinned");
     assert_eq!(logins_for(user), 1);
+}
+
+/// **A device whose only host key is DSA is reached under `LegacyJunos`** (0.7.0):
+/// its `ssh-dss` signature over the key exchange is verified, its key is the pinned
+/// one, and it opens the subsystem.
+#[tokio::test]
+async fn a_dsa_host_key_is_verified_under_legacy_junos() {
+    let mut opts = start(Device::DsaHostKey, Timeouts::default()).await;
+    opts.ssh_policy = SshPolicy::LegacyJunos;
+    let pin = opts.host_key.clone().expect("start pins the device's key");
+
+    let transport = RusshTransport::connect(&opts)
+        .await
+        .map_err(|e| e.to_string())
+        .expect("the DSA host key is verified");
+    assert_eq!(transport.observed_host_key(), Some(pin));
+    let events = events_for(Device::DsaHostKey.username());
+    assert!(
+        events.iter().any(|e| e == "ssh_session_established"),
+        "{events:?}"
+    );
+}
+
+/// **`Modern` does not offer `ssh-dss`** (0.7.0): against a device that has only a
+/// DSA host key, the connect fails as `Negotiation`, carrying what the device
+/// offered, and not as `HostKey`, though its key is the pinned one.
+#[tokio::test]
+async fn modern_finds_no_common_host_key_with_a_dsa_only_device() {
+    let opts = start(Device::DsaHostKey, Timeouts::default()).await;
+    assert!(matches!(opts.ssh_policy, SshPolicy::Modern));
+
+    match RusshTransport::connect(&opts).await {
+        Err(NetconfError::Transport(TransportError::Negotiation { offered, .. })) => {
+            assert_eq!(offered, ["ssh-dss"]);
+        }
+        Err(e) => panic!("expected Negotiation, got {e}"),
+        Ok(_) => panic!("Modern negotiated a DSA host key"),
+    }
 }
 
 /// A device that sends its banner and never goes further: the key exchange stalls.

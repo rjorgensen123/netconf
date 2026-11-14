@@ -57,6 +57,12 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-14 — A commit comment is checked before it is sent: one line of printable ASCII and
   a tab, at most 512 characters (`MAX_COMMIT_COMMENT`), under every policy. It went into the
   request as it stood.
+- 2026-11-14 — Every SSH policy asks for strict key exchange
+  (`kex-strict-c-v00@openssh.com`), the countermeasure to the Terrapin attack
+  (CVE-2023-48795). It was never asked for.
+- 2026-11-14 — A DSA host key (`ssh-dss`) is verified under `LegacyJunos`: russh is built
+  with its `dsa` feature. The policy offered the algorithm, and its signature could not be
+  checked.
 
 ### Added
 

@@ -1200,13 +1200,13 @@ fn warn_legacy_once(host: &str) -> bool {
 
 /// The preferred algorithms for each policy.
 ///
-/// russh's `Preferred::DEFAULT` is deliberately modern-only — no SHA-1 key exchange,
-/// no `ssh-rsa`, no CBC or 3DES — and **fails against older releases**, so the lists
-/// are set explicitly here.
+/// russh's `Preferred::DEFAULT` has `ssh-rsa`, but no SHA-1 key exchange and no CBC
+/// or 3DES, and **fails against older releases**, so the lists are set explicitly here.
 ///
 /// `LegacyJunos` is a **superset**: the modern algorithms come first and the legacy
-/// ones form the tail. The peer chooses, so a modern device uses modern algorithms
-/// regardless. That is why the policy is *permitting* rather than *preferring*.
+/// ones form the tail. SSH uses the first algorithm in the client's list that the
+/// device also has, so a modern device uses modern algorithms regardless. That is why
+/// the policy is *permitting* rather than *preferring*.
 ///
 /// A known limit of the library beneath us: russh 0.65 has no `hmac-md5`. A device
 /// offering ONLY that cannot be reached through this transport at all, and would need
@@ -1225,6 +1225,10 @@ fn preferred_for(policy: &SshPolicy) -> russh::Preferred {
         kex::ECDH_SHA2_NISTP256,
         kex::ECDH_SHA2_NISTP384,
         kex::ECDH_SHA2_NISTP521,
+        // Not an algorithm: it asks the device for strict key exchange, the
+        // countermeasure to the Terrapin attack (CVE-2023-48795), and has an effect
+        // only when the device supports it.
+        kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
     ];
     const MODERN_KEY: &[Algorithm] = &[
         Algorithm::Ed25519,
@@ -1274,6 +1278,8 @@ fn preferred_for(policy: &SshPolicy) -> russh::Preferred {
         kex::DH_G14_SHA1,
         kex::DH_GEX_SHA1,
         kex::DH_G1_SHA1,
+        // Not an algorithm: the request for strict key exchange, as in `MODERN_KEX`.
+        kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
     ];
     const LEGACY_KEY: &[Algorithm] = &[
         Algorithm::Ed25519,
@@ -2716,5 +2722,49 @@ mod empty_data_tests {
         assert!(skip_empty_data(b"", &mut logged));
         assert!(logged);
         assert!(!skip_empty_data(b"]]>]]>", &mut logged));
+    }
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::preferred_for;
+    use crate::transport::SshPolicy;
+    use russh::kex;
+
+    /// **Every policy asks for strict key exchange** (0.7.0), the countermeasure to
+    /// the Terrapin attack. The marker is in the key exchange list once and last, and
+    /// `ext-info-c` is not: netconf logs in by password only. The entries before the
+    /// marker are the policy's algorithms, unchanged and in order.
+    #[test]
+    fn every_policy_asks_for_strict_key_exchange() {
+        let modern = [
+            kex::CURVE25519,
+            kex::CURVE25519_PRE_RFC_8731,
+            kex::DH_G16_SHA512,
+            kex::DH_G14_SHA256,
+            kex::ECDH_SHA2_NISTP256,
+            kex::ECDH_SHA2_NISTP384,
+            kex::ECDH_SHA2_NISTP521,
+        ];
+        let legacy_tail = [
+            kex::DH_G18_SHA512,
+            kex::DH_GEX_SHA256,
+            kex::DH_G14_SHA1,
+            kex::DH_GEX_SHA1,
+            kex::DH_G1_SHA1,
+        ];
+        let legacy: Vec<kex::Name> = modern.iter().chain(&legacy_tail).copied().collect();
+        let marker = kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT;
+
+        for (policy, name, algorithms) in [
+            (SshPolicy::Modern, "Modern", &modern[..]),
+            (SshPolicy::LegacyJunos, "LegacyJunos", &legacy[..]),
+        ] {
+            let list = preferred_for(&policy).kex;
+            assert_eq!(list.iter().filter(|k| **k == marker).count(), 1, "{name}");
+            assert_eq!(list.last(), Some(&marker), "{name}");
+            assert!(!list.contains(&kex::EXTENSION_SUPPORT_AS_CLIENT), "{name}");
+            assert_eq!(&list[..list.len() - 1], algorithms, "{name}");
+        }
     }
 }

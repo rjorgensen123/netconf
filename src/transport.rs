@@ -148,17 +148,20 @@ pub fn is_legacy(algorithm: &str) -> bool {
 /// *permitted*, not *preferred*.
 ///
 /// `Modern` and `LegacyJunos` genuinely affect the negotiation. `Modern` is today's
-/// recommendation; `LegacyJunos` appends SHA-1 key exchange, `ssh-rsa`, CBC and
-/// `hmac-sha1` as a tail, so that older releases remain reachable. No policy offers
-/// 3DES (removed in 0.3.2). The exact lists are in `docs/API.md`.
+/// recommendation; `LegacyJunos` appends SHA-1 key exchange, `ssh-rsa`, `ssh-dss`,
+/// CBC and `hmac-sha1` as a tail, so that older releases remain reachable. No policy
+/// offers 3DES (removed in 0.3.2). The exact lists are in `docs/API.md`.
+///
+/// Every policy asks for strict key exchange, the countermeasure to the Terrapin
+/// attack, which takes effect only where the device supports it.
 pub enum SshPolicy {
     /// curve25519, ecdh-nistp and SHA-2 Diffie-Hellman; ed25519, ecdsa and rsa-sha2
     /// host keys; chacha20, aes-gcm and aes-ctr; hmac-sha2, encrypt-then-MAC first.
     /// Newer releases.
     Modern,
     /// Modern plus SHA-1 key exchange — group14-sha1 and the 1024-bit group1-sha1 —
-    /// ssh-rsa with SHA-1 signatures, aes-cbc as a last resort, and hmac-sha1. For
-    /// older releases.
+    /// ssh-rsa with SHA-1 signatures, ssh-dss, aes-cbc as a last resort, and
+    /// hmac-sha1. For older releases.
     LegacyJunos,
     /// The caller's own algorithm lists. **Not built:** the SSH transport refuses it
     /// before connecting — `connect`, `observe_host_key` and `check_device` alike —

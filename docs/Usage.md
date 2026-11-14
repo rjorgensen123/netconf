@@ -105,7 +105,9 @@ ssh_policy: SshPolicy::LegacyJunos,
 
 Older devices require SSH algorithms that modern libraries have stopped offering. `LegacyJunos` is
 a **superset** of `Modern`: the modern algorithms are still negotiated first, and SHA-1 key
-exchange, `ssh-rsa`, CBC ciphers and `hmac-sha1` are allowed in addition. No policy offers 3DES.
+exchange, `ssh-rsa`, `ssh-dss`, CBC ciphers and `hmac-sha1` are allowed in addition. No policy
+offers 3DES. Every policy asks for strict key exchange against the Terrapin attack; it takes effect
+only where the device supports it.
 `SshPolicy::Custom` is refused at connect: netconf does not negotiate with an algorithm list other
 than one it implements. It is planned for a coming release, with no promise of when.
 
