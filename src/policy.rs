@@ -222,6 +222,22 @@ fn is_nested_configuration(token: &str) -> bool {
         .any(|n| n.eq_ignore_ascii_case(token))
 }
 
+/// The refusal of a path whose first word is a [`NESTED_CONFIGURATIONS`] keyword in
+/// another case than lowercase (0.7.0), or `None`. A keyword is lowercase, as the
+/// device reads it, and it is recognised here in any case so that the refusal can
+/// name it.
+fn nested_keyword_refusal(path: &[String]) -> Option<String> {
+    let written = path.first()?;
+    NESTED_CONFIGURATIONS
+        .iter()
+        .find(|keyword| **keyword != written.as_str() && keyword.eq_ignore_ascii_case(written))
+        .map(|keyword| {
+            format!(
+                "keywords are lowercase, as the device reads them: «{written}» is not «{keyword}»"
+            )
+        })
+}
+
 /// Known top-level `[edit]` hierarchies — the union across the platform range, both
 /// classic Junos and Evo.
 ///
@@ -1063,6 +1079,20 @@ impl ConfigPolicy {
             }
             Mode::Rules => {}
         }
+        // Under `logical-systems <name>` and `tenants <name>`, the path under the name.
+        let nested = c.path.len() >= 2 && is_nested_configuration(&c.path[0]);
+        let inner = if nested { &c.path[2..] } else { &[][..] };
+        // `logical-systems` and `tenants` are keywords, and lowercase only (0.7.0): at
+        // the start of the path, and of the path under a nested system, which is read
+        // as a top level too.
+        if let Some(reason) =
+            nested_keyword_refusal(&c.path).or_else(|| nested_keyword_refusal(inner))
+        {
+            return Err(Violation {
+                change: c.clone(),
+                reason,
+            });
+        }
         // The absolute floor: never remove a top-level tree itself, which is a
         // single token.
         // Compared case-insensitively. Junos itself is forgiving about case, so a
@@ -1079,8 +1109,6 @@ impl ConfigPolicy {
         // nor emptied with `*` — and what is under it is judged as it would be at the
         // top level, by the floor and by the rules.
         let whole = |path: &[String]| path.len() == 1 || (path.len() == 2 && path[1] == "*");
-        let nested = c.path.len() >= 2 && is_nested_configuration(&c.path[0]);
-        let inner = if nested { &c.path[2..] } else { &[][..] };
         let floor = |path: &[String]| {
             c.op == Op::Delete
                 && whole(path)
@@ -1120,24 +1148,57 @@ impl ConfigPolicy {
         }
         // Paths are compared exactly, because Junos names are case-sensitive:
         // `policy-statement EXPORT` and `export` are different things, and a loose
-        // match would let a rule for one approve the other. The refusal stands. But
-        // if the same path in lowercase WOULD be allowed, the reason says so, since
-        // «no rule allows this» otherwise reads as though no rule existed at all.
-        let lower: Vec<String> = c.path.iter().map(|t| t.to_ascii_lowercase()).collect();
-        let only_case = lower != c.path
-            && self
-                .rules
-                .iter()
-                .any(|r| r.ops.contains(&c.op) && matches_pattern(&r.pattern, r.m, &lower));
-        let reason = if only_case {
-            "default-deny: no rule allows this (op, path) — paths are case-sensitive, and \
-             the same path in lowercase would be allowed"
-        } else {
-            "default-deny: no rule allows this (op, path)"
+        // match would let a rule for one approve the other. The refusal stands. When a
+        // rule would allow the path in another case, the reason names the first word
+        // that differs and what the rule has (0.7.0), from the first such rule. A rule
+        // is passed over when the path with that word as the rule has it is one the
+        // keyword rule refuses, and no word is named when the path or the rule holds
+        // what the redaction would hide.
+        let case_hint = self
+            .rules
+            .iter()
+            .filter(|r| r.ops.contains(&c.op))
+            .find_map(|r| {
+                // The first word that differs, as its place in the change's path and
+                // the rule's literal, in the path as written or the path under a
+                // nested system, whichever the rule matches first with case ignored.
+                let (at, literal) = std::iter::once((0, c.path.as_slice()))
+                    .chain((!inner.is_empty()).then_some((2, inner)))
+                    .filter(|(_, path)| matches_pattern_ignoring_case(&r.pattern, r.m, path))
+                    .find_map(|(offset, path)| {
+                        r.pattern
+                            .iter()
+                            .zip(path)
+                            .enumerate()
+                            .find_map(|(i, (p, word))| match p {
+                                Pat::Lit(literal) if literal != word => Some((offset + i, literal)),
+                                _ => None,
+                            })
+                    })?;
+                // The keyword rule on the path so corrected, as applied above.
+                let mut corrected = c.path.clone();
+                corrected[at] = literal.clone();
+                let corrected_nested =
+                    corrected.len() >= 2 && is_nested_configuration(&corrected[0]);
+                let refused = nested_keyword_refusal(&corrected).is_some()
+                    || (corrected_nested && nested_keyword_refusal(&corrected[2..]).is_some());
+                (!refused).then_some((r, &c.path[at], literal))
+            });
+        let reason = match case_hint {
+            Some((r, written, literal))
+                if !crate::redact::contains_secrets(&c.path.join(" "))
+                    && !crate::redact::contains_secrets(&r.pattern()) =>
+            {
+                format!(
+                    "default-deny: no rule allows this (op, path) — paths are case-sensitive: \
+                     «{written}» is not «{literal}», which a rule allows"
+                )
+            }
+            _ => "default-deny: no rule allows this (op, path)".to_string(),
         };
         Err(Violation {
             change: c.clone(),
-            reason: reason.to_string(),
+            reason,
         })
     }
 }
@@ -1267,6 +1328,21 @@ fn matches_pattern(pattern: &[Pat], m: Match, path: &[String]) -> bool {
         Match::Node => path.len() == pattern.len() && prefix_matches(pattern, path),
         Match::Subtree => path.len() > pattern.len() && prefix_matches(pattern, path),
     }
+}
+
+/// [`matches_pattern`] with letters compared without regard to ASCII case (0.7.0).
+/// It finds the rule a path in the wrong case was meant for, so a refusal can name
+/// the word; it approves nothing.
+fn matches_pattern_ignoring_case(pattern: &[Pat], m: Match, path: &[String]) -> bool {
+    let length_fits = match m {
+        Match::Node => path.len() == pattern.len(),
+        Match::Subtree => path.len() > pattern.len(),
+    };
+    length_fits
+        && pattern.iter().zip(path).all(|(p, tok)| match p {
+            Pat::Star => true,
+            Pat::Lit(l) => l.eq_ignore_ascii_case(tok),
+        })
 }
 
 /// Why a set payload could not be parsed safely. **Fail-closed:** any of these must

@@ -224,13 +224,22 @@ road around it.
 
 ### Case — lowercase verbs, and paths as written
 
+**Keywords are lowercase; names are as written.** Junos's own words are written in lowercase: the
+verbs, `logical-systems` and `tenants`, and a command's keywords. The names you define — a
+prefix-list, a policy, a routing instance, a logical system's name — are compared exactly, as
+written.
+
 **Verbs are lowercase only.** `SET` is not a verb the filter knows, so the whole payload is
-rejected, and the refusal says that `SET` is not `set`.
+rejected, and the refusal says that `SET` is not `set`. A change under `LOGICAL-SYSTEMS` or
+`Tenants` is refused too by a policy with rules, and the refusal says that `LOGICAL-SYSTEMS` is not
+`logical-systems`; under `all_free` only the access level applies, as to every line.
 
 **Paths are compared exactly, case included.** Junos names are case-sensitive: `policy-statement
 EXPORT` and `policy-statement export` are two different things, and a rule for one must not let the
-other through. When a path is refused and the same path in lowercase would have been allowed, the
-refusal says so — the hint allows nothing.
+other through. When a path is refused and a rule would allow it in another case, the refusal names
+the word and what the rule has: `«export» is not «EXPORT», which a rule allows`. It names no word
+when the path or the rule holds what the redaction would hide, and it passes over a rule whose
+form the keyword rule above would refuse. The hint allows nothing.
 
 The floor is the one exception: it ignores case, so `delete System` is refused by the floor
 itself, not just because no rule happens to allow it.

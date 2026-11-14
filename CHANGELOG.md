@@ -134,6 +134,10 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-14 — The docs say that a name of your own that is one of the secret statement names,
   such as a routing instance named `secret`, is not supported: what follows it on the line is
   redacted. A community is the exception.
+- 2026-11-14 — `logical-systems` and `tenants` are keywords and are refused in another case,
+  as a verb is. A path refused only for its case names the word, `«Interfaces» is not
+  «interfaces», which a rule allows`, also under a logical system and when the rule holds an
+  upper-case name. The text replaces `the same path in lowercase would be allowed`.
 
 ## [0.6.1] — 2026-10-05
 

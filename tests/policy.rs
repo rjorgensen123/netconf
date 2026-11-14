@@ -976,12 +976,7 @@ fn a_path_in_the_wrong_case_is_refused_and_named_as_such() {
     let v = p
         .check(&[ch(Op::Set, &["Interfaces", "ge-0/0/1", "unit", "100"])])
         .expect_err("a path in the wrong case must still be refused");
-    assert!(v.reason.contains("default-deny"), "{}", v.reason);
-    assert!(
-        v.reason.contains("case-sensitive"),
-        "the case is not named: {}",
-        v.reason
-    );
+    assert_eq!(v.reason, case_hint("Interfaces", "interfaces"));
     // A path that no rule would allow in ANY case gets no such hint.
     let w = p
         .check(&[ch(Op::Set, &["System", "host-name", "x"])])
@@ -991,6 +986,250 @@ fn a_path_in_the_wrong_case_is_refused_and_named_as_such() {
         "a case hint where case is not the reason: {}",
         w.reason
     );
+}
+
+/// The bare default-deny reason: no rule allows the change, in any case.
+const DEFAULT_DENY: &str = "default-deny: no rule allows this (op, path)";
+
+/// The default-deny reason when a rule allows the path in another case: the path's
+/// word, and the rule's.
+fn case_hint(written: &str, literal: &str) -> String {
+    format!(
+        "{DEFAULT_DENY} — paths are case-sensitive: «{written}» is not «{literal}», which a \
+         rule allows"
+    )
+}
+
+/// The refusal of `logical-systems` or `tenants` written in another case.
+fn keyword_refusal(written: &str, keyword: &str) -> String {
+    format!("keywords are lowercase, as the device reads them: «{written}» is not «{keyword}»")
+}
+
+/// **Case is named under a logical system or a tenant too** (0.7.0): a rule
+/// matches the path under the system, and the hint reads it there.
+#[test]
+fn a_path_in_the_wrong_case_under_a_nested_configuration_is_named() {
+    let p = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rw);
+    for path in [
+        "logical-systems LS1 Interfaces ge-0/0/1 unit 100 description x",
+        "tenants T1 Interfaces ge-0/0/1 unit 100 description x",
+    ] {
+        let v = p.check(&[change(Op::Set, path)]).expect_err(path);
+        assert_eq!(v.reason, case_hint("Interfaces", "interfaces"), "{path}");
+    }
+}
+
+/// **A rule with an upper-case name gets the hint too** (0.7.0): the path is held
+/// against the rule as written, and the hint names the word and what the rule has.
+#[test]
+fn a_rule_with_an_upper_case_name_names_the_word_in_the_wrong_case() {
+    let p = ConfigPolicy::with_default_floor().allow(
+        "policy-options policy-statement EXPORT",
+        Match::Subtree,
+        &[Op::Set],
+    );
+    for (path, written, literal) in [
+        (
+            "policy-options policy-statement export term t then accept",
+            "export",
+            "EXPORT",
+        ),
+        (
+            "Policy-options policy-statement EXPORT term t then accept",
+            "Policy-options",
+            "policy-options",
+        ),
+    ] {
+        let v = p.check(&[change(Op::Set, path)]).expect_err(path);
+        assert_eq!(v.reason, case_hint(written, literal), "{path}");
+    }
+    assert!(
+        p.check(&[change(
+            Op::Set,
+            "policy-options policy-statement EXPORT term t then accept"
+        )])
+        .is_ok()
+    );
+}
+
+/// **`logical-systems` and `tenants` are keywords, lowercase only** (0.7.0). In
+/// another case they are refused before the floor and the rules; in lowercase they
+/// are judged as before.
+#[test]
+fn a_nested_keyword_in_another_case_is_refused() {
+    let p = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rw);
+    for (op, path, written, keyword) in [
+        (
+            Op::Set,
+            "LOGICAL-SYSTEMS LS1 interfaces ge-0/0/1 unit 100 description x",
+            "LOGICAL-SYSTEMS",
+            "logical-systems",
+        ),
+        (
+            Op::Set,
+            "Logical-Systems LS1 interfaces ge-0/0/1 unit 100 description x",
+            "Logical-Systems",
+            "logical-systems",
+        ),
+        (
+            Op::Set,
+            "TENANTS T1 interfaces ge-0/0/1 unit 100 description x",
+            "TENANTS",
+            "tenants",
+        ),
+        (
+            Op::Delete,
+            "LOGICAL-SYSTEMS LS1",
+            "LOGICAL-SYSTEMS",
+            "logical-systems",
+        ),
+    ] {
+        let v = p.check(&[change(op, path)]).expect_err(path);
+        assert_eq!(v.reason, keyword_refusal(written, keyword), "{path}");
+    }
+    assert!(
+        p.check(&[change(
+            Op::Set,
+            "logical-systems LS1 interfaces ge-0/0/1 unit 100 description x"
+        )])
+        .is_ok()
+    );
+    let v = p
+        .check(&[change(Op::Delete, "logical-systems LS1")])
+        .unwrap_err();
+    assert_eq!(
+        v.reason,
+        "absolute floor: cannot delete the top-level tree «logical-systems LS1»"
+    );
+}
+
+/// **The target of a `rename` or a `copy` is held to the same rule** (0.7.0).
+#[test]
+fn a_rename_or_copy_into_a_nested_keyword_in_another_case_is_refused() {
+    let units = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rwd);
+    for verb in ["copy", "rename"] {
+        let e = units
+            .check_set_payload(&format!(
+                "{verb} LOGICAL-SYSTEMS LS1 interfaces ge-0/0/0 unit 10 to unit 20"
+            ))
+            .unwrap_err();
+        assert_eq!(
+            e,
+            keyword_refusal("LOGICAL-SYSTEMS", "logical-systems"),
+            "{verb}"
+        );
+    }
+}
+
+/// **A logical system's name is a name, compared as written** (0.7.0): `ls1` and
+/// `LS1` are two systems, and the same grant reaches under both.
+#[test]
+fn a_nested_systems_name_is_compared_as_written() {
+    let p = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rw);
+    for name in ["ls1", "LS1"] {
+        let path = format!("logical-systems {name} interfaces ge-0/0/1 unit 100 description x");
+        assert!(p.check(&[change(Op::Set, &path)]).is_ok(), "{path}");
+    }
+}
+
+/// **No hint when case is not the cause** (0.7.0): a path that differs from every
+/// rule in more than case gets the bare default-deny.
+#[test]
+fn a_path_that_differs_in_more_than_case_gets_no_hint() {
+    let p = ConfigPolicy::with_default_floor().grant(Scope::LogicalUnits, Access::Rw);
+    let v = p
+        .check(&[change(Op::Set, "Interfaces ge-0/0/1 description x")])
+        .expect_err("a path no rule allows in any case must be refused");
+    assert_eq!(v.reason, DEFAULT_DENY);
+}
+
+/// **The hint names no word when the path holds a secret** (0.7.0): a word can be a
+/// secret by itself, or by the statement it follows, so the refusal is the bare one.
+#[test]
+fn a_case_hint_names_no_word_when_the_path_holds_a_secret() {
+    for (rule, path, secrets) in [
+        (
+            "system root-authentication encrypted-password $9$abcDEFghi",
+            "system root-authentication encrypted-password $9$ABCdefGHI",
+            ["$9$abcDEFghi", "$9$ABCdefGHI"],
+        ),
+        (
+            "system radius-server * secret Hunter2xyz",
+            "system radius-server 10.0.0.1 secret hunter2XYZ",
+            ["Hunter2xyz", "hunter2XYZ"],
+        ),
+    ] {
+        let p = ConfigPolicy::with_default_floor().allow(rule, Match::Node, &[Op::Set]);
+        let v = p.check(&[change(Op::Set, path)]).expect_err(path);
+        assert_eq!(v.reason, DEFAULT_DENY, "{path}");
+        for secret in secrets {
+            assert!(!v.reason.contains(secret), "{}", v.reason);
+        }
+    }
+}
+
+/// **The hint passes over a rule that begins with a nested keyword in another case**
+/// (0.7.0): `LOGICAL-SYSTEMS` is refused wherever a change begins with it, so such
+/// a rule is not one to point to.
+#[test]
+fn a_case_hint_passes_over_a_rule_with_a_nested_keyword_in_another_case() {
+    let p = ConfigPolicy::new(&[]).allow(
+        "LOGICAL-SYSTEMS * interfaces",
+        Match::Subtree,
+        &[Op::Set, Op::Delete],
+    );
+    let v = p
+        .check(&[change(
+            Op::Set,
+            "logical-systems LS1 interfaces ge-0/0/1 unit 100 description x",
+        )])
+        .expect_err("no rule allows this path");
+    assert_eq!(v.reason, DEFAULT_DENY);
+}
+
+/// **The hint passes over a rule whose form the keyword rule refuses** (0.7.0): a
+/// nested keyword in another case at the start of the path, or of the path under a
+/// nested system.
+#[test]
+fn a_case_hint_passes_over_a_rule_whose_form_the_keyword_rule_refuses() {
+    let p = ConfigPolicy::new(&[]).allow(
+        "logical-systems * LOGICAL-SYSTEMS * interfaces",
+        Match::Subtree,
+        &[Op::Set],
+    );
+    let v = p
+        .check(&[change(
+            Op::Set,
+            "logical-systems LS1 logical-systems LS9 interfaces ge-0/0/1 unit 1 description x",
+        )])
+        .expect_err("no rule allows this path");
+    assert_eq!(v.reason, DEFAULT_DENY);
+}
+
+/// **The path under a nested system is held to the keyword rule too** (0.7.0): it is
+/// read as a top level, so a nested keyword at its start is lowercase only.
+#[test]
+fn a_nested_keyword_in_another_case_under_a_nested_system_is_refused() {
+    let p = ConfigPolicy::new(&[]).allow(
+        "LOGICAL-SYSTEMS * interfaces",
+        Match::Subtree,
+        &[Op::Set, Op::Delete],
+    );
+    for (path, written, keyword) in [
+        (
+            "logical-systems LS1 LOGICAL-SYSTEMS LS2 interfaces ge-0/0/1 description x",
+            "LOGICAL-SYSTEMS",
+            "logical-systems",
+        ),
+        (
+            "logical-systems LS1 TENANTS T2 interfaces ge-0/0/1 description x",
+            "TENANTS",
+            "tenants",
+        ),
+    ] {
+        let v = p.check(&[change(Op::Set, path)]).expect_err(path);
+        assert_eq!(v.reason, keyword_refusal(written, keyword), "{path}");
+    }
 }
 
 // ---------------------------------------------------------------------------

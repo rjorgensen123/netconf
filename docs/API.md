@@ -934,7 +934,10 @@ device unchecked, and that is the bypass surface itself.
   refuses the payload: a candidate that was not read is no empty candidate.
 - **`edit` is not a verb**: it makes later lines relative to a new context, and the
   filter reads every line as a full path. It is `UnknownVerb`, with a message saying so.
-- **Case:** verbs are lowercase only — `SET` is `UnknownVerb`.
+- **Case:** verbs are lowercase only — `SET` is `UnknownVerb`. `logical-systems` and `tenants`
+  are keywords, lowercase only too: in another case a policy with rules refuses the change with
+  `keywords are lowercase, as the device reads them: «LOGICAL-SYSTEMS» is not «logical-systems»`;
+  under `all_free` only the access level applies, as to every line.
 
 A line-carrying `ParseError` (`EmptyPath`, `UnbalancedQuote`, `Comment`, `SingleQuote`, `Hash`, `Target`) holds the line
 **already redacted** with `redact_secrets`, because the text ends up in `NetconfError::Policy`
@@ -965,7 +968,14 @@ way: `$9$hunter2 x` is `unknown verb «$9$[SENSITIVE: …]» (denied, fail-close
 A pattern is space-separated tokens; `*` matches any one token, and every other token matches
 **exactly, case included** — Junos names are case-sensitive, and `policy-statement EXPORT` is not
 `export`. `Match::Node` matches a path of the same length; `Match::Subtree` a path **strictly
-longer** than the pattern, with the same prefix.
+longer** than the pattern, with the same prefix. The keywords the filter knows — the verbs,
+`logical-systems` and `tenants`, and a command's keywords — are lowercase; names are compared as
+written. When no rule allows a change and a rule for its operation would match it with case
+ignored — the path as written, or the path under a logical system or a tenant — the refusal names
+the first word that differs in the first such rule: `«export» is not «EXPORT», which a rule
+allows`. A rule is passed over when the path with that word as the rule has it would get the
+keyword refusal, and no word is named when the path or the rule holds what the redaction would
+hide. The hint approves nothing.
 
 `grant` adds these rules. The ops are `[Set]` for `Rw` and `[Set, Delete]` for `Rwd`; `Ro` adds
 nothing.
@@ -1018,13 +1028,17 @@ release:
 
 `check` returns the first `Violation`; its `reason` is one of:
 
+- `keywords are lowercase, as the device reads them: «<word>» is not «logical-systems»` (or
+  `tenants`) — when the path, the path under a logical system or a tenant, or the target of a
+  `rename` or `copy`, begins with one of the two in another case; before the floor and the rules
 - `absolute floor: cannot delete the top-level tree «<tree>»` — for a nested system itself,
   `«logical-systems <name>»`
 - `absolute floor: cannot delete the top-level tree «<tree>» of «logical-systems <name>»` (or
   `tenants`)
-- `default-deny: no rule allows this (op, path)` — followed by `— paths are case-sensitive, and
-  the same path in lowercase would be allowed` when that is true. The hint approves
-  nothing.
+- `default-deny: no rule allows this (op, path)` — followed by `— paths are case-sensitive:
+  «<word>» is not «<literal>», which a rule allows` when a rule would allow the path in another
+  case, unless the path or the rule holds what the redaction would hide; `<word>` is the path's
+  word, `<literal>` the rule's. The hint approves nothing.
 - `all-free: <access> does not allow <op>`
 - `all-deny: nothing is permitted`
 - `read-only: no change is permitted, whatever is granted`
