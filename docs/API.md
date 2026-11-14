@@ -706,8 +706,8 @@ newest), `user`, `client`, `date-time` and `log` — and `seconds`, the `junos:s
 `date_time()`, `seconds()` and `log()` give the one named, `None` when the device left it out. It
 is a read, refused without a policy; every text comes as the policy lets it through, then made
 printable. A reply without a first entry is `Protocol`. The crate reads what the device holds and
-judges nothing: a commit that took effect stands first, with the user it was made as and the
-comment it was sent with, and the consumer knows what it sent.
+judges nothing: a commit that took effect is in it, with the user it was made as, and the
+consumer knows what it sent.
 
 `commit` and `commit_confirmed` wait under `Timeouts::per_commit` when it is set, and under
 `per_rpc` when it is not; `commit_check` always waits under `per_rpc` (§1).
@@ -1340,7 +1340,7 @@ What is redacted:
 
 ---
 
-## 8. Error model — three branches the consumer tells apart programmatically
+## 8. Error model — what the consumer tells apart programmatically
 
 The error has three main branches — `Transport` (the connection: the network failed, or the options
 for it were refused before anything was sent), `Protocol` and `Device` — and beside them the
@@ -1836,7 +1836,7 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
   knows the shape of (§7). A secret written there in a form the filter does not know reaches the
   caller the text is handed to (§8). The text is kept out of the log, capped at 4096 bytes a
   session and wiped from memory for that reason.
-- A name of your own that is one of the secret statement names of §7 (`secret`, `token`, …) is not
-  supported, a community's name excepted: in set format and in text on one line it is read as that
-  statement, and what follows it on the line is redacted.
+- A name of your own that is one of the statement names of §7 that are a secret wherever they
+  stand (`secret`, `token`, …) is not supported, a community's name excepted: in set format and
+  in text on one line it is read as that statement, and what follows it on the line is redacted.
 

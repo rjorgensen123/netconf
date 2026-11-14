@@ -383,8 +383,8 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// [`CommitUnanswered`](NetconfError::CommitUnanswered): the device has not
     /// said. The session it was sent on sends nothing more — see
     /// [`unanswered`](crate::NetconfSession::unanswered) — so the history is read
-    /// on a new one. A commit that took effect stands first in it, with the user it
-    /// was made as and the comment it was sent with; one that did not is not there.
+    /// on a new one. A commit that took effect is in it, with the user it was made
+    /// as; one that did not is not there.
     /// The crate reads what the device holds and judges nothing: the consumer knows
     /// what it sent.
     ///
@@ -792,7 +792,7 @@ impl CommitRecord {
         self.field("seconds")
     }
 
-    /// `log`: the comment the commit was made with.
+    /// `log`: the text of the entry's `<log>`, as the device gave it.
     pub fn log(&self) -> Option<&str> {
         self.field("log")
     }

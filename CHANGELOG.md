@@ -191,6 +191,11 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-14 — More places compare an element's name through the one function for it
   (`error-info`, `commit-history`, `date-time`, `name`, `configuration`). Its comment said every
   place does; it says now that not every comparison of names fits it. The behaviour is the same.
+- 2026-11-14 — Three statements in the docs are narrowed to what holds. `log` in a commit record
+  is the text the device gives, and a commit that took effect is in the history: the docs said
+  it stands first, with the comment it was sent with. A name of your own is read as a secret
+  statement only where that statement is a secret wherever it stands. And the heading of the
+  error chapter no longer says «three branches».
 
 ### Changed — API review and update
 
