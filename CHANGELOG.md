@@ -167,6 +167,14 @@ Every notable change to this crate is recorded here. The format follows
   one with `all_free`; the examples on the crate's front page, on `redact_secrets` and in
   `docs/Filter.md` are gone.
 
+### Changed — a last tidy-up before the release
+
+- 2026-11-14 — The docs are corrected in three places where they said what the code does not
+  do. `ConfigPolicy::new` with an empty list has no floor, as `all_free` has none: the entry of
+  2026-11-12 said the guide was corrected, and one sentence was left. A certificate is not
+  among the secrets that are redacted. And a failure before the commit is cleaned up with two
+  exceptions: a request that got no answer, and a commit comment that is refused.
+
 ## [0.6.1] — 2026-10-05
 
 The public surface is that of 0.6.0, and the contract floor in `docs/API.md` stays 0.6.0.

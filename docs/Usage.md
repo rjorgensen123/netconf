@@ -308,7 +308,13 @@ match session.confirm_commit(&prepared, "ge-0/0/1.123").await {
 `prepare_change`, `confirm_commit` and `abort_change` return the device's answers to each request
 they made, by RPC name — `"lock"`, `"load-configuration"`, `"commit-configuration"`, `"unlock"`,
 `"discard-changes"`. A failure before the commit is cleaned up: they discard and unlock before
-they return, so the device is not left locked with a candidate nobody approved.
+they return, so the device is not left locked with a candidate nobody approved. There are two
+exceptions, both on purpose:
+
+- **A request that got no answer** — a timeout, a broken connection. The session sends nothing
+  more, so no cleanup goes out; closing the session is what ends the lock.
+- **A commit comment that is refused.** `confirm_commit` keeps the lock and the loaded change, so
+  you can call it again with another comment, or call `abort_change`.
 
 **Approval across a restart.** If the approval is stored and the commit happens in a new process,
 `PreparedChange::from_diff(stored_diff)` rebuilds the change from the stored diff. The fresh diff is
@@ -420,9 +426,10 @@ let policy = ConfigPolicy::all_deny();
 let policy = ConfigPolicy::all_free(Access::Rwd);
 ```
 
-**The floor:** deleting an entire protected top-level tree — `delete interfaces`,
-`delete protocols` — is refused no matter what you grant. That mistake must not be possible to
-configure your way into. Only `all_free` has no floor.
+**The floor:** under `with_default_floor()` and `read_only()`, deleting an entire protected
+top-level tree — `delete interfaces`, `delete protocols` — is refused no matter what you grant.
+That mistake must not be possible to configure your way into. `ConfigPolicy::new` holds the floor
+you give it, and none when the list is empty; `all_free` has no floor.
 
 **Unknown input rejects the whole payload** — an unknown verb, an empty path, an unbalanced or
 single quote, a `/*` comment, a `#` inside a word, a control character. A line that is not understood would otherwise go
@@ -454,7 +461,7 @@ and `copy`.
 The filter governs what you may **change**. Redaction governs what is safe to **show**.
 
 Configuration from a device contains the device's own secrets: obfuscated passwords, SNMP keys,
-certificate blocks. They end up in a diff, in a `show` printout, in your log — and from there in a
+private keys. They end up in a diff, in a `show` printout, in your log — and from there in a
 log service and a backup.
 
 **netconf redacts them before they reach you.** Everything the session returns — replies, the

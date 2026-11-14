@@ -166,8 +166,9 @@ rules and by the read grants. `delete logical-systems LS1 protocols` is refused 
 The principle is deliberate: **do not make the library useless.** Only what makes the box
 unmanageable is hard-blocked. The rest is kept safe by everything else being denied by default.
 
-`all_free` has no floor. It is the one policy for deleting everything on the box — the deliberate
-choice of full control, not something a rule adds up to.
+`all_free` has no floor: it is the deliberate choice of full control, with the filter off.
+`ConfigPolicy::new` with an empty list has no floor either; there the rules alone decide what may
+be deleted.
 
 ## What the filter can read
 

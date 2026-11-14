@@ -788,7 +788,7 @@ lock and the load are in `PreparedChange::replies`, as `("lock", reply)` and
 `("load-configuration", reply)`; empty for a change built with `from_diff`. If the load or the
 compare fails, the candidate is discarded and unlocked before the error is returned; if that
 cleanup fails too, the error is `CleanupFailed`, carrying the failure and each cleanup step that
-failed.
+failed. A request that got no answer is the exception, as in phase 2: no cleanup goes out.
 
 **An answer that came does not get lost with a failure.** The operations here send several
 requests, and when one fails after others went through, the device's answers to those — before

@@ -6,9 +6,9 @@
 //! When we fetch something from the device — a `show | compare` diff, a
 //! `get-configuration`, the output of a `command` — the reply can carry **the
 //! device's** secrets: `$9$`-obfuscated passwords, RADIUS and
-//! TACACS+ secrets, IPsec and BGP keys, SSH keys, PEM certificates. That text is
-//! shown to an operator, stored in an audit trail, and can end up in a log. Without
-//! redaction we would leak the equipment's secrets.
+//! TACACS+ secrets, IPsec and BGP keys, SSH keys, private keys in PEM blocks. That
+//! text is shown to an operator, stored in an audit trail, and can end up in a log.
+//! Without redaction we would leak the equipment's secrets.
 //!
 //! ## The design choice: conservative, but structure-preserving
 //!
