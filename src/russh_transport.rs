@@ -237,7 +237,8 @@ impl russh::client::Handler for ClientHandler {
 }
 
 /// Refuse a host or username that cannot be right, before either is logged or
-/// sent anywhere.
+/// sent anywhere. The error is the refusal text, which the caller logs and
+/// returns as `InvalidOptions`.
 ///
 /// Both go into log events verbatim, so a control character in either — a
 /// newline above all — could forge a log line of its own. Neither can legitimately
@@ -247,7 +248,7 @@ impl russh::client::Handler for ClientHandler {
 /// in a log line.
 ///
 /// `username` is `None` for the host-key probe, which authenticates as no one.
-fn check_target(host: &str, username: Option<&str>) -> Result<(), NetconfError> {
+fn check_target(host: &str, username: Option<&str>) -> Result<(), String> {
     let problem = if host.is_empty() {
         Some("host is empty")
     } else if host.chars().any(|c| c.is_control() || c.is_whitespace()) {
@@ -262,11 +263,23 @@ fn check_target(host: &str, username: Option<&str>) -> Result<(), NetconfError> 
         }
     };
     match problem {
-        Some(p) => Err(NetconfError::Transport(TransportError::Io(format!(
-            "{p} — refused before anything is logged or sent"
-        )))),
+        Some(p) => Err(format!("{p} — refused before anything is sent")),
         None => Ok(()),
     }
+}
+
+/// Whether `pin` has the form of a fingerprint (0.7.0): `SHA256:` followed by
+/// exactly 43 characters from `A–Z a–z 0–9 + /`, the base64 of 32 bytes without
+/// padding. The last character carries only four bits, so it is one of
+/// `A E I M Q U Y c g k o s w 0 4 8`.
+fn is_fingerprint(pin: &str) -> bool {
+    pin.strip_prefix("SHA256:").is_some_and(|b64| {
+        b64.len() == 43
+            && b64
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+            && b64.ends_with(|c: char| "AEIMQUYcgkosw048".contains(c))
+    })
 }
 
 /// Why `SshPolicy::Custom` is refused — by `connect()` and `observe_host_key()`
@@ -771,8 +784,32 @@ impl RusshTransport {
         opts: &ConnectOptions,
         progress: &mut Progress,
     ) -> Result<Self, NetconfError> {
-        // First, before the host and username go into the log events below.
-        check_target(&opts.host, Some(opts.username.as_str()))?;
+        // First, before the host and username go into the log events below. Its
+        // refusal is logged without them.
+        if let Err(reason) = check_target(&opts.host, Some(opts.username.as_str())) {
+            tracing::warn!(
+                event = "ssh_connect_refused",
+                reason = %reason,
+                "the connection options were refused before connecting"
+            );
+            return Err(NetconfError::Transport(TransportError::InvalidOptions(
+                reason,
+            )));
+        }
+
+        // Every refusal below: one log line, with the host and username that have
+        // passed `check_target` (0.7.0).
+        let refuse = |reason: String| {
+            tracing::warn!(
+                event = "ssh_connect_refused",
+                host = %opts.host,
+                port = opts.port,
+                username = %opts.username,
+                reason = %reason,
+                "the connection options were refused before connecting"
+            );
+            NetconfError::Transport(TransportError::InvalidOptions(reason))
+        };
 
         // A legacy SSH policy is ALWAYS per device, never global, and every use should
         // be traceable. So we log which policy this connection actually runs with —
@@ -797,11 +834,26 @@ impl RusshTransport {
         // authenticating. It takes no credential parameter at all, so a password
         // cannot leak from it.
         if opts.host_key.is_none() {
-            return Err(NetconfError::Transport(TransportError::Io(
+            return Err(refuse(
                 "no pinned host key — refusing to authenticate against an unverified \
                  device. Use observe_host_key() to fetch the fingerprint for approval first."
                     .into(),
-            )));
+            ));
+        }
+
+        // A pin of another form is a typing error, not a host key mismatch, so it is
+        // refused here, without echoing the value (0.7.0).
+        if opts
+            .host_key
+            .as_deref()
+            .is_some_and(|pin| !is_fingerprint(pin))
+        {
+            return Err(refuse(
+                "the pinned host key is not a fingerprint — it is SHA256: followed by 43 \
+                 base64 characters, the form observe_host_key() returns. Refused before \
+                 anything is sent."
+                    .into(),
+            ));
         }
 
         // `Custom` promises «full manual control» in the API, but the names have to be
@@ -810,21 +862,18 @@ impl RusshTransport {
         // quietly do something else. The previous choice, falling back to legacy, did
         // the opposite of what a consumer tightening things would expect.
         if matches!(opts.ssh_policy, SshPolicy::Custom { .. }) {
-            return Err(NetconfError::Transport(TransportError::Io(
-                CUSTOM_REFUSED.into(),
-            )));
+            return Err(refuse(CUSTOM_REFUSED.into()));
         }
 
         // The session TTL, fail-closed: the range is validated BEFORE anything
         // connects — and before the logging below (0.7.0; it came after it, and a
         // connect refused for its `Timeouts` spent the legacy warning).
-        opts.timeouts
-            .validate()
-            .map_err(|m| NetconfError::Transport(TransportError::Io(m)))?;
+        opts.timeouts.validate().map_err(refuse)?;
 
         // Logged after the refusals above, so a connect that is refused does not
         // spend the device's one legacy warning on nothing. A connect that gets
-        // here has a pinned host key: without one it was refused above.
+        // here has a pinned host key of the right form: anything else was refused
+        // above.
         if !legacy_allowed {
             tracing::info!(
                 event = "ssh_connect",
@@ -1476,7 +1525,8 @@ impl NetconfTransport for RusshTransport {
 /// validated the same way, and the TCP connection and key exchange end within
 /// `connect`, counted from the start, and never past `total`. Running out is
 /// `Timeout { op: "ssh-connect" }`, or `Timeout { op: "session-ttl" }` when `total` is what ran
-/// out.
+/// out. A host, policy or `timeouts` it refuses before connecting is
+/// `Transport(InvalidOptions)` (0.7.0).
 ///
 /// It pins nothing. It *returns* a fingerprint; the step from observed to approved
 /// belongs to the consumer, and requires a person.
@@ -1486,29 +1536,43 @@ pub async fn observe_host_key(
     ssh_policy: &SshPolicy,
     timeouts: &crate::transport::Timeouts,
 ) -> Result<String, NetconfError> {
-    // First, before the host goes into the log events below.
-    check_target(host, None)?;
+    // First, before the host goes into the log events below. Its refusal is
+    // logged without it.
+    if let Err(reason) = check_target(host, None) {
+        tracing::warn!(
+            event = "ssh_host_key_probe_refused",
+            reason = %reason,
+            "the host key probe was refused before connecting"
+        );
+        return Err(NetconfError::Transport(TransportError::InvalidOptions(
+            reason,
+        )));
+    }
 
     let policy_name = match ssh_policy {
         SshPolicy::Modern => "modern",
         SshPolicy::LegacyJunos => "legacy-junos",
         SshPolicy::Custom { .. } => "custom",
     };
-    tracing::info!(
-        event = "ssh_host_key_probe",
-        host = %host,
-        port,
-        ssh_policy = policy_name,
-        "observing host key without authentication (enrollment)"
-    );
+
+    // Every refusal below: one log line, with the host that has passed
+    // `check_target` (0.7.0).
+    let refuse = |reason: String| {
+        tracing::warn!(
+            event = "ssh_host_key_probe_refused",
+            host = %host,
+            port,
+            reason = %reason,
+            "the host key probe was refused before connecting"
+        );
+        NetconfError::Transport(TransportError::InvalidOptions(reason))
+    };
 
     // The refusals `connect()` makes, for what the probe uses, before anything goes
     // on the wire. `Custom` used to fall back to russh's default list here without
     // saying so.
     if matches!(ssh_policy, SshPolicy::Custom { .. }) {
-        return Err(NetconfError::Transport(TransportError::Io(
-            CUSTOM_REFUSED.into(),
-        )));
+        return Err(refuse(CUSTOM_REFUSED.into()));
     }
 
     // The same limits as `connect()`, on the same clock: the frame is validated
@@ -1516,12 +1580,20 @@ pub async fn observe_host_key(
     // `connect()` — it ends `connect` after it began, and never past `total`. It used
     // to take `connect` alone, unvalidated: `total` did not bound it, and a `connect`
     // of any size was waited out in full.
-    timeouts
-        .validate()
-        .map_err(|m| NetconfError::Transport(TransportError::Io(m)))?;
+    timeouts.validate().map_err(refuse)?;
     let started = std::time::Instant::now();
     let deadline = started + timeouts.total;
     let connect_by = started.checked_add(timeouts.connect).unwrap_or(deadline);
+
+    // After the refusals above, so it is logged only for a probe that goes on the
+    // wire (0.7.0).
+    tracing::info!(
+        event = "ssh_host_key_probe",
+        host = %host,
+        port,
+        ssh_policy = policy_name,
+        "observing host key without authentication (enrollment)"
+    );
 
     let mut config = russh::client::Config {
         // Not what bounds the probe: `in_connect_phase` does. It is set no longer
@@ -1832,9 +1904,9 @@ impl std::fmt::Display for DeviceCheck {
 /// **Always a report.** Once the connection is started, what comes back is a
 /// [`DeviceCheck`], whether every step answered or one stopped — the step, and the
 /// error `connect` would have returned, are in it. `Err` is only what `connect`
-/// refuses before anything is connected — no pinned host key, `SshPolicy::Custom`,
-/// time limits out of range, a host or username that cannot be right: then nothing
-/// was checked.
+/// refuses before anything is connected, as `Transport(InvalidOptions)` — no pinned
+/// host key or one that is not a fingerprint, `SshPolicy::Custom`, time limits out
+/// of range, a host or username that cannot be right: then nothing was checked.
 ///
 /// **Nothing is left behind.** The connection is ended when the check is over,
 /// however it ended.

@@ -140,6 +140,17 @@ fn without_an_observation_no_fingerprint_is_implied() {
     assert!(!s.contains("presented"), "nothing was presented: {s}");
 }
 
+/// A refusal before connecting says it was the options (0.7.0).
+#[test]
+fn invalid_options_says_so() {
+    assert_eq!(
+        text(NetconfError::Transport(TransportError::InvalidOptions(
+            "x".into()
+        ))),
+        "transport: invalid options: x"
+    );
+}
+
 /// A device error is the device's own words. All the fields are optional, because
 /// the classic Junos reply omits some of them.
 #[test]

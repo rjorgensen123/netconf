@@ -166,7 +166,7 @@ transport's. `close()` reports a `Timeout` like any request, in `CloseFailed`.
   valid and means `per_rpc`. It need not fit inside `total` either: a single wait in a commit is
   `min(per_commit, remaining TTL)`.
 - Values outside the frames are **rejected at connect** by the transport (`validate`,
-  fail-closed, as `Transport(Io)` with a message that says what was given and what the range is)
+  fail-closed, as `Transport(InvalidOptions)` with a message that says what was given and what the range is)
   — nothing is silently clamped.
 - `connect` (30 s default) bounds establishment as a whole, counted from when the connection is
   started — the same moment as the TTL clock — and never past the session deadline:
@@ -1236,6 +1236,7 @@ pub enum TransportError { // #[non_exhaustive]
  SubsystemUnavailable { stderr: String, ssh: Box<SshMessages> }, // the device did not open the netconf subsystem; ssh = what it said over SSH
  AuthRejected { username: String, remaining_methods: Vec<String>, partial_success: bool }, // the login was not let through
  Closed { detail: String, partial: String, ssh: Box<SshMessages> }, // the device ended the channel or the connection
+ InvalidOptions(String), // the options cannot be used; refused before anything was sent
 }
 
 // DeviceChanged, ConfirmedCheck, SshMessages, ExitSignal and SshDisconnect are in netconf::error,
@@ -1399,7 +1400,7 @@ a control character, or U+2028/U+2029, is written out as an escape (`\n`, `\r`, 
 | `NetconfError` | `transport: …` · `protocol: <detail>`, then `; the device sent: <received>` when it is `Some` · `device: <DeviceError>` · `timeout: <op>`, then `; the incomplete message so far: <partial>` when it is not empty, then `; the device wrote on stderr: <stderr>` when it is not empty · `policy: …` · `drift: a fresh show\|compare deviates from the approved one; the fresh diff: <fresh>` · `changed since the confirmed commit: <DeviceChanged>` · `committed: the commit succeeded, then this failed: <error>`, then `; the device's answer to the commit: <reply>` · `commit unanswered: a commit was sent and no readable answer came back: <error>` · `<error>; the cleanup after it failed too: <step>: <error>; …` (`CleanupFailed`, 0.5.7) · `<error>`, then `; the device's answer to <step>: <reply>` for each in `replies` (`WithReplies`, 0.5.13) · `close: <error>`, then `; the session held this <severity>: <DeviceError>` for each warning, then what the device said over SSH as for `Closed` (`CloseFailed`, 0.5.13) |
 | `DeviceChanged` | `the device's last commit is no longer the confirmed one — it was «<confirmed>», it is «<now>»; the confirming commit is withheld, and the device rolls the confirmed commit back by itself when its timeout runs out`, or `the candidate holds <n> line(s) of changes that are not the confirmed commit's; …`; then `; the diff against rollback <N>: <diff>`, `; the diff against rollback <N> could not be fetched: <error>`, or `; the confirmed commit is no longer in the device's commit history, so there is no rollback to compare with` |
 | `DeviceError` | `<tag>: <message> [path: <path>]` (`unknown` / `(no message)` when absent); for a translated tag `<tag> — <meaning> (RFC 6241, Appendix A): <message> …`; then ` [info: <info>]`, ` [app-tag: <app_tag>]` and ` [type: <error_type>]` for each that is present, and ` [<name>: <text>]` for each entry in `other`; then `; also <severity>: <DeviceError>` for each entry in `also`; then `; the reply besides its errors: <rest>` when `rest` is present |
-| `TransportError` | `io: …` · `negotiation (<detail>); peer offered: <a, b>` · `host key: <detail>; device presented: <fingerprint>`, or without the second part when `observed` is `None` · ``the device did not offer the NETCONF subsystem — NETCONF over SSH is not enabled on the device (Junos: `set system services netconf ssh`)``, then `; the device said: <stderr>` when `stderr` is not empty · `SSH password authentication rejected by the device — <methods>`, or `the device ACCEPTED the password but requires further authentication — <methods>` under `partial_success`, where `<methods>` is `the device says it accepts: <a, b>` or `the device named no other method` · `closed: <detail>`, then the incomplete message as for `Timeout`. `SubsystemUnavailable` and `Closed` then add what the device said over SSH, each part present: `; the device wrote on stderr: <stderr>`, `; the subsystem's exit status: <n>`, `; the subsystem's exit signal: <name>[, core dumped][, the device said: <message>]`, `; the device disconnected, reason code <n>[, and said: <description>]`, `; the device's login banner: <banner>` |
+| `TransportError` | `io: …` · `invalid options: …` · `negotiation (<detail>); peer offered: <a, b>` · `host key: <detail>; device presented: <fingerprint>`, or without the second part when `observed` is `None` · ``the device did not offer the NETCONF subsystem — NETCONF over SSH is not enabled on the device (Junos: `set system services netconf ssh`)``, then `; the device said: <stderr>` when `stderr` is not empty · `SSH password authentication rejected by the device — <methods>`, or `the device ACCEPTED the password but requires further authentication — <methods>` under `partial_success`, where `<methods>` is `the device says it accepts: <a, b>` or `the device named no other method` · `closed: <detail>`, then the incomplete message as for `Timeout`. `SubsystemUnavailable` and `Closed` then add what the device said over SSH, each part present: `; the device wrote on stderr: <stderr>`, `; the subsystem's exit status: <n>`, `; the subsystem's exit signal: <name>[, core dumped][, the device said: <message>]`, `; the device disconnected, reason code <n>[, and said: <description>]`, `; the device's login banner: <banner>` |
 
 ## Logging — the tracing facade
 
@@ -1409,13 +1410,14 @@ the contract:
 
 | Event | Level | When |
 |---|---|---|
+| `ssh_connect_refused` / `ssh_host_key_probe_refused` | warn | `connect` / `observe_host_key` refused before connecting: `reason`, the refusal text, with host and port — and username for `connect` — unless the host or username is what was refused. No start event precedes it |
 | `ssh_connect` / `ssh_connect_failed` | info/warn | `ssh_connect`: the attempt (host, port, username, policy, `pinned`/`enrollment`), warn the first time per device under a legacy policy. `ssh_connect_failed` (host, port, `ssh_policy`, `error`): the TCP connection or the SSH handshake failed; a timeout, a rejected login or a refused subsystem are reported through their own errors, not this event |
 | `ssh_auth_failed` | warn | authentication rejected (the methods the device named, `partial_success`) |
 | `ssh_session_established` / `ssh_session_closed` | info | session lifecycle; established only once the device has opened the subsystem |
 | `ssh_session_failed` | warn | russh ended an established connection on an error — `error` is russh's text, redacted |
 | `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch or a host certificate (rejected) |
 | `ssh_host_key_enrollment` / `ssh_host_key_observed` | info | no pin — fingerprint observed |
-| `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run |
+| `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run; `ssh_host_key_probe` only for a probe that goes on the wire |
 | `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr: `bytes`, how much, and `cut`, whether the cap was reached. Not the text |
 | `secrets_in_diff` | warn | the compare diff `prepare_change` fetched carries device secrets (only a fingerprint is logged); `compare()` on its own emits nothing |
 
@@ -1437,7 +1439,7 @@ made printable in its text as well; under a policy that lets secrets through it 
 them, as the reply would, and `redact_secrets` is the filter for such a log line. russh's text is
 redacted where the transport takes it in, in the errors and in the events. The
 `ssh_connect` event is logged
-after the refusals for a missing pin, for `Custom` and for `Timeouts` outside their frames, so a
+after the refusals for a missing or wrongly formed pin, for `Custom` and for `Timeouts` outside their frames, so a
 refused connect does not spend the device's one legacy warning.
 
 ---
@@ -1477,7 +1479,8 @@ russh 0.65 returns from the request as soon as it is queued, so the transport re
 itself, under `Timeouts::connect` and the session deadline (`Timeout { op: "ssh-subsystem" }`).
 
 **The fingerprint format** is `SHA256:<base64 without padding>` — the form the `ssh` client shows.
-A pinned key is compared by exact byte equality, with no normalisation.
+A pinned key is compared by exact byte equality, with no normalisation. A pinned key of another
+form is refused before connecting.
 No host certificate algorithm (`*-cert-v01@openssh.com`) is offered under any policy, and a host
 certificate is refused, pinned or not — by `connect` and by `observe_host_key` — even when the key
 it carries is the pinned one; `observed` is the fingerprint of that key.
@@ -1488,9 +1491,11 @@ deadline is set at connection start, and `send`/`recv` refuse after the deadline
 The limit is one clock for the whole call: what the device sends that is no data — stderr, an exit
 status — does not start it again, in `recv` or in the wait `close` does.
  Before anything
-connects, `connect` refuses — as `Transport(Io)` — a missing `host_key`, `SshPolicy::Custom`,
-`Timeouts` outside their frames, and an empty host or username or one holding a control character
-— a host may not hold whitespace either, and `observe_host_key` checks the host the
+connects, `connect` refuses — as `Transport(InvalidOptions)` — a missing `host_key`, a `host_key`
+that is not a fingerprint, with
+`the pinned host key is not a fingerprint — it is SHA256: followed by 43 base64 characters, the form observe_host_key() returns. Refused before anything is sent.`,
+`SshPolicy::Custom`, `Timeouts` outside their frames, and an empty host or username or one holding a
+control character — a host may not hold whitespace either, and `observe_host_key` checks the host the
 same way. Authentication therefore always has a pinned key; observation has
 its own path. The password is taken out of the `SecretString` right before authentication, into a
 copy that is zeroed on drop; russh makes its own copy internally, which is outside this crate's
@@ -1565,8 +1570,9 @@ decides nothing from it.
   `Timeout` `connect` or the session would have returned.
 - **Always a report:** once the connection is started, the result is `Ok(DeviceCheck)`, whether
   every step answered or one stopped. `Err` is only what `connect` refuses before anything is
-  connected — a missing `host_key`, `SshPolicy::Custom`, `Timeouts` outside their frames, a host
-  or username that cannot be right. Then nothing was checked.
+  connected, as `Transport(InvalidOptions)` — a missing `host_key` or one that is not a
+  fingerprint, `SshPolicy::Custom`, `Timeouts` outside their frames, a host or username that
+  cannot be right. Then nothing was checked.
 - **Nothing is left behind:** the connection is ended when the check is over, however it ended.
 - **What it holds:** `steps()` are the steps that answered, each with the time it took;
   `stopped()` is the step that did not, with the error — the device's own words in it, redacted,
@@ -1604,7 +1610,7 @@ signature, not a rule anyone must remember. It runs under `timeouts` as `connect
  they are validated the same way, and the TCP connection and key exchange end within
 `connect`, counted from the start, and never past `total`. Running out is `Timeout { op: "ssh-connect" }`,
 or `Timeout { op: "session-ttl" }` when `total` is what ran out. Before anything connects it
-refuses, as `Transport(Io)`, what `connect` refuses of what it uses: `SshPolicy::Custom`
+refuses, as `Transport(InvalidOptions)`, what `connect` refuses of what it uses: `SshPolicy::Custom`
 and `Timeouts` outside their frames.
 
 It **pins nothing**. The transition observed → approved belongs to the consumer and requires a

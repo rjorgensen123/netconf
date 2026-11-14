@@ -125,6 +125,9 @@ Every notable change to this crate is recorded here. The format follows
   Gitea one: the checkout and the `permissions` block.
 - 2026-11-14 — **Breaking:** `Redactor::strict()` and `Redactor::snmp_community_visible()` are
   removed. There is one redaction, and a community, SNMP or BGP, is not a secret.
+- 2026-11-14 — A connection refused for its options is `TransportError::InvalidOptions`, not
+  `Io`, and is logged as `ssh_connect_refused` or `ssh_host_key_probe_refused`. A pinned
+  `host_key` that is not a fingerprint is refused the same way, before connecting.
 
 ## [0.6.1] — 2026-10-05
 

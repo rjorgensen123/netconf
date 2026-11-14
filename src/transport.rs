@@ -341,6 +341,10 @@ pub struct ConnectOptions {
     pub platform_hint: Option<Platform>,
     /// **The pinned host key fingerprint**, and it is required.
     ///
+    /// It is `SHA256:` followed by 43 base64 characters, the form
+    /// `russh_transport::observe_host_key` returns; one of another form is refused
+    /// before connecting (0.7.0).
+    ///
     /// The transport MUST verify that the device's host key matches, and REFUSE on
     /// any difference — never a silent accept, never trust-on-first-use.
     ///

@@ -62,7 +62,8 @@ is `TransportError::SubsystemUnavailable` — on Junos, `set system services net
 compared byte for byte. If the device presents a different key, the connection fails as
 `TransportError::HostKey`, carrying the fingerprint it did present. `None` is refused before
 anything connects: `connect` authenticates, which means it sends your password, so there is no
-unverified connection. How you get the fingerprint the first time is under
+unverified connection. A value of a form other than `SHA256:` and 43 base64 characters is
+refused before connecting too. How you get the fingerprint the first time is under
 [The host key](#the-host-key--who-are-you-talking-to).
 
 **`platform_hint`** is reserved for a table of differences between equipment generations. It is
@@ -553,11 +554,12 @@ an `event` field:
 | `event` | When |
 |---|---|
 | `ssh_connect` | a connection starts — with `legacy = true` under `LegacyJunos` |
+| `ssh_connect_refused`, `ssh_host_key_probe_refused` | the options were refused before connecting — `reason` says why; no start event precedes it |
 | `ssh_connect_failed`, `ssh_auth_failed` | the connection or the login failed |
 | `ssh_host_key_verified`, `ssh_host_key_mismatch` | the host key matched, or did not |
 | `ssh_session_established`, `ssh_session_closed` | the session is up, or closed |
 | `ssh_session_failed` | the SSH connection broke under an established session — with why |
-| `ssh_host_key_probe`, `ssh_host_key_enrollment`, `ssh_host_key_observed`, `ssh_host_key_probe_failed` | `observe_host_key` |
+| `ssh_host_key_probe`, `ssh_host_key_enrollment`, `ssh_host_key_observed`, `ssh_host_key_probe_failed` | `observe_host_key`; `ssh_host_key_probe` only for a probe that goes on the wire |
 | `netconf_subsystem_stderr` | the device wrote on the subsystem's stderr — how much, never what |
 | `secrets_in_diff` | a diff carries secrets because the policy lets them through — never the content |
 
@@ -669,6 +671,7 @@ minutes, so put the slack you want for a slow device into `per_commit`.
 | `AuthRejected` | the login was refused; `remaining_methods` is what the device accepts, and `partial_success` says the password was accepted but more is required |
 | `SubsystemUnavailable` | logged in, but the device has no NETCONF over SSH |
 | `Closed` | the device ended the connection; `ssh` has what it said |
+| `InvalidOptions` | the options cannot be used; refused before anything was sent — a missing or wrongly formed `host_key`, `SshPolicy::Custom`, `Timeouts` outside their frames, a host or username that is empty or holds what it cannot |
 | `Io` | anything else on the way — the connection broke, the address was wrong |
 
 ```rust

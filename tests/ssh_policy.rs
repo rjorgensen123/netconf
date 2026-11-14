@@ -103,7 +103,7 @@ async fn custom_policy_is_denied_instead_of_yielding_legacy() {
         },
         timeouts: Timeouts::default(),
         platform_hint: None,
-        host_key: Some("SHA256:whatever".into()),
+        host_key: Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()),
     };
     let m = match RusshTransport::connect(&opts).await {
         Ok(_) => panic!("Custom should have been refused"),
@@ -228,7 +228,7 @@ async fn connect_refuses_a_bad_host_or_username_before_anything_else() {
             Err(e) => e.to_string(),
         };
         assert!(
-            m.contains(problem) && m.contains("refused before anything is logged or sent"),
+            m.contains(problem) && m.contains("refused before anything is sent"),
             "{host:?} / {username:?}: {m}"
         );
     }
@@ -258,7 +258,7 @@ async fn observe_host_key_refuses_a_bad_host_before_anything_else() {
             Err(e) => e.to_string(),
         };
         assert!(
-            m.contains(problem) && m.contains("refused before anything is logged or sent"),
+            m.contains(problem) && m.contains("refused before anything is sent"),
             "{host:?}: {m}"
         );
     }
@@ -426,12 +426,391 @@ async fn connect_refuses_a_per_commit_outside_its_frame() {
                 ..Timeouts::default()
             },
             platform_hint: None,
-            host_key: Some("SHA256:whatever".into()),
+            host_key: Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()),
         };
         let m = match RusshTransport::connect(&opts).await {
             Ok(_) => panic!("per_commit {bad:?} should have been refused"),
             Err(e) => e.to_string(),
         };
         assert!(m.contains("Timeouts::per_commit"), "{bad:?}: {m}");
+    }
+}
+
+// --- A refusal before connecting: its own error kind, and one log line (0.7.0) ---
+
+/// A pin of the right form that is no device's key.
+#[cfg(feature = "russh-transport")]
+const NO_DEVICES_PIN: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+/// What a pin of another form is refused with.
+#[cfg(feature = "russh-transport")]
+const NOT_A_FINGERPRINT: &str = "the pinned host key is not a fingerprint — it is SHA256: \
+                                 followed by 43 base64 characters, the form \
+                                 observe_host_key() returns. Refused before anything is sent.";
+
+/// Options that pass every check before connecting; each test changes the one it
+/// is about.
+#[cfg(feature = "russh-transport")]
+fn options() -> netconf::ConnectOptions {
+    netconf::ConnectOptions {
+        host: "127.0.0.1".into(),
+        port: 1,
+        username: "ops".into(),
+        auth: netconf::Auth::Password(
+            krypto::SecretString::from_string("test-password".into()).unwrap(),
+        ),
+        ssh_policy: netconf::SshPolicy::Modern,
+        timeouts: netconf::Timeouts::default(),
+        platform_hint: None,
+        host_key: Some(NO_DEVICES_PIN.into()),
+    }
+}
+
+/// A `SshPolicy::Custom`, which is refused.
+#[cfg(feature = "russh-transport")]
+fn custom() -> netconf::SshPolicy {
+    netconf::SshPolicy::Custom {
+        kex: vec!["curve25519-sha256".into()],
+        hostkey: vec!["ssh-ed25519".into()],
+        cipher: vec!["aes256-gcm@openssh.com".into()],
+        mac: vec!["hmac-sha2-256-etm@openssh.com".into()],
+    }
+}
+
+/// The text of the `InvalidOptions` that `result` must be.
+#[cfg(feature = "russh-transport")]
+fn invalid_options<T>(result: Result<T, netconf::NetconfError>) -> String {
+    use netconf::{NetconfError, TransportError};
+    match result {
+        Err(NetconfError::Transport(TransportError::InvalidOptions(text))) => text,
+        Err(e) => panic!("expected InvalidOptions, got {e}"),
+        Ok(_) => panic!("expected InvalidOptions, got Ok"),
+    }
+}
+
+/// A host or username that cannot be right is `InvalidOptions` from `connect()`.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn connect_refuses_a_bad_host_or_username_as_invalid_options() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfTransport};
+
+    for (host, username) in [
+        ("", "ops"),
+        ("pe1\nx", "ops"),
+        ("pe 1", "ops"),
+        ("127.0.0.1", ""),
+        ("127.0.0.1", "ops\r\nx"),
+    ] {
+        let opts = ConnectOptions {
+            host: host.into(),
+            username: username.into(),
+            ..options()
+        };
+        let text = invalid_options(RusshTransport::connect(&opts).await);
+        assert!(
+            text.ends_with("— refused before anything is sent"),
+            "{host:?} / {username:?}: {text}"
+        );
+    }
+}
+
+/// No pinned host key is `InvalidOptions` from `connect()`.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn connect_refuses_a_missing_pin_as_invalid_options() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfTransport};
+
+    let opts = ConnectOptions {
+        host_key: None,
+        ..options()
+    };
+    let text = invalid_options(RusshTransport::connect(&opts).await);
+    assert!(text.starts_with("no pinned host key"), "{text}");
+}
+
+/// `SshPolicy::Custom` is `InvalidOptions` from `connect()`.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn connect_refuses_custom_as_invalid_options() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfTransport};
+
+    let opts = ConnectOptions {
+        ssh_policy: custom(),
+        ..options()
+    };
+    let text = invalid_options(RusshTransport::connect(&opts).await);
+    assert!(
+        text.starts_with("SshPolicy::Custom is not implemented"),
+        "{text}"
+    );
+}
+
+/// `Timeouts` outside their frames are `InvalidOptions` from `connect()`.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn connect_refuses_timeouts_outside_their_frames_as_invalid_options() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfTransport, Timeouts};
+
+    let opts = ConnectOptions {
+        timeouts: Timeouts {
+            connect: Duration::ZERO,
+            ..Timeouts::default()
+        },
+        ..options()
+    };
+    let text = invalid_options(RusshTransport::connect(&opts).await);
+    assert!(text.starts_with("Timeouts::connect"), "{text}");
+}
+
+/// What `observe_host_key()` refuses before connecting is `InvalidOptions`: a bad
+/// host, `SshPolicy::Custom`, and `Timeouts` outside their frames.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn observe_host_key_refuses_as_invalid_options() {
+    use netconf::russh_transport::observe_host_key;
+    use netconf::{SshPolicy, Timeouts};
+
+    let bad_host = observe_host_key("pe1\nx", 1, &SshPolicy::Modern, &Timeouts::default()).await;
+    let text = invalid_options(bad_host);
+    assert!(text.starts_with("host contains whitespace"), "{text}");
+
+    let text =
+        invalid_options(observe_host_key("127.0.0.1", 1, &custom(), &Timeouts::default()).await);
+    assert!(
+        text.starts_with("SshPolicy::Custom is not implemented"),
+        "{text}"
+    );
+
+    let zero_connect = Timeouts {
+        connect: Duration::ZERO,
+        ..Timeouts::default()
+    };
+    let text =
+        invalid_options(observe_host_key("127.0.0.1", 1, &SshPolicy::Modern, &zero_connect).await);
+    assert!(text.starts_with("Timeouts::connect"), "{text}");
+}
+
+/// **A pin of another form is refused before connecting**, as `InvalidOptions`
+/// with one fixed text that does not echo it, and nothing connects.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn a_pin_of_another_form_is_refused_before_connecting() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfTransport};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // 43 characters of the right form: the last one is among the sixteen.
+    let b64 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZab+/cdw";
+    assert_eq!(b64.len(), 43);
+    for pin in [
+        "abc".to_string(),
+        "SHA256:".to_string(),
+        "SHA256:short".to_string(),
+        format!("MD5:{b64}"),
+        format!("SHA256:{}", "A".repeat(42)),
+        format!("SHA256:{b64}A"),
+        format!("SHA256:{}={}", &b64[..21], &b64[22..]),
+        format!("SHA256:{} {}", &b64[..21], &b64[22..]),
+        format!("SHA256:{}B", "A".repeat(42)),
+    ] {
+        let opts = ConnectOptions {
+            port,
+            host_key: Some(pin.clone()),
+            ..options()
+        };
+        let text = invalid_options(RusshTransport::connect(&opts).await);
+        assert_eq!(text, NOT_A_FINGERPRINT, "{pin:?}");
+        // `SHA256:` alone is part of the fixed text.
+        if pin != "SHA256:" {
+            assert!(!text.contains(&pin), "{pin:?}: {text}");
+        }
+    }
+    let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+    assert!(accepted.is_err(), "a connection was attempted");
+}
+
+/// A well-formed pin that is no device's key is not refused for its form: against
+/// a port nothing listens on, the error is not `InvalidOptions`.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn a_well_formed_pin_is_not_refused_for_its_form() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfError, NetconfTransport, Timeouts, TransportError};
+
+    // A port nothing listens on: bound, then let go.
+    let port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let opts = ConnectOptions {
+        port,
+        timeouts: Timeouts {
+            connect: Duration::from_secs(5),
+            ..Timeouts::default()
+        },
+        ..options()
+    };
+    match RusshTransport::connect(&opts).await {
+        Ok(_) => panic!("nothing listens on port {port}"),
+        Err(NetconfError::Transport(TransportError::InvalidOptions(text))) => {
+            panic!("a well-formed pin was refused: {text}")
+        }
+        Err(_) => {}
+    }
+}
+
+/// `check_device` returns `Err(Transport(InvalidOptions))` for what `connect()`
+/// refuses before connecting.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn check_device_returns_invalid_options_for_a_refusal_before_connecting() {
+    use netconf::ConnectOptions;
+    use netconf::russh_transport::check_device;
+
+    for (host_key, starts) in [
+        (None, "no pinned host key"),
+        (
+            Some("abc".to_string()),
+            "the pinned host key is not a fingerprint",
+        ),
+    ] {
+        let opts = ConnectOptions {
+            host_key,
+            ..options()
+        };
+        let text = invalid_options(check_device(&opts).await);
+        assert!(text.starts_with(starts), "{text}");
+    }
+}
+
+/// The fields of one captured event, by name, as text.
+#[cfg(feature = "russh-transport")]
+type Fields = std::collections::BTreeMap<String, String>;
+
+#[cfg(feature = "russh-transport")]
+thread_local! {
+    /// The events this thread has emitted since `capture_events` emptied it.
+    static SEEN: std::cell::RefCell<Vec<Fields>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A subscriber that records the fields of every event in the buffer of the
+/// thread that emitted it.
+#[cfg(feature = "russh-transport")]
+struct Capture;
+
+#[cfg(feature = "russh-transport")]
+impl tracing::Subscriber for Capture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Visit(Fields);
+        impl tracing::field::Visit for Visit {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name().into(), value.into());
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.insert(field.name().into(), format!("{value:?}"));
+            }
+        }
+        let mut visit = Visit(Fields::new());
+        event.record(&mut visit);
+        let _ = SEEN.try_with(|seen| seen.borrow_mut().push(visit.0));
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Install `Capture` as the global subscriber, once, and empty this thread's
+/// buffer. Global, as in `tests/russh_loopback.rs`: tracing caches per callsite
+/// whether anyone listens, and a subscriber for one thread races that cache.
+#[cfg(feature = "russh-transport")]
+fn capture_events() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::subscriber::set_global_default(Capture).expect("no other subscriber");
+    });
+    SEEN.with(|seen| seen.borrow_mut().clear());
+}
+
+/// The events this thread has emitted since `capture_events`.
+#[cfg(feature = "russh-transport")]
+fn captured() -> Vec<Fields> {
+    SEEN.with(|seen| seen.take())
+}
+
+/// **A refused `connect()` is one log line**: `ssh_connect_refused` with the reason,
+/// host, port and username, and no `ssh_connect`.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn a_refused_connect_is_one_log_line() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfTransport};
+
+    let opts = ConnectOptions {
+        host_key: None,
+        ..options()
+    };
+    capture_events();
+    let _ = RusshTransport::connect(&opts).await;
+    let events = captured();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let e = &events[0];
+    assert_eq!(e["event"], "ssh_connect_refused", "{e:?}");
+    for field in ["reason", "host", "port", "username"] {
+        assert!(e.contains_key(field), "{field}: {e:?}");
+    }
+    assert!(e["reason"].starts_with("no pinned host key"), "{e:?}");
+}
+
+/// **A `connect()` refused for its host does not log the host**: the line says
+/// what was wrong, not what the host held.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn a_connect_refused_for_its_host_does_not_log_the_host() {
+    use netconf::russh_transport::RusshTransport;
+    use netconf::{ConnectOptions, NetconfTransport};
+
+    let opts = ConnectOptions {
+        host: "pe1\ninjected-line".into(),
+        ..options()
+    };
+    capture_events();
+    let _ = RusshTransport::connect(&opts).await;
+    let events = captured();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let e = &events[0];
+    assert_eq!(e["event"], "ssh_connect_refused", "{e:?}");
+    assert!(e.contains_key("reason"), "{e:?}");
+    assert!(!e.contains_key("host"), "{e:?}");
+    assert!(!e.values().any(|v| v.contains("injected-line")), "{e:?}");
+}
+
+/// **A refused `observe_host_key()` is one log line**: `ssh_host_key_probe_refused`,
+/// and no `ssh_host_key_probe`.
+#[cfg(feature = "russh-transport")]
+#[tokio::test]
+async fn a_refused_host_key_probe_is_one_log_line() {
+    use netconf::Timeouts;
+    use netconf::russh_transport::observe_host_key;
+
+    capture_events();
+    let _ = observe_host_key("127.0.0.1", 1, &custom(), &Timeouts::default()).await;
+    let events = captured();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let e = &events[0];
+    assert_eq!(e["event"], "ssh_host_key_probe_refused", "{e:?}");
+    for field in ["reason", "host", "port"] {
+        assert!(e.contains_key(field), "{field}: {e:?}");
     }
 }

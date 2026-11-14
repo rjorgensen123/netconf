@@ -623,7 +623,7 @@ async fn when_connecting_gives_up_the_device_sees_the_connection_end() {
                 timeouts,
                 platform_hint: None,
                 // Never compared: the key exchange never gets that far.
-                host_key: Some("SHA256:never-presented".into()),
+                host_key: Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()),
             };
             RusshTransport::connect(&opts).await.map(|_| ())
         };
@@ -1219,7 +1219,7 @@ async fn a_connect_refused_for_its_timeouts_does_not_spend_the_legacy_warning() 
             ..Timeouts::default()
         },
         platform_hint: None,
-        host_key: Some("SHA256:not-reached".into()),
+        host_key: Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()),
     };
     assert!(RusshTransport::connect(&opts).await.is_err());
     assert!(levels().is_empty(), "{:?}", levels());
