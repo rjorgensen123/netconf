@@ -494,6 +494,406 @@ set system radius-server 192.0.2.1 secret \"Rs1\"";
     );
 }
 
+/// The secret statements that count wherever they stand, used as a community's name.
+const STATEMENT_NAMES: [&str; 4] = ["token", "secret", "passphrase", "cak"];
+
+/// Community definitions under `policy-options`: set format, text on one line, a
+/// block, and a compare diff.
+fn community_definitions(name: &str) -> Vec<String> {
+    vec![
+        format!("set policy-options community {name} members 65000:100"),
+        format!("set policy-options community {name} members [ 65000:100 65000:200 ]"),
+        format!("set policy-options community {name} invert-match"),
+        format!("set groups G policy-options community {name} members 65000:100"),
+        format!("set logical-systems LS policy-options community {name} members 65000:100"),
+        format!("policy-options {{ community {name} members 65000:100; }}"),
+        format!("policy-options {{\n    community {name} members 65000:100;\n}}"),
+        format!(
+            "policy-options {{\n    community {name} {{ members [ 65000:100 65000:200 ]; }}\n}}"
+        ),
+        format!("[edit policy-options]\n+   community {name} members 65000:100;"),
+    ]
+}
+
+/// The same definitions as a command's output gives them, with no `policy-options`
+/// block or banner around them.
+fn bare_community_definitions(name: &str) -> Vec<String> {
+    vec![
+        format!("community {name} members 65000:100;"),
+        format!("community {name} members [ 65000:100 65000:200 ];"),
+        format!("community {name} invert-match;"),
+        format!("community {name} {{ members [ 65000:100 65000:200 ]; }}"),
+        format!("community {name} {{\n    members [ 65000:100 65000:200 ];\n}}"),
+        format!("+   community {name} members 65000:100;"),
+    ]
+}
+
+/// A quoted community name, and a name joined to other text with `_`.
+fn quoted_and_joined_community_names(name: &str) -> Vec<String> {
+    vec![
+        format!("set policy-options community \"{name}\" members 65000:100"),
+        format!("community \"{name}\" members 65000:100;"),
+        format!("set policy-options community cust_{name} members 65000:100"),
+        format!("community cust_{name} members 65000:100;"),
+        format!("set policy-options community {name}_x members 65000:100"),
+        format!("community {name}_x members 65000:100;"),
+    ]
+}
+
+/// References to a community from a policy: after `from`, in a list, and after
+/// `community add`, `set`, `delete` and `=`.
+fn community_references(name: &str) -> Vec<String> {
+    vec![
+        format!("set policy-options policy-statement P term T from community {name}"),
+        format!("set policy-options policy-statement P term T from community [ {name} other ]"),
+        format!("community [ {name} other ];"),
+        format!("then {{ community add {name}; accept; }}"),
+        format!("from {{ community {name}; protocol bgp; }}"),
+        format!("set policy-options policy-statement P term T then community set {name}"),
+        format!("then {{ community set {name}; accept; }}"),
+        format!("then {{ community delete {name}; accept; }}"),
+        format!("then {{ community = {name}; accept; }}"),
+        format!("then {{ community add [ {name} other ]; accept; }}"),
+    ]
+}
+
+/// An SNMP community, in set format and in text format.
+fn snmp_communities(name: &str) -> Vec<String> {
+    vec![
+        format!("set snmp community {name} authorization read-only"),
+        format!("snmp {{ community {name} {{ authorization read-only; }} }}"),
+        format!("snmp {{\n    community {name} {{\n        authorization read-only;\n    }}\n}}"),
+    ]
+}
+
+/// Each input `inputs` gives for each of the statement names goes out as it came in.
+fn unchanged_for_each_name(inputs: fn(&str) -> Vec<String>) {
+    for name in STATEMENT_NAMES {
+        for input in inputs(name) {
+            assert_eq!(r(&input), input, "the input was changed");
+        }
+    }
+}
+
+/// The word after `community` is a name, never a secret statement (0.7.0): a
+/// community named after one is shown with what follows its name.
+#[test]
+fn a_community_named_after_a_secret_statement_is_left_as_it_is() {
+    unchanged_for_each_name(community_definitions);
+}
+
+/// No `policy-options` around the line is needed, as in the output of
+/// `show configuration policy-options`.
+#[test]
+fn a_community_without_policy_options_around_it_is_left_as_it_is() {
+    unchanged_for_each_name(bare_community_definitions);
+}
+
+/// The whole token in the name's place is the name, quoted or joined with `_`.
+#[test]
+fn a_quoted_or_joined_community_name_is_left_as_it_is() {
+    unchanged_for_each_name(quoted_and_joined_community_names);
+}
+
+/// A policy's reference to a community is a name too, and so is each name in a list.
+#[test]
+fn a_reference_to_a_community_named_after_a_secret_statement_is_left_as_it_is() {
+    unchanged_for_each_name(community_references);
+}
+
+#[test]
+fn an_snmp_community_named_after_a_secret_statement_is_left_as_it_is() {
+    unchanged_for_each_name(snmp_communities);
+}
+
+/// A secret statement on the line of a community is redacted by its own name,
+/// whether it stands after the community or before it.
+#[test]
+fn a_secret_on_the_line_of_a_community_is_still_redacted() {
+    for name in STATEMENT_NAMES {
+        let kept = format!(
+            "policy-options {{ community {name} members 65000:100; }} system {{ radius-server 192.0.2.1 secret "
+        );
+        let out = r(&format!("{kept}\"Rs1\"; }}"));
+        assert!(out.starts_with(&kept), "{out}");
+        assert!(!out.contains("Rs1"), "{out}");
+        assert!(out.contains(REDACTED), "{out}");
+        assert_eq!(r(&out), out, "not idempotent");
+
+        let out = r(&format!(
+            "set system radius-server 192.0.2.1 secret community {name} members 65000:100"
+        ));
+        assert_eq!(
+            out,
+            format!("set system radius-server 192.0.2.1 secret {REDACTED}")
+        );
+        assert_eq!(r(&out), out, "not idempotent");
+    }
+}
+
+/// Only the word in a community's name place is a name: a secret statement anywhere
+/// else on the line is a hit. A word after which the statement neither ends nor goes
+/// on as a community's does is no name place, and the line is redacted as before.
+#[test]
+fn only_the_word_in_a_community_name_place_is_a_name() {
+    let line = "set policy-options community c1 members 65000:100";
+    assert_eq!(r(line), line);
+    let mut lines = vec![(
+        "community c1 members 65000:100; secret \"Rs1\";".to_string(),
+        "community c1 members 65000:100; secret ".to_string(),
+    )];
+    let mut as_before = Vec::new();
+    for name in STATEMENT_NAMES {
+        // After the definition's `;`, right after the name, and after the list the
+        // name stands in.
+        lines.push((
+            format!("community {name} members 65000:100; secret \"Rs1\";"),
+            format!("community {name} members 65000:100; secret "),
+        ));
+        as_before.push((
+            format!("community {name} secret \"Rs1\";"),
+            format!("community {name} {REDACTED};"),
+        ));
+        as_before.push((
+            format!("community [ {name} other ] secret \"Rs1\";"),
+            format!("community [ {name} {REDACTED};"),
+        ));
+    }
+    for (line, kept) in lines {
+        let out = r(&line);
+        assert!(out.starts_with(&kept), "{line}: {out}");
+        assert!(!out.contains("Rs1"), "{out}");
+        assert!(out.contains(REDACTED), "{out}");
+        assert_eq!(r(&out), out, "not idempotent");
+    }
+    for (line, expected) in as_before {
+        let out = r(&line);
+        assert_eq!(out, expected, "{line}");
+        assert!(!out.contains("Rs1"), "{out}");
+        assert_eq!(r(&out), out, "not idempotent");
+    }
+}
+
+/// A name the user chose that is not a community's keeps its redaction: a
+/// prefix-list named after a secret statement loses what follows it.
+#[test]
+fn a_name_that_is_not_a_community_keeps_its_redaction() {
+    for name in STATEMENT_NAMES {
+        let out = r(&format!(
+            "set policy-options prefix-list {name} 192.0.2.0/24"
+        ));
+        assert_eq!(
+            out,
+            format!("set policy-options prefix-list {name} {REDACTED}")
+        );
+        assert_eq!(r(&out), out, "not idempotent");
+    }
+}
+
+/// A second pass over each community input changes nothing, and none of them holds
+/// a secret.
+#[test]
+fn a_community_named_after_a_secret_statement_holds_no_secret() {
+    let groups: [fn(&str) -> Vec<String>; 5] = [
+        community_definitions,
+        bare_community_definitions,
+        quoted_and_joined_community_names,
+        community_references,
+        snmp_communities,
+    ];
+    for inputs in groups {
+        for name in STATEMENT_NAMES {
+            for input in inputs(name) {
+                let once = r(&input);
+                assert_eq!(r(&once), once, "not idempotent: {input:?}");
+                assert!(!contains_secrets(&input), "{input:?}");
+            }
+        }
+    }
+}
+
+/// Each input goes out without its secret values, and a second pass changes nothing.
+fn secret_values_redacted(inputs: &[&str]) {
+    for input in inputs {
+        let out = r(input);
+        for secret in ["hunter2", "Rs1", "Rs2"] {
+            assert!(
+                !out.contains(secret),
+                "«{secret}» leaked:\n  in:  {input:?}\n  out: {out:?}"
+            );
+        }
+        assert!(out.contains(REDACTED), "no marker: {out:?}");
+        assert_eq!(r(&out), out, "not idempotent: {input:?}");
+    }
+}
+
+/// A BGP group named `community` is no community statement: the secret under it is
+/// redacted, on its line and on the lines inside its block.
+#[test]
+fn a_secret_under_a_group_named_community_is_redacted() {
+    secret_values_redacted(&[
+        "set protocols bgp group community authentication-key hunter2",
+        "protocols { bgp { group community { authentication-key \"hunter2\"; } } }",
+        "group community {\n    authentication-key \"hunter2\";",
+        "[edit protocols bgp group community]\n+   authentication-key \"hunter2\";",
+    ]);
+}
+
+/// `community` as a value, a description say, makes no name of the statement after it.
+#[test]
+fn a_secret_after_community_as_a_value_is_redacted() {
+    secret_values_redacted(&[
+        "set protocols bgp group G description community authentication-key hunter2",
+        "system { radius-server 192.0.2.1 { description community; secret \"hunter2\"; } }",
+        "<configuration-text>system { radius-server 192.0.2.1 { description community; secret \"hunter2\"; } }</configuration-text>",
+        "<configuration-set>system { radius-server 192.0.2.1 { description community; secret \"hunter2\"; } }</configuration-set>",
+    ]);
+}
+
+/// A secret statement after `community` that is not in the form of a community
+/// statement on the same line is redacted: after a statement end, after a word
+/// that is the name, after a quoted `community`, and under a block or banner.
+#[test]
+fn a_secret_where_no_community_statement_stands_is_redacted() {
+    secret_values_redacted(&[
+        "community community; secret \"hunter2\";",
+        "community [ a community ]; secret \"hunter2\";",
+        "community; secret \"hunter2\";",
+        "community add; secret \"hunter2\";",
+        "community { secret \"hunter2\"; }",
+        "community \"\" secret hunter2",
+        "community ! secret hunter2",
+        "\"community\" secret hunter2",
+        "[edit snmp community]\n+   secret \"hunter2\";",
+        "community {\n    secret \"hunter2\";",
+    ]);
+}
+
+/// Punctuation glued into the word after `community` makes no name of it.
+#[test]
+fn a_secret_glued_to_the_word_after_community_is_redacted() {
+    secret_values_redacted(&[
+        "community x;secret hunter2",
+        "community token;secret hunter2;",
+        "community token{secret hunter2;}",
+        "community c1;}secret hunter2",
+        "community [a;secret hunter2]",
+        "community x(secret hunter2",
+        "community x,secret hunter2",
+        "community x/secret hunter2",
+    ]);
+}
+
+/// A list after `community` that holds a statement end or a second list before its
+/// `]` is no list of names.
+#[test]
+fn a_secret_in_a_list_that_is_no_list_of_names_is_redacted() {
+    secret_values_redacted(&[
+        "community [ token secret \"Rs1\";]",
+        "community [ token secret;] \"Rs1\"",
+        "community [ token secret \"Rs1\" }]",
+        "community [ token secret \"Rs1\" {]",
+        "community [ token secret [ \"Rs1\" \"Rs2\" ];",
+        "community [ token secret [ \"Rs1\" \"Rs2\" ]",
+    ]);
+}
+
+/// After `community add`, a name is one only where the statement ends after it.
+#[test]
+fn a_secret_after_the_operator_form_is_redacted() {
+    secret_values_redacted(&["community add secret \"Rs1\";"]);
+}
+
+/// Where the word after `community` and the token read inside it differ, where an
+/// open quote runs the word to the end of the line, and where a list is not closed
+/// before the statement ends, the secret is redacted as before.
+#[test]
+fn a_secret_beside_a_name_the_guards_refuse_is_redacted() {
+    secret_values_redacted(&[
+        "community \u{7}secret hunter2",
+        "community token&#32;secret hunter2",
+        "community cust\"token secret hunter2",
+        "community [ token; secret \"Rs1\" ]",
+        "community [ token other secret \"Rs1\"",
+    ]);
+}
+
+/// An SNMP community going on with one of its sub-statements.
+fn snmp_community_continuations(name: &str) -> Vec<String> {
+    vec![
+        format!("set snmp community {name} clients 192.0.2.0/24"),
+        format!("set snmp community {name} view V1"),
+        format!("set snmp community {name} routing-instance RI1"),
+        format!("set snmp community {name} logical-system LS1"),
+        format!("set snmp community {name} client-list-name CL1"),
+    ]
+}
+
+/// An SNMP community named after a secret statement is left as it is with each way
+/// its statement goes on.
+#[test]
+fn an_snmp_community_with_a_sub_statement_is_left_as_it_is() {
+    unchanged_for_each_name(snmp_community_continuations);
+}
+
+/// A statement glued after a list's closing `]` makes no list of names: the words of
+/// the list and the statement after it are read as before.
+#[test]
+fn a_secret_glued_after_a_list_of_names_is_redacted() {
+    secret_values_redacted(&[
+        "community [ a ];secret hunter2",
+        "community [ token ];secret \"Rs1\";",
+        "community [ a ];authentication-key hunter2",
+        "community [ a ]}secret hunter2",
+        "community [ a ];}secret hunter2",
+        "community [ a b];secret hunter2",
+        "community add [ a ];secret hunter2",
+        "then { community add [ a b ];secret \"Rs1\"; accept; }",
+        "from { community [ a b ];secret \"Rs1\"; }",
+    ]);
+}
+
+/// Where `community` does not begin a statement, a continuation word after a secret
+/// statement is part of the statement's value.
+#[test]
+fn a_secret_followed_by_a_continuation_word_is_redacted() {
+    secret_values_redacted(&["set protocols bgp group community authentication-key view hunter2"]);
+}
+
+/// A `]` that comes from an entity does not close a list of names.
+#[test]
+fn a_list_closed_by_an_entity_is_no_list_of_names() {
+    secret_values_redacted(&["community [ token secret \"Rs1\" &#x5d;"]);
+}
+
+/// `community` has a name place only where it begins a statement.
+#[test]
+fn a_community_that_does_not_begin_a_statement_has_no_name_place() {
+    let out = r("set protocols bgp group G community secret members 65000:100");
+    assert_eq!(
+        out,
+        format!("set protocols bgp group G community secret {REDACTED}")
+    );
+    assert_eq!(r(&out), out, "not idempotent");
+    unchanged(&[
+        "set policy-options community secret members 65000:100",
+        "set snmp community secret authorization read-only",
+        "set policy-options policy-statement P term T from community [ secret other ]",
+        "inactive: community secret members 65000:100;",
+        "+   community secret members 65000:100;",
+    ]);
+}
+
+/// A name place's word is a name only as the whole word: a statement read out of it,
+/// past a control character or whitespace from an entity, is a hit.
+#[test]
+fn a_statement_inside_a_word_in_a_name_place_is_a_hit() {
+    secret_values_redacted(&[
+        "community a\u{7}secret members hunter2",
+        "community a&#32;secret members hunter2",
+    ]);
+}
+
 // ---------------------------------------------------------------------------
 // (c) Structure and robustness properties
 // ---------------------------------------------------------------------------

@@ -503,6 +503,10 @@ impl Redactor {
     ///   with a tag straight after it, `secret<x>`, is the text of an element, and
     ///   has no value.
     ///
+    /// A word in a community's name place ([`community_name_places`]) is a name the
+    /// user chose, and gives no hit in either reading (0.7.0): neither as a word, nor
+    /// as a token that is that word.
+    ///
     /// A tag as XML writes it ([`tag_at`]) is markup: the element's name in it is
     /// no name out of a token; the element rule reads it. Everything else is text
     /// however it looks: an attribute's name and value, a comment, a CDATA section,
@@ -520,14 +524,22 @@ impl Redactor {
         }
         let words = words(doc);
         let names = statement_words(doc, &words);
+        let name_place = community_name_places(doc, &words);
+        // Where the words that are a community's name begin and end.
+        let community_spans: Vec<(usize, usize)> = words
+            .iter()
+            .zip(&name_place)
+            .filter(|&(_, &place)| place)
+            .map(|(w, _)| (w.start, w.start + w.text.len()))
+            .collect();
         let is_name = |k: usize| !element_name[k] && (b[k].is_ascii_alphanumeric() || b[k] == b'-');
         // The tag that begins at `k`.
         let tag_at_k = |k: usize| tags.binary_search_by_key(&k, |g| g.start).is_ok();
 
         let mut hits = Vec::new();
         let mut before = path.words();
-        for (w, name) in words.iter().zip(&names) {
-            if self.secret_word(name, &before) {
+        for ((w, name), &place) in words.iter().zip(&names).zip(&name_place) {
+            if !place && self.secret_word(name, &before) {
                 hits.push(Hit {
                     at: w.start,
                     value: w.start + w.text.len(),
@@ -540,6 +552,10 @@ impl Redactor {
         }
         for t in &toks {
             let end = t.start + t.text.len();
+            // A token that is a community's name, word for word, holds no statement.
+            if community_spans.binary_search(&(t.start, end)).is_ok() {
+                continue;
+            }
             // A quoted token is one name, as written.
             if t.text.starts_with('"') {
                 if self.secret_name(normalize(t.text)) {
@@ -606,14 +622,16 @@ impl Redactor {
     /// Whether a secret statement on the line is written as a word of its own with a
     /// value after it, the way Junos writes a statement: the first such word, and
     /// the word after it up to the first `##` or `/*`. Then the `SECRET-DATA` net
-    /// stands down.
+    /// stands down. A word in a community's name place ([`community_name_places`])
+    /// is no statement here either (0.7.0).
     fn statement_word_with_value(&self, doc: &Doc, path: &Path) -> bool {
         let words = words(doc);
         let names = statement_words(doc, &words);
+        let name_place = community_name_places(doc, &words);
         let mut before = path.words();
         let mut first = None;
         for (i, name) in names.iter().enumerate() {
-            if self.secret_word(name, &before) {
+            if !name_place[i] && self.secret_word(name, &before) {
                 first = Some(i);
                 break;
             }
@@ -1217,6 +1235,131 @@ fn statement_word<'a>(doc: &Doc, w: &Tok<'a>) -> &'a str {
 /// The words of the line read as statement names ([`statement_word`]).
 fn statement_words<'a>(doc: &Doc, words: &[Tok<'a>]) -> Vec<&'a str> {
     words.iter().map(|w| statement_word(doc, w)).collect()
+}
+
+/// The words a community statement goes on with after a plain name: a BGP
+/// community's, and an SNMP community's.
+const COMMUNITY_CONTINUATIONS: &[&str] = &[
+    "members",
+    "invert-match",
+    "authorization",
+    "clients",
+    "client-list-name",
+    "view",
+    "routing-instance",
+    "logical-system",
+];
+
+/// Which words of the line stand in a community's name place (0.7.0): where the word
+/// `community` begins a statement, the name, or each name of a `[ … ]` list, right
+/// after it or after `community add`, `set`, `delete` or `=`, when the statement
+/// ends right after it, or a plain name opens a block or goes on with one of
+/// [`COMMUNITY_CONTINUATIONS`]. Such a word is a name the user chose, never a secret
+/// statement; in doubt, a word is none.
+fn community_name_places(doc: &Doc, words: &[Tok<'_>]) -> Vec<bool> {
+    let text = doc.text.as_bytes();
+    // Whether the byte at `k` is one of `set`, as the line has it written.
+    let written = |k: usize, set: &[u8]| doc.literal[k] && set.contains(&text[k]);
+    // The length of the word `w` without the statement ends in `ends` it closes with.
+    let body = |w: &Tok<'_>, ends: &[u8]| {
+        let mut e = w.text.len();
+        while e > 0 && written(w.start + e - 1, ends) {
+            e -= 1;
+        }
+        e
+    };
+    // A quote left open runs the word to the end of the line.
+    let open_quote = |w: &Tok<'_>| {
+        (w.start..w.start + w.text.len())
+            .filter(|&k| written(k, b"\""))
+            .count()
+            % 2
+            == 1
+    };
+    let mut out = vec![false; words.len()];
+    // The name at word `at`, or the list of names that opens there: the statement
+    // ends after it with one of `ends`, or a plain name goes on when `goes_on` says so.
+    let mut mark = |at: usize, ends: &[u8], goes_on: bool| {
+        let Some(w) = words.get(at) else {
+            return;
+        };
+        if w.text.starts_with('[') {
+            // The list closes at its first `]`, written, with no statement end and no
+            // list in it; the word that holds the `]` ends after it with no more than
+            // the statement's end.
+            let open = w.start;
+            let Some(close) = doc.text[open + 1..]
+                .find([']', ';', '{', '}', '['])
+                .map(|k| open + 1 + k)
+                .filter(|&k| written(k, b"]"))
+            else {
+                return;
+            };
+            let Some(last) = words[at..]
+                .iter()
+                .position(|w| close < w.start + w.text.len())
+                .map(|j| at + j)
+            else {
+                return;
+            };
+            let end = words[last].start + words[last].text.len();
+            if !(close + 1..end).all(|k| written(k, b";}")) {
+                return;
+            }
+            if end == close + 1 && words.get(last + 1).is_some_and(|n| body(n, b";}") > 0) {
+                return;
+            }
+            for (j, w) in words.iter().enumerate().take(last + 1).skip(at) {
+                out[j] = !open_quote(w);
+            }
+            return;
+        }
+        let len = body(w, ends);
+        if w.text[..len].contains([';', '{', '}']) || open_quote(w) {
+            return;
+        }
+        let next = words.get(at + 1);
+        let ended = len < w.text.len() || next.is_none_or(|n| body(n, ends) == 0);
+        let continued = goes_on
+            && next.is_some_and(|n| COMMUNITY_CONTINUATIONS.contains(&&n.text[..body(n, b";{}")]));
+        out[at] = ended || continued;
+    };
+    // Where a statement begins: the first word of the line, past a leading diff marker
+    // and `inactive:` or `protect:`; a word after one that ends a statement or opens a
+    // block; and a word after one that a community statement stands under in set
+    // format.
+    let mut first = usize::from(
+        words
+            .first()
+            .is_some_and(|w| matches!(w.text, "+" | "-" | "!")),
+    );
+    if words
+        .get(first)
+        .is_some_and(|w| matches!(w.text, "inactive:" | "protect:"))
+    {
+        first += 1;
+    }
+    let begins_statement = |i: usize| {
+        i == first
+            || i.checked_sub(1).is_some_and(|p| {
+                let w = &words[p];
+                written(w.start + w.text.len() - 1, b";{}")
+                    || matches!(w.text, "policy-options" | "snmp" | "from" | "then")
+            })
+    };
+    for (i, w) in words.iter().enumerate() {
+        if w.text != "community" || !begins_statement(i) {
+            continue;
+        }
+        mark(i + 1, b";{}", true);
+        if words
+            .get(i + 1)
+            .is_some_and(|op| matches!(op.text, "add" | "set" | "delete" | "="))
+        {
+            mark(i + 2, b";}", false);
+        }
+    }
+    out
 }
 
 /// What to replace with [`REDACTED`] when the value starts at `start` and runs to

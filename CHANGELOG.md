@@ -128,6 +128,9 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-14 — A connection refused for its options is `TransportError::InvalidOptions`, not
   `Io`, and is logged as `ssh_connect_refused` or `ssh_host_key_probe_refused`. A pinned
   `host_key` that is not a fingerprint is refused the same way, before connecting.
+- 2026-11-14 — A community named after a secret statement, such as `secret` or `token`, is
+  shown with what follows it: where `community` begins a statement, the word after it is a
+  name. Its members were redacted.
 
 ## [0.6.1] — 2026-10-05
 

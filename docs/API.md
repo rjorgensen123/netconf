@@ -1145,7 +1145,8 @@ What is redacted:
   `url <url>`;
   `value` after `authentication-key N [type T]`. The context is the words before the name on the
   line, those of the text-format blocks it is in, or the `[edit …]` banner of a diff; in XML, the
-  parent element. A word that merely holds one of these is none of them.
+  parent element. A word that merely holds one of these is none of them, and a word in a
+  community's name place is a name, not a statement (see the communities bullet below).
   The **first** such statement on a line wins, and everything after it becomes `REDACTED` — the
   trailing `;` `{` `}` `]` `)` and a `## …` or `/* … */` annotation are kept, and a list value
   keeps its own closing bracket: `secret [ "$9$a" "$9$b" ];` → `secret [SENSITIVE: …];`;
@@ -1169,7 +1170,13 @@ What is redacted:
   secret, so `community`, and `community-name` in SNMPv3, are left as they are. A value the device
   writes as `$9$…`, or on a line marked `SECRET-DATA`, is still redacted, as every such value is. A
   BGP community under `policy-options` is a name, not a secret, and no rule redacts it for being
-  one. **SNMPv3 keys and passwords are always redacted.**
+  one. Where `community` begins a statement, the word right after it on the same line is a name, not
+  a statement, when the statement ends or opens its block there or goes on as a community's does
+  (`members`, `invert-match`, `authorization`, `clients`, `client-list-name`, `view`,
+  `routing-instance`, `logical-system`), and so is the name after `community add`, `set`, `delete`
+  or `=`, or each name of a `[ … ]` list, when the statement ends right after it; a community named
+  `secret` or `token` is then shown with what follows it, and anything else is read as before.
+  **SNMPv3 keys and passwords are always redacted.**
 - **Hash and obfuscation literals** anywhere — `$<tag>$…` for any tag of one to four letters or
   digits: `$9$`, `$8$`, `$6$`, `$5$`, `$1$`, `$0$`, `$2a$`, `$sha1$` and the rest — become
   `$<tag>$` followed by `REDACTED`; the tag stays, so the operator can see which form it was.

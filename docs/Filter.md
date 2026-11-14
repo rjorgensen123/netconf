@@ -359,6 +359,8 @@ name alone does not say it, its context does — the words before it on the line
 blocks it is inside in text format (or the `[edit …]` banner of a compare diff), and its parent
 element in XML. From the statement on, the rest of the line goes, up to a Junos annotation — or up
 to the closing tags the line ends in, where the statement has ended before them with a `;` or a `}`.
+A word in a community's name place is a name, never a statement: see the note on communities below
+the list.
 
 | Statement | Context | Where Junos has it |
 |---|---|---|
@@ -401,6 +403,13 @@ where Junos marks them `## SECRET-DATA` in text format, the net takes their valu
 > whoever can read the configuration on a Junos device can read that part too. A value the device
 > writes as `$9$…`, or on a line marked `SECRET-DATA`, is still redacted, as every such value is. A
 > BGP community under `policy-options` is a name, not a secret, and no rule redacts it for being one.
+> Where `community` begins a statement, the word right after it on the same line is a name, not a
+> statement, when the statement ends or opens its block right after it, or goes on as a community's
+> does: `members`, `invert-match`, `authorization`, `clients`, `client-list-name`, `view`,
+> `routing-instance` or `logical-system`. So is the word after `community add`, `set`, `delete` or
+> `=`, and each word of a `[ … ]` list in either place, when the statement ends right after the name
+> or the list. A community named `secret` or `token` is then shown with what follows it; anything
+> else is read as before.
 
 ### The read filter and the drift guard
 
