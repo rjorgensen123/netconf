@@ -208,6 +208,9 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// A refusal from the device comes back as the device's own `Device` error. A
     /// commit that got no readable answer comes back as
     /// [`CommitUnanswered`](NetconfError::CommitUnanswered), carrying what happened.
+    /// A commit the session does not send, on a session that is out of step — see
+    /// [`unanswered`](crate::NetconfSession::unanswered) — is the session's
+    /// `Protocol` refusal, as it is (0.7.0): nothing was sent.
     ///
     /// With [`set_synchronize_commits`](crate::NetconfSession::set_synchronize_commits)
     /// on, `<synchronize/>` comes first inside `<commit-configuration>`.
@@ -530,12 +533,20 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// timeout, the broken connection or the unreadable reply — rather than an error
     /// that looks like any other failed request.
     ///
+    /// A commit the session refuses before it is sent — the session is out of step,
+    /// or the device has sent data no request asked for — is that `Protocol` refusal,
+    /// as it is (0.7.0): nothing was sent. The session's message-id tells the two
+    /// apart, not the error's text.
+    ///
     /// The commit runs under `Timeouts::per_commit` when the consumer has set one:
     /// a device can take far longer to commit than to answer anything else.
     async fn send_commit(&mut self, inner: &str) -> Result<String, NetconfError> {
+        let sent_before = self.last_message_id();
         match self.rpc_with_budget(inner, ReplyBudget::PerCommit).await {
             Ok(reply) => Ok(reply),
             Err(e @ NetconfError::Device(_)) => Err(e),
+            // Refused before it was handed to the transport: nothing was sent.
+            Err(e) if self.last_message_id() == sent_before => Err(e),
             Err(e) => Err(NetconfError::CommitUnanswered(Box::new(e))),
         }
     }

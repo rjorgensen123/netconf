@@ -170,6 +170,10 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-14 — The code examples are in `docs/Usage.md`. The README has two, a basic one and
   one with `all_free`; the examples on the crate's front page, on `redact_secrets` and in
   `docs/Filter.md` are gone.
+- 2026-11-14 — A commit that is refused before it is sent — the session is out of step, or the
+  device has sent data no request asked for — is the `Protocol` refusal itself. It came back
+  as `CommitUnanswered`, which says a commit was sent. The API review entry below, from the
+  same day, describes it as it was.
 
 ### Changed — a last tidy-up before the release
 

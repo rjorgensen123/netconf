@@ -465,9 +465,10 @@ replies, so nothing would tell. An `<rpc-error>` is the device's answer, and cha
   step, and sends nothing more — <unanswered>. Its answer may still come, and a new request would
   read it as its own. Close the session, check that the device answers, and read its state on a
   new one`.
-- `commit()` with no confirmed commit waiting returns both refusals wrapped in `CommitUnanswered`,
-  the `Protocol` error inside it, although nothing was sent. `commit_confirmed`, and `commit()`
-  with a confirmed commit waiting, read the commit history first and return the plain `Protocol`.
+- `commit()`, `commit_confirmed` and `confirm_commit` return both refusals as the plain
+  `Protocol`, not as `CommitUnanswered`: nothing was sent. On a session already out of step,
+  `commit_confirmed`, `confirm_commit`, and `commit()` with a confirmed commit waiting, are refused
+  at the read they send before the commit.
 - `close()` does not send `<close-session/>` then. It closes the transport, which hands over what
   the device still sends on the way — the late answer, when it comes, is in the `Closed` error's
   `partial`, inside `CloseFailed`. The device lets go of the session's lock when the session ends.

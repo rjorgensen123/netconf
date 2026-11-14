@@ -2023,3 +2023,47 @@ async fn a_confirmed_commit_records_its_own_commit_and_nothing_else() {
     ));
     assert!(!sent_str(&log).contains("<commit-configuration"));
 }
+
+/// **A commit the session refuses is not unanswered** (0.7.0). On a session that is
+/// out of step after a request that got no answer, `commit` sends nothing, and the
+/// error is the session's `Protocol` refusal as it is: `CommitUnanswered` says a
+/// commit was sent.
+#[tokio::test]
+async fn a_commit_on_a_session_out_of_step_is_the_refusal_itself() {
+    // Nothing queued beyond the hello: the device goes quiet, and the request is
+    // unanswered.
+    let (mut s, log) = session(vec![]).await;
+    assert!(matches!(
+        s.rpc("<get-configuration/>").await,
+        Err(NetconfError::Transport(_))
+    ));
+    let sent_before = log.lock().unwrap().len();
+    match s.commit(None).await {
+        Err(NetconfError::Protocol { detail, .. }) => {
+            assert!(detail.contains("out of step"), "{detail}");
+        }
+        other => panic!("expected the out-of-step refusal, got {other:?}"),
+    }
+    assert_eq!(log.lock().unwrap().len(), sent_before, "{}", sent_str(&log));
+}
+
+/// **The same when the device has sent data no request asked for** (0.7.0): the
+/// commit is not sent, and the error is that `Protocol` refusal as it is.
+#[tokio::test]
+async fn a_commit_after_data_no_request_asked_for_is_the_refusal_itself() {
+    let mut twice = ok_reply_any();
+    twice.extend(ok_reply_any());
+    let (mut s, log) = session(vec![twice]).await;
+    s.rpc("<get-configuration/>")
+        .await
+        .expect("the first reply is the answer");
+    let sent_before = log.lock().unwrap().len();
+    match s.commit(None).await {
+        Err(NetconfError::Protocol { detail, received }) => {
+            assert!(detail.contains("no request asked for"), "{detail}");
+            assert!(received.is_some_and(|r| r.contains("<ok/>")));
+        }
+        other => panic!("expected the refusal of data no request asked for, got {other:?}"),
+    }
+    assert_eq!(log.lock().unwrap().len(), sent_before, "{}", sent_str(&log));
+}

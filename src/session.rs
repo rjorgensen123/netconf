@@ -520,6 +520,14 @@ impl<T: NetconfTransport> NetconfSession<T> {
         )))
     }
 
+    /// The `message-id` of the last request this session handed to the transport, 0
+    /// before the first (0.7.0). A request refused before it is sent leaves it as it
+    /// was, so read before and after a request it tells whether the request was
+    /// handed to the transport.
+    pub(crate) fn last_message_id(&self) -> u64 {
+        self.msg_id
+    }
+
     /// A reply as the session reads every one: text, the answer to the request just
     /// sent, and an `<rpc-reply>` — its errors failing the call, its warnings kept
     /// for `take_warnings`. The reply as the device wrote it, when it is a success.
