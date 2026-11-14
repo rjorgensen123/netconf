@@ -177,6 +177,9 @@ Every notable change to this crate is recorded here. The format follows
   device has sent data no request asked for — is the `Protocol` refusal itself. It came back
   as `CommitUnanswered`, which says a commit was sent. The API review entry below, from the
   same day, describes it as it was.
+- 2026-11-14 — `check_device` keeps what the device wrote on stderr when its own clock runs out
+  at the hello or the request: the text is in the `Timeout` it returns. It was lost. The API
+  review entry below, from the same day, describes it as it was.
 
 ### Changed — a last tidy-up before the release
 

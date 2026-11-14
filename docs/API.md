@@ -1736,7 +1736,8 @@ decides nothing from it.
   when the check stopped on it; `capabilities()` and `session_id()` once the hello has come;
   `banner()` when the check ran to its end, and `stderr()` then, when the device wrote on the
   subsystem's stderr; when the check stopped, that text is in the error where the error carries
-  it (§8). A `Timeout` the check builds itself at `Hello` or `Request` carries none.
+  it (§8). A `Timeout` the check builds itself at `Hello` or `Request` carries it in `stderr`, a
+  line the device has not ended included, since the check ends there (0.7.0).
 
 The report is always whole, and is read at three levels:
 

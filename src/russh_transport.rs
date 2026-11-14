@@ -377,8 +377,8 @@ fn append_capped(buf: &mut String, text: &str, cap: usize) -> bool {
 /// - **Not logged.** The redaction takes what it knows the shape of, and a secret
 ///   in a form it does not know would pass. The event says that the device wrote,
 ///   and how much.
-/// - **Wiped** when the transport is dropped. The copies the redaction works on
-///   are not.
+/// - **Wiped** when the last handle to it is dropped: the transport's, or the one
+///   `check_device` keeps. The copies the redaction works on are not.
 struct Stderr {
     kept: zeroize::Zeroizing<String>,
     /// How far into `kept` has been handed over: always where a line begins, or
@@ -613,8 +613,9 @@ pub struct RusshTransport {
     channel: russh::Channel<russh::client::Msg>,
     observed_host_key: Option<String>,
     /// What the subsystem wrote on stderr, and how much of it has been handed
-    /// over. It used to be discarded silently.
-    stderr: Stderr,
+    /// over. It used to be discarded silently. Shared, so `check_device` can take
+    /// it when its own clock drops the session that holds the transport (0.7.0).
+    stderr: Arc<StdMutex<Stderr>>,
     /// Why russh ended the connection, if it did on an error — from the handler.
     failed: Failed,
     /// Data that arrived before the device answered the subsystem request, handed
@@ -1178,7 +1179,7 @@ impl RusshTransport {
             handle,
             channel,
             observed_host_key,
-            stderr,
+            stderr: Arc::new(StdMutex::new(stderr)),
             failed,
             pending,
             said,
@@ -1336,7 +1337,11 @@ impl RusshTransport {
     /// the session the rest.
     fn said(&mut self, end: bool) -> SshMessages {
         let mut ssh = said_now(&self.said);
-        ssh.stderr = self.stderr.take(end);
+        ssh.stderr = self
+            .stderr
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take(end);
         ssh
     }
 
@@ -1371,10 +1376,12 @@ impl RusshTransport {
         limit: std::time::Duration,
         during: &'static str,
     ) -> NetconfError {
-        with_stderr(
-            NetconfError::timeout(op, limit, during),
-            self.stderr.take(false),
-        )
+        let said = self
+            .stderr
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take(false);
+        with_stderr(NetconfError::timeout(op, limit, during), said)
     }
 }
 
@@ -1415,7 +1422,10 @@ impl NetconfTransport for RusshTransport {
     }
 
     fn take_stderr(&mut self) -> Option<String> {
-        self.stderr.take(false)
+        self.stderr
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take(false)
     }
 
     async fn recv(&mut self) -> Result<Bytes, NetconfError> {
@@ -1472,7 +1482,10 @@ impl NetconfTransport for RusshTransport {
                 // operator with «peer closed before a complete message» and nothing
                 // else. See `Stderr`.
                 Some(russh::ChannelMsg::ExtendedData { data, ext }) => {
-                    self.stderr.keep(&data, ext);
+                    self.stderr
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .keep(&data, ext);
                     continue;
                 }
                 // The device's EOF: it sends no more data, but what follows it is
@@ -1539,7 +1552,10 @@ impl NetconfTransport for RusshTransport {
                         dropped = dropped.saturating_add(lost);
                     }
                     Ok(Some(russh::ChannelMsg::ExtendedData { data, ext })) => {
-                        self.stderr.keep(&data, ext);
+                        self.stderr
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .keep(&data, ext);
                     }
                     Ok(Some(other)) => note_exit(&self.said, &other),
                 }
@@ -1968,7 +1984,8 @@ impl std::fmt::Display for DeviceCheck {
 ///
 /// **One clock.** The whole check runs within `Timeouts::connect`, counted from
 /// when it starts, and never past `total`; a short limit makes a quick check. A
-/// step that runs out of it is the step the check stopped at.
+/// step that runs out of it is the step the check stopped at. At the hello and the
+/// request, its `Timeout` carries what the device wrote on stderr (0.7.0).
 ///
 /// **Always a report.** Once the connection is started, what comes back is a
 /// [`DeviceCheck`], whether every step answered or one stopped — the step, and the
@@ -2035,12 +2052,17 @@ pub async fn check_device(opts: &ConnectOptions) -> Result<DeviceCheck, NetconfE
         }
     };
     check.fingerprint = transport.observed_host_key();
+    // The transport's stderr, for when the check's own clock drops the session
+    // that holds it: then the check is over, so all of it goes.
+    let stderr = Arc::clone(&transport.stderr);
+    let all_stderr = || stderr.lock().unwrap_or_else(|p| p.into_inner()).take(true);
 
     let session = match timeout(left(), NetconfSession::establish(transport, true)).await {
         Ok(Ok(session)) => session,
         Ok(Err(e)) => return Ok(stop(check, progress, CheckStep::Hello, e)),
         Err(_) => {
             let e = NetconfError::timeout("rpc-recv", limit, WHILE_WAITING_FOR_HELLO);
+            let e = with_stderr(e, all_stderr());
             return Ok(stop(check, progress, CheckStep::Hello, e));
         }
     };
@@ -2059,6 +2081,7 @@ pub async fn check_device(opts: &ConnectOptions) -> Result<DeviceCheck, NetconfE
         Ok(Err(e)) => Ok(stop(check, progress, CheckStep::Request, e)),
         Err(_) => {
             let e = NetconfError::timeout("rpc-recv", limit, WHILE_CLOSING);
+            let e = with_stderr(e, all_stderr());
             Ok(stop(check, progress, CheckStep::Request, e))
         }
     }

@@ -64,6 +64,9 @@ enum Device {
     Chatty,
     /// Sends its hello when the subsystem opens, and answers nothing after it.
     HelloThenSilent,
+    /// Sends its hello when the subsystem opens, and at `<close-session/>` writes on
+    /// stderr why, then never answers.
+    HelloThenExplainsAndStalls,
     /// Has only a DSA host key, so offers only `ssh-dss`, and opens the subsystem.
     DsaHostKey,
 }
@@ -132,6 +135,7 @@ impl Device {
             Device::DripsOnStderr => "drips-on-stderr",
             Device::Chatty => "chatty",
             Device::HelloThenSilent => "hello-then-silent",
+            Device::HelloThenExplainsAndStalls => "hello-then-explains-and-stalls",
             Device::DsaHostKey => "dsa-host-key",
         }
     }
@@ -209,7 +213,10 @@ impl russh::server::Handler for Handler {
             | Device::Disconnects
             | Device::DataAfterEof
             | Device::DsaHostKey => session.channel_success(channel),
-            Device::ClosesCleanly | Device::Chatty | Device::HelloThenSilent => {
+            Device::ClosesCleanly
+            | Device::Chatty
+            | Device::HelloThenSilent
+            | Device::HelloThenExplainsAndStalls => {
                 session.channel_success(channel)?;
                 if let Device::Chatty = self.device {
                     session.extended_data(channel, 1, &b"warning: chatty-hello\n"[..])?;
@@ -289,6 +296,11 @@ impl russh::server::Handler for Handler {
                 let ok = "<rpc-reply xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\" \
                           message-id=\"1\"><ok/></rpc-reply>]]>]]>";
                 session.data(channel, ok.as_bytes())?;
+            }
+            Device::HelloThenExplainsAndStalls
+                if data.windows(13).any(|w| w == b"close-session") =>
+            {
+                session.extended_data(channel, 1, EXPLANATION.as_bytes())?;
             }
             Device::DataAfterEof => {
                 session.eof(channel)?;
@@ -1557,6 +1569,85 @@ async fn a_device_check_reports_what_the_device_wrote_on_stderr() {
         "{text}"
     );
     assert!(!check.to_string().contains("stderr-leak"), "{check}");
+    assert_eq!(check.stderr(), None);
+}
+
+/// **A device check that runs out of time at the hello carries what the device
+/// wrote on stderr** (0.7.0): the check builds that `Timeout` itself, after the
+/// session that held the transport is gone, and the text goes with it — redacted.
+#[tokio::test]
+async fn a_device_check_out_of_time_at_the_hello_carries_what_the_device_wrote_on_stderr() {
+    use netconf::russh_transport::{CheckStep, check_device};
+    let limit = Duration::from_secs(2);
+    let opts = start(
+        Device::ExplainsAndStalls,
+        Timeouts {
+            connect: limit,
+            ..Timeouts::default()
+        },
+    )
+    .await;
+    let check = tokio::time::timeout(Duration::from_secs(20), check_device(&opts))
+        .await
+        .expect("the check outlived its limit")
+        .map_err(|e| e.to_string())
+        .unwrap();
+    match check.stopped() {
+        Some((
+            CheckStep::Hello,
+            NetconfError::Timeout {
+                op: "rpc-recv",
+                limit: ran_out,
+                during,
+                stderr,
+                ..
+            },
+        )) => {
+            assert_eq!(*ran_out, limit, "{check}");
+            assert_eq!(during, "while waiting for the device's hello", "{check}");
+            assert_explained(stderr);
+        }
+        other => panic!("expected the hello to run out of time, got {other:?}"),
+    }
+    assert_eq!(check.stderr(), None);
+}
+
+/// **A device check that runs out of time at the request carries what the device
+/// wrote on stderr** (0.7.0), as at the hello.
+#[tokio::test]
+async fn a_device_check_out_of_time_at_the_request_carries_what_the_device_wrote_on_stderr() {
+    use netconf::russh_transport::{CheckStep, check_device};
+    let limit = Duration::from_secs(2);
+    let opts = start(
+        Device::HelloThenExplainsAndStalls,
+        Timeouts {
+            connect: limit,
+            ..Timeouts::default()
+        },
+    )
+    .await;
+    let check = tokio::time::timeout(Duration::from_secs(20), check_device(&opts))
+        .await
+        .expect("the check outlived its limit")
+        .map_err(|e| e.to_string())
+        .unwrap();
+    match check.stopped() {
+        Some((
+            CheckStep::Request,
+            NetconfError::Timeout {
+                op: "rpc-recv",
+                limit: ran_out,
+                during,
+                stderr,
+                ..
+            },
+        )) => {
+            assert_eq!(*ran_out, limit, "{check}");
+            assert_eq!(during, "while closing the session", "{check}");
+            assert_explained(stderr);
+        }
+        other => panic!("expected the request to run out of time, got {other:?}"),
+    }
     assert_eq!(check.stderr(), None);
 }
 
