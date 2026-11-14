@@ -556,6 +556,50 @@ async fn without_the_lock_nothing_is_discarded_or_committed() {
     assert!(!sent_str(&log).contains("<rpc"), "{}", sent_str(&log));
 }
 
+/// **A commit comment that cannot be sent discards nothing** (0.7.0). `confirm_commit`
+/// checks it before anything is sent: the refusal is `Policy`, no compare, commit,
+/// discard or unlock goes out, the lock and the loaded change are kept, and the
+/// call goes through when it is made again with a comment that can be sent.
+#[tokio::test]
+async fn a_bad_commit_comment_discards_nothing_and_the_confirm_can_be_made_again() {
+    let d = diff_reply("[edit protocols l2circuit]\n+   neighbor 10.0.0.2");
+    let (mut s, log) = session(vec![
+        ok_reply(),
+        ok_reply(),
+        d.clone(),
+        d,
+        ok_reply(),
+        ok_reply(),
+    ])
+    .await;
+    let prepared = s
+        .prepare_change(PAYLOAD, Format::Set, LoadAction::Merge)
+        .await
+        .unwrap();
+    let after_prepare = sent_str(&log);
+    match s
+        .confirm_commit(&prepared, "ticket 4711\nsecond line")
+        .await
+    {
+        Err(NetconfError::Policy(m)) => assert!(
+            m.starts_with("a control character, U+000A, in the commit comment"),
+            "{m}"
+        ),
+        other => panic!("expected a Policy refusal, got {other:?}"),
+    }
+    assert_eq!(
+        sent_str(&log),
+        after_prepare,
+        "nothing may be sent after the prepare"
+    );
+    let replies = s.confirm_commit(&prepared, "ticket 4711").await.unwrap();
+    let steps: Vec<_> = replies.iter().map(|(step, _)| *step).collect();
+    assert_eq!(steps, ["commit-configuration", "unlock"]);
+    let sent = sent_str(&log);
+    assert!(sent.contains("<log>ticket 4711</log>"), "{sent}");
+    assert!(!sent.contains("<discard-changes"), "{sent}");
+}
+
 /// **The diff is what the policy lets through** (0.5.11). Under the ordinary policy
 /// the device's secrets are redacted before the diff reaches the consumer, and the
 /// marker says what was there; a fresh diff under the same policy reads the same

@@ -54,6 +54,9 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-12 — `rpc::parse_hello_capabilities`, `rpc::parse_rpc_reply` and
   `rpc::extract_compare_diff` redact the document a `Protocol` error carries in `received`, as
   their documentation said. Through a session it was redacted already.
+- 2026-11-14 — A commit comment is checked before it is sent: one line of printable ASCII and
+  a tab, at most 512 characters (`MAX_COMMIT_COMMENT`), under every policy. It went into the
+  request as it stood.
 
 ### Added
 

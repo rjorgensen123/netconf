@@ -1172,7 +1172,10 @@ fn control_character(text: &str) -> Option<char> {
 /// The first character in a command that the gate refuses: anything but printable
 /// ASCII (U+0020 to U+007E) and a tab (0.5.11). The Junos CLI is ASCII; a non-ASCII
 /// value belongs in a configuration payload, which [`parse_set_payload`] reads.
-fn outside_printable_ascii(cmd: &str) -> Option<char> {
+///
+/// A commit comment is held to the same rule, by this function (0.7.0) — see
+/// [`check_commit_comment`](crate::junos::check_commit_comment).
+pub(crate) fn outside_printable_ascii(cmd: &str) -> Option<char> {
     cmd.chars()
         .find(|&c| c != '\t' && !(' '..='~').contains(&c))
 }

@@ -49,6 +49,12 @@ impl LoadAction {
     }
 }
 
+/// The most characters a commit comment may hold (0.7.0). Junos takes a comment of
+/// up to 512 bytes on one line, and a comment is printable ASCII, so a character is
+/// a byte. A longer one is refused before anything is sent — see
+/// [`commit`](NetconfSession::commit).
+pub const MAX_COMMIT_COMMENT: usize = 512;
+
 impl<T: NetconfTransport> NetconfSession<T> {
     /// Lock the candidate database.
     ///
@@ -213,6 +219,14 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// before anything is sent (0.5.11): no policy bound, `all_deny`, `read_only`,
     /// `all_free(Ro)`, or rules without a change grant.
     ///
+    /// **A comment is one line of printable ASCII** (0.7.0): the characters from
+    /// U+0020 to U+007E and a tab, at most [`MAX_COMMIT_COMMENT`] of them. Anything
+    /// else — a control character such as a line break, NUL or ESC, or a character
+    /// outside ASCII — is refused as [`Policy`](NetconfError::Policy) before anything
+    /// is sent, under every policy, `all_free(Rwd)` included. Such a character went
+    /// into `<log>` as it stood: a NUL or an ESC made the request invalid XML, and a
+    /// line break made a log of several lines.
+    ///
     /// **What a bare `commit` does not give you.** It puts the WHOLE candidate into
     /// operation, and the candidate is shared: what someone else has left there
     /// uncommitted goes with it, and so does anything loaded with the raw
@@ -245,6 +259,10 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// `<commit-results>`, naming each routing engine that committed.
     pub async fn commit(&mut self, comment: Option<&str>) -> Result<String, NetconfError> {
         self.permit(Action::Change)?;
+        // How the comment is written, whatever the access, before anything is sent.
+        if let Some(c) = comment {
+            check_commit_comment(c).map_err(NetconfError::Policy)?;
+        }
         if let Some(pending) = self.confirmed.clone() {
             self.check_unchanged_since(&pending).await?;
         }
@@ -417,6 +435,12 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// not checked. A history that cannot be read before the commit fails the
     /// call with nothing committed.
     ///
+    /// The comment is held to the rule [`commit`](Self::commit) holds it to (0.7.0):
+    /// one line of printable ASCII and a tab, at most [`MAX_COMMIT_COMMENT`]
+    /// characters. Anything else is refused as [`Policy`](NetconfError::Policy)
+    /// before anything is sent — the commit history is not read — under every
+    /// policy.
+    ///
     /// Returns the device's `<rpc-reply>` to the commit, redacted as
     /// [`commit_check`](Self::commit_check)'s is (0.5.13).
     pub async fn commit_confirmed(
@@ -425,6 +449,10 @@ impl<T: NetconfTransport> NetconfSession<T> {
         comment: Option<&str>,
     ) -> Result<String, NetconfError> {
         self.permit(Action::Change)?;
+        // How the comment is written, whatever the access, before anything is sent.
+        if let Some(c) = comment {
+            check_commit_comment(c).map_err(NetconfError::Policy)?;
+        }
         let sync = self.synchronize();
         let log = match comment {
             Some(c) => format!("<log>{}</log>", xml_escape(c)),
@@ -1303,6 +1331,34 @@ fn push_target(names: &mut Vec<String>, local: &[u8]) {
     if name != "configuration" {
         names.push(name);
     }
+}
+
+/// Whether a commit comment may be sent (0.7.0): one line of printable ASCII and a
+/// tab — the rule a command is held to, by the same function,
+/// [`outside_printable_ascii`](crate::policy::outside_printable_ascii) — and at
+/// most [`MAX_COMMIT_COMMENT`] characters. The characters are checked first, then
+/// the length. Refused, the text says why; the character itself is not in it.
+pub(crate) fn check_commit_comment(comment: &str) -> Result<(), String> {
+    if let Some(c) = crate::policy::outside_printable_ascii(comment) {
+        let what = if c.is_control() {
+            "a control character"
+        } else {
+            "a character outside printable ASCII"
+        };
+        return Err(format!(
+            "{what}, U+{:04X}, in the commit comment — a comment is one line of printable \
+             ASCII, and only a tab may appear in it besides (denied, fail-closed)",
+            u32::from(c)
+        ));
+    }
+    let n = comment.chars().count();
+    if n > MAX_COMMIT_COMMENT {
+        return Err(format!(
+            "the commit comment is {n} characters — a comment is at most \
+             {MAX_COMMIT_COMMENT} (denied, fail-closed)"
+        ));
+    }
+    Ok(())
 }
 
 /// Minimal XML escaping for text embedded in RPCs (`&`, `<`, `>`).

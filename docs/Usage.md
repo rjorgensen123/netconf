@@ -265,6 +265,12 @@ let replies = session.confirm_commit(&prepared, "ge-0/0/1.123 for customer A").a
 `NetconfError::Policy`, and the device has not even been locked. Only `Format::Set` can be checked;
 `Text` and `Xml` require `ConfigPolicy::all_free(Access::Rwd)`.
 
+**The commit comment is one line of printable ASCII**: the characters from space to `~` and a tab,
+at most 512 of them (`netconf::junos::MAX_COMMIT_COMMENT`), whatever the policy. Anything else — a
+line break, another control character, a letter outside ASCII such as `æ` — is refused as
+`NetconfError::Policy` before anything is sent; `confirm_commit` then keeps the lock and the loaded
+change, so you can call it again with another comment.
+
 **Between phase 1 and 2 the candidate stays loaded and locked.** If you are not going to commit,
 clean up:
 

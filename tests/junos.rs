@@ -4,6 +4,7 @@
 
 use netconf::error::ConfirmedCheck;
 use netconf::framing::{Framing, encode};
+use netconf::junos::MAX_COMMIT_COMMENT;
 use netconf::mock::{MockTransport, SentLog};
 use netconf::rpc::{BASE_1_0, wrap_rpc};
 use netconf::{Access, ConfigPolicy, Format, LoadAction, NetconfError, NetconfSession, Scope};
@@ -702,6 +703,196 @@ async fn a_set_payload_with_a_lone_carriage_return_is_not_sent() {
         !sent_str(&log).contains("<load-configuration"),
         "{}",
         sent_str(&log)
+    );
+}
+
+/// The characters a commit comment refuses, each with how the refusal names it.
+const REFUSED_IN_A_COMMENT: [(char, &str); 7] = [
+    ('\u{0}', "a control character, U+0000"),
+    ('\u{1b}', "a control character, U+001B"),
+    ('\r', "a control character, U+000D"),
+    ('\n', "a control character, U+000A"),
+    ('\u{7f}', "a control character, U+007F"),
+    ('æ', "a character outside printable ASCII, U+00E6"),
+    ('\u{2028}', "a character outside printable ASCII, U+2028"),
+];
+
+/// The refusal of a comment holding the character named.
+fn refused_comment(named: &str) -> String {
+    format!(
+        "{named}, in the commit comment — a comment is one line of printable ASCII, and only \
+         a tab may appear in it besides (denied, fail-closed)"
+    )
+}
+
+/// **A commit comment is one line of printable ASCII** (0.7.0), the rule a command
+/// is held to: a control character, or a character outside ASCII, is refused as
+/// `Policy`, naming its code point and not echoing it, and nothing is sent. Such a
+/// character went into `<log>` as it stood: a NUL or an ESC made the request
+/// invalid XML, and a line break made a log of several lines.
+#[tokio::test]
+async fn a_commit_comment_outside_printable_ascii_is_not_sent() {
+    let (mut s, log) = session(vec![]).await;
+    for (c, named) in REFUSED_IN_A_COMMENT {
+        let comment = format!("ticket{c}4711");
+        match s.commit(Some(&comment)).await {
+            Err(NetconfError::Policy(reason)) => {
+                assert_eq!(reason, refused_comment(named), "{comment:?}");
+                assert!(!reason.contains(c), "{comment:?}: {reason}");
+            }
+            other => panic!("{comment:?}: expected a Policy refusal, got {other:?}"),
+        }
+    }
+    let sent = sent_str(&log);
+    assert!(!sent.contains("commit-configuration"), "{sent}");
+    assert!(!sent.contains("<rpc "), "nothing may be sent: {sent}");
+}
+
+/// A confirmed commit holds its comment to the same rule (0.7.0), and refuses it
+/// before anything is sent: the commit history it reads first is not read either.
+#[tokio::test]
+async fn a_confirmed_commit_comment_outside_printable_ascii_is_not_sent() {
+    let (mut s, log) = session(vec![]).await;
+    for (c, named) in REFUSED_IN_A_COMMENT {
+        let comment = format!("ticket{c}4711");
+        match s.commit_confirmed(5, Some(&comment)).await {
+            Err(NetconfError::Policy(reason)) => {
+                assert_eq!(reason, refused_comment(named), "{comment:?}")
+            }
+            other => panic!("{comment:?}: expected a Policy refusal, got {other:?}"),
+        }
+    }
+    let sent = sent_str(&log);
+    assert!(!sent.contains("commit-configuration"), "{sent}");
+    assert!(!sent.contains("get-commit-information"), "{sent}");
+    assert!(!sent.contains("<rpc "), "nothing may be sent: {sent}");
+}
+
+/// **A commit comment is at most 512 characters** (0.7.0), the most Junos takes on
+/// one line: 512 goes out, 513 is refused, and nothing is sent for it.
+#[tokio::test]
+async fn a_commit_comment_is_at_most_512_characters() {
+    assert_eq!(MAX_COMMIT_COMMENT, 512);
+    let (mut s, log) = session(vec![ok_reply()]).await;
+    let longest = "x".repeat(512);
+    s.commit(Some(&longest)).await.unwrap();
+    assert!(sent_str(&log).contains(&format!("<log>{longest}</log>")));
+    let before = sent_str(&log);
+    match s.commit(Some(&"x".repeat(513))).await {
+        Err(NetconfError::Policy(reason)) => assert_eq!(
+            reason,
+            "the commit comment is 513 characters — a comment is at most 512 (denied, \
+             fail-closed)"
+        ),
+        other => panic!("expected a Policy refusal, got {other:?}"),
+    }
+    assert_eq!(
+        sent_str(&log),
+        before,
+        "nothing may be sent for the refused commit"
+    );
+}
+
+/// The characters of a commit comment are checked before its length (0.7.0): a
+/// comment that is too long and holds a line feed is refused for the line feed, and
+/// nothing is sent.
+#[tokio::test]
+async fn a_commit_comment_is_checked_for_its_characters_before_its_length() {
+    let (mut s, log) = session(vec![]).await;
+    let comment = format!("{}\n{}", "x".repeat(300), "x".repeat(299));
+    assert_eq!(comment.chars().count(), 600);
+    match s.commit(Some(&comment)).await {
+        Err(NetconfError::Policy(reason)) => {
+            assert_eq!(reason, refused_comment("a control character, U+000A"))
+        }
+        other => panic!("expected a Policy refusal, got {other:?}"),
+    }
+    assert!(
+        !sent_str(&log).contains("<rpc "),
+        "nothing may be sent: {}",
+        sent_str(&log)
+    );
+}
+
+/// A tab is allowed in a commit comment, as in a command, and so are `&`, `<` and
+/// `>`: they go out escaped inside `<log>`, in the plain commit and the confirmed
+/// one.
+#[tokio::test]
+async fn a_commit_comment_with_a_tab_and_markup_characters_goes_out_escaped() {
+    let (mut s, log) = session(vec![
+        ok_reply_any(),
+        info_before(),
+        ok_reply_any(),
+        info_a(),
+    ])
+    .await;
+    let comment = "R&D\t<ticket> 4711";
+    s.commit(Some(comment)).await.unwrap();
+    s.commit_confirmed(5, Some(comment)).await.unwrap();
+    let sent = sent_str(&log);
+    assert_eq!(
+        sent.matches("<log>R&amp;D\t&lt;ticket&gt; 4711</log>")
+            .count(),
+        2,
+        "{sent}"
+    );
+}
+
+/// **The comment's rule is about how it is written, not about access** (0.7.0): it
+/// holds under `all_free(Rwd)` too, as a command's does.
+#[tokio::test]
+async fn the_commit_comment_rule_holds_under_all_free_rwd() {
+    let (mut s, log) = session_without_policy(vec![]).await;
+    s.set_policy(ConfigPolicy::all_free(Access::Rwd));
+    match s.commit(Some("ticket 4711\nsecond line")).await {
+        Err(NetconfError::Policy(reason)) => {
+            assert_eq!(reason, refused_comment("a control character, U+000A"))
+        }
+        other => panic!("expected a Policy refusal, got {other:?}"),
+    }
+    assert!(
+        !sent_str(&log).contains("<rpc "),
+        "nothing may be sent: {}",
+        sent_str(&log)
+    );
+}
+
+/// **A confirming commit checks its comment before it reads the device** (0.7.0).
+/// With a confirmed commit made on this session waiting, a comment that cannot be
+/// sent is refused before the check a confirming commit makes: nothing is sent for
+/// the call — no `<get-commit-information/>`, no compare, no commit.
+#[tokio::test]
+async fn a_confirming_commit_refuses_its_comment_before_it_reads_the_device() {
+    let empty_diff = eom(&format!(
+        "<rpc-reply xmlns=\"{BASE_1_0}\"><configuration-information>\
+         <configuration-output/></configuration-information></rpc-reply>"
+    ));
+    // The replies to the check a confirming commit makes are queued: a check made
+    // before the comment's would go through, and show in what is sent.
+    let (mut s, log) = session(vec![
+        info_before(),
+        ok_reply_any(),
+        info_a(),
+        info_a(),
+        empty_diff,
+    ])
+    .await;
+    s.commit_confirmed(5, Some("job")).await.unwrap();
+    assert!(
+        s.confirmed_commit().is_some(),
+        "a confirmed commit is waiting"
+    );
+    let before = sent_str(&log);
+    match s.commit(Some("ticket 4711\nsecond line")).await {
+        Err(NetconfError::Policy(reason)) => {
+            assert_eq!(reason, refused_comment("a control character, U+000A"))
+        }
+        other => panic!("expected a Policy refusal, got {other:?}"),
+    }
+    assert_eq!(
+        sent_str(&log),
+        before,
+        "nothing may be sent for the refused commit"
     );
 }
 

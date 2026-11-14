@@ -23,7 +23,7 @@
 //! policy redacts is caught too; what the operator sees is the redacted diff.
 
 use crate::error::NetconfError;
-use crate::junos::{Format, LoadAction};
+use crate::junos::{Format, LoadAction, check_commit_comment};
 use crate::policy::parse_set_lines;
 use crate::session::{Action, NetconfSession};
 use crate::transport::NetconfTransport;
@@ -216,6 +216,13 @@ impl<T: NetconfTransport> NetconfSession<T> {
     /// answers to the cleanup after it in [`WithReplies`](NetconfError::WithReplies)
     /// when a request of the cleanup went through — and if the cleanup fails as
     /// well, as [`CleanupFailed`](NetconfError::CleanupFailed), carrying both.
+    ///
+    /// **The comment is checked before anything is sent** (0.7.0), by the rule
+    /// [`commit`](Self::commit) holds it to: one line of printable ASCII and a tab,
+    /// at most [`MAX_COMMIT_COMMENT`](crate::junos::MAX_COMMIT_COMMENT) characters.
+    /// Anything else is refused as [`Policy`](NetconfError::Policy), under every
+    /// policy. Nothing is discarded: the lock and the loaded change are kept, so the
+    /// call can be made again with another comment.
     pub async fn confirm_commit(
         &mut self,
         approved: &PreparedChange,
@@ -234,6 +241,10 @@ impl<T: NetconfTransport> NetconfSession<T> {
                     .into(),
             ));
         }
+        // The comment is checked before anything is sent (0.7.0), and a refusal goes
+        // out as it is, not through the cleanup: nothing was sent, so the lock and the
+        // loaded change are kept for a call with a comment that can be sent.
+        check_commit_comment(comment).map_err(NetconfError::Policy)?;
         // Every failure path cleans up, not just the drift one.
         //
         // This used to use `?` directly on the network calls, so a timeout or a

@@ -489,6 +489,7 @@ Typed operations on top of the generic RPC layer, so the consumer never handcraf
 pub enum LoadAction { Merge, Replace, Override }
 pub enum Format { Text, Set, Xml }
 pub struct CommitRecord { /* private */ } // one commit of commit_history(): fields(), sequence_number(), user(), client(), date_time(), seconds(), log()
+pub const MAX_COMMIT_COMMENT: usize = 512; // the most characters a commit comment may hold — one line of printable ASCII and a tab
 
 impl<T: NetconfTransport> NetconfSession<T> {
  pub async fn lock(&mut self) -> Result<String, NetconfError>; // the <rpc-reply>, secrets redacted
@@ -587,14 +588,31 @@ What each helper sends. *Escaped* means `&`, `<` and `>` become entities — not
 | `load_configuration`, `Text` | `<load-configuration action="<action>" format="text"><configuration-text>` payload, escaped |
 | `load_configuration`, `Xml` | `<load-configuration action="<action>"><configuration>` payload **verbatim** — the caller owns its well-formedness |
 | `commit_check` | `<commit-configuration><check/></commit-configuration>` |
-| `commit` | `<commit-configuration/>`, or with `<log>` comment, escaped; with `set_synchronize_commits(true)`, `<synchronize/>` first inside it. When a confirmed commit made on this session is waiting: first `<get-commit-information/>`, then the compare RPC, then the commit; when the last commit is another, no commit, and the compare RPC against rollback N when the confirmed commit is still in the history |
-| `commit_confirmed` | `<commit-configuration><confirmed/><confirm-timeout>` minutes, then the optional `<log>`; with `set_synchronize_commits(true)`, `<synchronize/>` first inside it; then `<get-commit-information/>` |
+| `commit` | `<commit-configuration/>`, or with `<log>` comment, escaped — a comment that is not one line of printable ASCII and a tab, or is longer than `MAX_COMMIT_COMMENT`, is refused and nothing is sent (below); with `set_synchronize_commits(true)`, `<synchronize/>` first inside it. When a confirmed commit made on this session is waiting: first `<get-commit-information/>`, then the compare RPC, then the commit; when the last commit is another, no commit, and the compare RPC against rollback N when the confirmed commit is still in the history |
+| `commit_confirmed` | `<commit-configuration><confirmed/><confirm-timeout>` minutes, then the optional `<log>` — a comment that breaks the rule `commit` holds it to is refused, and then nothing is sent and the commit history is not read (below); with `set_synchronize_commits(true)`, `<synchronize/>` first inside it; then `<get-commit-information/>` |
 | `rollback` | `<load-configuration rollback="n"/>` |
 | `discard_changes` | `<discard-changes/>` |
 | `get_configuration` | `<get-configuration/>`, or the filter inside `<get-configuration>`, serialized from what the read gate parsed |
 | `compare` | `<get-configuration compare="rollback" rollback="0" format="text"/>` |
 | `command` | `<command format="text">` command, escaped |
 | `commit_history` | `<get-commit-information/>` |
+
+**The commit comment is one line of printable ASCII.** `commit` and `commit_confirmed` — and so
+`confirm_commit` (§5) — hold the comment to the rule a command is held to: the characters from
+U+0020 to U+007E and a tab, and at most `MAX_COMMIT_COMMENT` characters, 512 — Junos takes a
+comment of up to 512 bytes on one line, and in printable ASCII a character is a byte. Anything else
+is refused as `Policy` before anything is sent for the call — by `commit_confirmed` before the
+commit history is read — under every policy, `all_free(Rwd)` included: the rule is how a comment
+is written, not what the session may do. The characters are checked first, then the length. A
+control character — NUL, ESC, a carriage return, a line feed, DEL and the rest — is refused with
+`a control character, U+000A, in the commit comment — a comment is one line of printable ASCII,
+and only a tab may appear in it besides (denied, fail-closed)`; any other character outside
+printable ASCII, `æ` and U+2028 among them, with `a character outside printable ASCII, U+00E6, in
+the commit comment — a comment is one line of printable ASCII, and only a tab may appear in it
+besides (denied, fail-closed)`; and a comment that is too long with `the commit comment is 513
+characters — a comment is at most 512 (denied, fail-closed)`. The code point is the first refused
+character's, the count the comment's; the character itself is not in the text. `&`, `<` and `>`
+may be in a comment, and are escaped in `<log>`.
 
 **`commit_history()` is how a consumer finds out whether a commit took effect.** It returns one
 `CommitRecord` per `<commit-history>` entry, the newest first: each child of the entry by its
@@ -759,6 +777,12 @@ compare and the commit would not be one step — prepare_change() takes the lock
 first (denied, fail-closed)`, and `abort_change: this session does not hold the lock on the
 candidate, so what is in it may be someone else's — nothing is discarded (denied, fail-closed)`. A
 change from `from_diff` is confirmed on a session that has locked, and loaded, first.
+
+**The comment is checked before anything is sent.** `confirm_commit` checks it right after the
+check that the session holds the lock, by the rule in §4: one line of printable ASCII and a tab, at
+most `MAX_COMMIT_COMMENT` characters. A refusal is `Policy`, with the texts in §4, and comes as it
+is, not in `WithReplies`: nothing was sent, so nothing is discarded — the lock and the loaded
+change are kept, and `confirm_commit` can be called again with a comment that can be sent.
 
 Everything that comes back is reported. Phase 2 returns the device's answers to the
 commit and the unlock, `[("commit-configuration", reply), ("unlock", reply)]`. A commit
