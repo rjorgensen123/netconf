@@ -1679,4 +1679,7 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
   knows the shape of (§7). A secret written there in a form the filter does not know reaches the
   caller the text is handed to (§8). The text is kept out of the log, capped at 4096 bytes a
   session and wiped from memory for that reason.
+- A name of your own that is one of the secret statement names of §7 (`secret`, `token`, …) is not
+  supported, a community's name excepted: in set format and in text on one line it is read as that
+  statement, and what follows it on the line is redacted.
 

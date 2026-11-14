@@ -131,6 +131,9 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-14 — A community named after a secret statement, such as `secret` or `token`, is
   shown with what follows it: where `community` begins a statement, the word after it is a
   name. Its members were redacted.
+- 2026-11-14 — The docs say that a name of your own that is one of the secret statement names,
+  such as a routing instance named `secret`, is not supported: what follows it on the line is
+  redacted. A community is the exception.
 
 ## [0.6.1] — 2026-10-05
 

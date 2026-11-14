@@ -411,6 +411,11 @@ where Junos marks them `## SECRET-DATA` in text format, the net takes their valu
 > or the list. A community named `secret` or `token` is then shown with what follows it; anything
 > else is read as before.
 
+> **A name of your own that is one of these statement names is not supported.** A routing instance,
+> policy, prefix list, group or user named `secret`, `token` or another name in the table is read as
+> that statement in set format and in text on one line, and what follows it on the line is redacted.
+> Nothing is shown that should not be. A community is the one exception.
+
 ### The read filter and the drift guard
 
 `prepare_change` returns the diff as the policy lets it through, and `confirm_commit` commits only
