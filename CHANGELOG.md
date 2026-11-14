@@ -84,7 +84,9 @@ Every notable change to this crate is recorded here. The format follows
   `connect` reports a timeout in any of its first steps under one name.
 - 2026-11-14 — `SshPolicy::Custom` works: the consumer's own lists of SSH algorithms, chosen
   from the names `Modern` and `LegacyJunos` offer. `SshPolicy::validate` checks a policy, and
-  `SshPolicy::without` gives one with names left out. It was refused before connecting.
+  `SshPolicy::without` gives one with names left out. It was refused before connecting. An
+  entry below from the same day says the docs call it not built but planned; it was built
+  after that.
 
 ### Changed
 
