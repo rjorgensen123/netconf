@@ -65,6 +65,10 @@ Every notable change to this crate is recorded here. The format follows
   checked.
 - 2026-11-14 — A device's host key must be of a type the SSH policy allows, under every
   policy. One of another type is refused.
+- 2026-11-14 — A value after `key`, `password`, `value`, `ascii-text` or `hexadecimal` is
+  redacted also when a control character or a character reference stands between the name and
+  the value. It went out as it was. The API review entry below, from the same day, has it
+  under «Known limits»; it was closed after that.
 
 ### Added
 

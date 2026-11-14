@@ -1232,11 +1232,10 @@ and `authentication-&#107;ey` a statement name, in an XML reply as in a diff; wh
 goes out as it came in, entities and all. Whitespace and the ASCII control characters separate
 tokens, which the names that are a secret wherever they stand are read from. The names that need
 their context — `key`, `password`, `value`, `ascii-text` and `hexadecimal` — are read from words
-split only where the line has whitespace written as it is: a control character that is not
-whitespace, or whitespace written as a character reference, between such a name and its value
-does not split them, and this rule then leaves the value —
-`authentication md5 1 key\u{7}hunter2` and `authentication md5 1 key&#32;hunter2` go out as
-they came. Every rule reads the line as it stands, and what any of them finds is redacted. The statement rule reads markup only as XML
+split where the line has whitespace written as it is, and a second time from words split at every
+whitespace or ASCII control character, written or from a character reference; both readings
+redact: `authentication md5 1 key\u{7}hunter2` and `authentication md5 1 key&#32;hunter2` lose
+`hunter2` as `authentication md5 1 key hunter2` does. Every rule reads the line as it stands, and what any of them finds is redacted. The statement rule reads markup only as XML
 writes it — a tag whose `<`, `>`, `=` and quotes are in the line as written; a comment, a CDATA
 section, a processing instruction, a tag that is not well formed and text that came from
 `&lt;…&gt;` are text like any other to it. The element rule redacts in these cases too: it reads
@@ -1833,9 +1832,4 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
 - A name of your own that is one of the secret statement names of §7 (`secret`, `token`, …) is not
   supported, a community's name excepted: in set format and in text on one line it is read as that
   statement, and what follows it on the line is redacted.
-- A secret statement that needs its context — `key`, `password`, `value`, `ascii-text`,
-  `hexadecimal` — is read from words split only on whitespace written in the line. A control
-  character that is not whitespace, or whitespace written as a character reference, between the
-  name and its value does not split them, and the value is not redacted unless another rule
-  finds it, as a `$9$` value is found (§7).
 

@@ -1889,3 +1889,83 @@ fn a_closing_tag_the_value_may_hold_is_redacted_with_it() {
         assert!(!out.contains("/x"), "{line}: {out}");
     }
 }
+
+/// A control character, or whitespace written as a character reference, between
+/// `key` and its value separates them as a plain space does (0.7.0): the value
+/// went out as it came.
+#[test]
+fn a_control_character_or_an_encoded_space_after_key_separates_its_value() {
+    for line in [
+        "authentication md5 1 key\u{7}hunter2",
+        "authentication md5 1 key&#32;hunter2",
+        "authentication md5 1 key&#9;hunter2",
+        "set protocols ospf area 0 interface ge-0/0/0 authentication md5 1 key\u{7}hunter2",
+    ] {
+        assert_redacted(line, "hunter2", "authentication md5 1 key");
+    }
+}
+
+/// Each name that needs its context, where it is a secret, loses its value the same
+/// way with a control character or an encoded space after it as with a plain space
+/// (0.7.0).
+#[test]
+fn each_name_that_needs_its_context_is_separated_from_its_value_by_any_separator() {
+    for (name, template) in [
+        (
+            "key",
+            "set protocols ospf area 0 interface ge-0/0/0 authentication md5 1 key{SEP}K1",
+        ),
+        ("password", "set system proxy password{SEP}\"W1\""),
+        (
+            "value",
+            "authentication-key 1 {\n    type md5;\n    value{SEP}\"N1\";\n}",
+        ),
+        (
+            "ascii-text",
+            "pre-shared-key {\n    ascii-text{SEP}\"P1\";\n}",
+        ),
+        (
+            "hexadecimal",
+            "pre-shared-key {\n    hexadecimal{SEP}\"P1\";\n}",
+        ),
+    ] {
+        let plain = template.replace("{SEP}", " ");
+        let plain_out = r(&plain);
+        let redacted = format!("{name} {REDACTED}");
+        assert!(
+            plain_out.contains(&redacted),
+            "{plain:?} gave {plain_out:?}"
+        );
+        for sep in ["\u{7}", "&#32;"] {
+            let line = template.replace("{SEP}", sep);
+            let expected = plain_out.replace(&redacted, &format!("{name}{sep}{REDACTED}"));
+            assert_eq!(r(&line), expected, "{line:?}");
+        }
+    }
+}
+
+/// Where a name that needs its context is no secret with a plain space after it, it
+/// is none with a control character or an encoded space either: the context is
+/// still read (0.7.0).
+#[test]
+fn a_name_outside_its_context_stays_shown_with_any_separator() {
+    for template in [
+        "set security authentication-key-chains key-chain kc key{SEP}0 start-time \"2024-01-01.00:00\"",
+        "set system login password{SEP}minimum-length 8",
+        "set system ntp trusted-key 1 type md5 value{SEP}10",
+        "set system login announcement ascii-text{SEP}welcome",
+        "set firewall filter f term t from payload hexadecimal{SEP}0x1f",
+    ] {
+        for sep in [" ", "\u{7}", "&#32;"] {
+            let line = template.replace("{SEP}", sep);
+            assert_eq!(r(&line), line, "{line:?}");
+        }
+    }
+}
+
+/// A community named after a secret statement, on a line with plain spaces, is
+/// shown as it was beside the reading split at every separator (0.7.0).
+#[test]
+fn a_community_named_after_a_secret_statement_stays_shown_beside_the_separated_reading() {
+    unchanged(&["set policy-options community secret members 65000:100"]);
+}

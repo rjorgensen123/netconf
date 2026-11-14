@@ -490,12 +490,17 @@ impl Redactor {
     /// too much of the rest of the line — which is the right direction to err in.
     /// Past an annotation the line is read on (0.5.13).
     ///
-    /// A name is read two ways (0.5.13), and both redact:
+    /// A name is read three ways, and each reading redacts: as a word and out of a
+    /// token (0.5.13), and as a word split at every separator (0.7.0).
     ///
     /// - As a word, the way Junos writes a statement ([`statement_word`]), with the
     ///   words before it on the line and those of the blocks it is in ([`Path`]):
     ///   `key` is a secret after `md5 1`, and not after `key-chain kc`. The value
     ///   begins at the next word.
+    /// - As a word of [`separated_words`], read with its context the same way: a
+    ///   control character, or whitespace from a character reference, between a
+    ///   name and its value separates them as a space does, so `key\u{7}hunter2`
+    ///   after `md5 1` loses `hunter2`.
     /// - Out of a token, from whatever is glued to it that cannot be part of a
     ///   name — a control character, punctuation: `\u{7}secret` and `x(secret` are
     ///   `secret`, and what follows the name is the value. Only a name that says it
@@ -504,8 +509,8 @@ impl Redactor {
     ///   has no value.
     ///
     /// A word in a community's name place ([`community_name_places`]) is a name the
-    /// user chose, and gives no hit in either reading (0.7.0): neither as a word, nor
-    /// as a token that is that word.
+    /// user chose, and gives no hit (0.7.0): not as a word, in either word reading,
+    /// and not as a token that is such a word of the first.
     ///
     /// A tag as XML writes it ([`tag_at`]) is markup: the element's name in it is
     /// no name out of a token; the element rule reads it. Everything else is text
@@ -586,6 +591,24 @@ impl Redactor {
                         in_text: true,
                     });
                 }
+            }
+        }
+        // The words split at every separator, read with their context as the words
+        // above are, community name places included (0.7.0).
+        let separated = separated_words(doc);
+        let separated_names = statement_words(doc, &separated);
+        let separated_place = community_name_places(doc, &separated);
+        let mut before = path.words();
+        for ((w, name), &place) in separated.iter().zip(&separated_names).zip(&separated_place) {
+            if !place && self.secret_word(name, &before) {
+                hits.push(Hit {
+                    at: w.start,
+                    value: w.start + w.text.len(),
+                    in_text: false,
+                });
+            }
+            if !name.is_empty() && *name != "!" {
+                before.push(name);
             }
         }
         hits.sort_by_key(|h| h.at);
@@ -855,7 +878,7 @@ struct Doc {
     from: Vec<Option<usize>>,
     /// For each byte of `text`: whether the line has it as written, rather than
     /// decoded from an entity; the marker counts as written. Markup is read only
-    /// where its `<`, `>`, `=` and quotes are written, and words are split only
+    /// where its `<`, `>`, `=` and quotes are written, and [`words`] splits only
     /// where the line has whitespace.
     literal: Vec<bool>,
 }
@@ -1194,6 +1217,42 @@ fn words(doc: &Doc) -> Vec<Tok<'_>> {
             i += 1;
         }
         // A word ends at whitespace, which is ASCII, so `i` is on a char boundary.
+        out.push(Tok {
+            text: &line[start..i],
+            start,
+        });
+    }
+    out
+}
+
+/// The words of the line split at every separator ([`is_separator`]), whether the
+/// line has it written or it comes from a character reference (0.7.0), with quotes
+/// and the marker as [`words`] reads them. A control character, or whitespace from
+/// a character reference, then separates a name from its value as a space does.
+fn separated_words(doc: &Doc) -> Vec<Tok<'_>> {
+    let (line, b) = (doc.text.as_str(), doc.text.as_bytes());
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        while i < b.len() && is_separator(b[i]) {
+            i += 1;
+        }
+        if i >= b.len() {
+            break;
+        }
+        let start = i;
+        let mut in_quote = false;
+        while i < b.len() && (in_quote || !is_separator(b[i])) {
+            if let Some(n) = marker_at(line, i) {
+                i += n;
+                continue;
+            }
+            if b[i] == b'"' && doc.literal[i] {
+                in_quote = !in_quote;
+            }
+            i += 1;
+        }
+        // A word ends at a separator, which is ASCII, so `i` is on a char boundary.
         out.push(Tok {
             text: &line[start..i],
             start,
