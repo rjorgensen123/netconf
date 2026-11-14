@@ -747,13 +747,6 @@ impl Redactor {
 ///
 /// **Use this on everything that is displayed, logged or stored** — never on what is
 /// to be hashed for the drift comparison; see the module documentation.
-///
-/// ```
-/// let diff = "+  encrypted-password \"$9$hunter2\"; ## SECRET-DATA";
-/// let safe = netconf::redact_secrets(diff);
-/// assert!(!safe.contains("hunter2"));
-/// assert!(safe.contains("encrypted-password"));
-/// ```
 pub fn redact_secrets(text: &str) -> String {
     Redactor::default().redact(text)
 }

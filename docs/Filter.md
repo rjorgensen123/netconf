@@ -75,10 +75,9 @@ So a rule that allows deletion *below* a protocol does **not** allow deleting th
 clean up inside, but not rip out. That granularity is what lets a filter be useful and safe at the
 same time.
 
-```rust
-let policy = ConfigPolicy::with_default_floor()
-    .allow("interfaces * unit *", Match::Subtree, &[Op::Set, Op::Delete]);
-```
+`ConfigPolicy::with_default_floor().allow("interfaces * unit *", Match::Subtree, &[Op::Set, Op::Delete])`
+is a rule that allows set and delete strictly below every logical unit, and
+[Usage](Usage.md#building-a-policy) shows it in a policy.
 
 ### Ready-made scopes
 
@@ -281,11 +280,8 @@ Under `all_free` every read is open.
 **By default, only `show`.** An ordinary `show` runs under the device user's own authorization on
 the box — the login class from RADIUS or TACACS+ — and netconf does not try to replicate that.
 Everything else (`request`, `clear`, `restart`, …) changes state and is refused unless the policy
-grants it:
-
-```rust
-let policy = ConfigPolicy::with_default_floor().allow_command("request system storage cleanup");
-```
+grants it. `ConfigPolicy::with_default_floor().allow_command("request system storage cleanup")` is
+such a grant, and [Usage](Usage.md#building-a-policy) shows it in a policy.
 
 A grant is a prefix of whole words, compared as written. An empty grant grants nothing.
 `read_only` and `all_free(Ro)` refuse every command but `show` whatever is granted; under

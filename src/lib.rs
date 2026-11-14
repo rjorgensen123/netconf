@@ -13,13 +13,7 @@
 //! login: with the `russh-transport` feature one transient copy is made there and
 //! wiped after use, and russh holds its own while it logs in. SSH keys are not used.
 //!
-//! ```no_run
-//! # async fn ex<T: netconf::NetconfTransport>(t: T) -> Result<(), netconf::NetconfError> {
-//! let mut s = netconf::NetconfSession::establish(t, true).await?;
-//! let reply = s.rpc("<get-configuration/>").await?;   // raw XML out; the caller parses it
-//! s.close().await?;
-//! # let _ = reply; Ok(()) }
-//! ```
+//! Examples are in the guide, `docs/Usage.md` in the repository.
 //!
 //! # Features
 //!

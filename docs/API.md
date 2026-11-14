@@ -1104,8 +1104,8 @@ is what a session without a bound policy has; bind it to say so out loud. It is 
 `static` can hold it.
 
 **The crate delivers the mechanism, not the policy.** Which modes exist is the consumer's
-business — consumers compose theirs as `grant`/`allow` chains. *(The rules told in prose, with
-examples: `docs/Filter.md`.)*
+business — consumers compose theirs as `grant`/`allow` chains. *(The rules told in prose:
+`docs/Filter.md`; examples: `docs/Usage.md`.)*
 
 ---
 

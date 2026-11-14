@@ -478,6 +478,7 @@ if contains_secrets(text) {
     tracing::warn!("the text carries secrets — keeping the redacted version");
 }
 let safe = redact_secrets(text);
+// `encrypted-password "$9$…";` comes out as `encrypted-password [SENSITIVE: …];`
 ```
 
 `redact_secrets` is the filter the session uses. It leaves an SNMP community readable, because an

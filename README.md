@@ -87,19 +87,54 @@ tokio, which is what the offline tests use:
 ```toml
 [dependencies]
 netconf = { version = "0.6", features = ["russh-transport"] }
+krypto  = "0.8"     # for the password
 ```
 
-```rust,no_run
-# async fn ex<T: netconf::NetconfTransport>(t: T) -> Result<(), netconf::NetconfError> {
-let mut session = netconf::NetconfSession::establish(t, true).await?;
-let reply = session.rpc("<get-configuration/>").await?;  // raw XML out; the caller parses it
+Connect over SSH with a pinned host key, bind a policy, read, and close:
+
+```rust
+use netconf::russh_transport::RusshTransport;
+use netconf::{Auth, ConfigPolicy, ConnectOptions, NetconfSession, SshPolicy, Timeouts};
+
+let opts = ConnectOptions {
+    host: "pe1.example.net".into(),
+    port: 830,
+    username: "netops".into(),
+    auth: Auth::Password(krypto::SecretString::from_string(password)?),
+    ssh_policy: SshPolicy::Modern,
+    timeouts: Timeouts::default(),
+    platform_hint: None,
+    host_key: Some(approved_fingerprint), // "SHA256:…", approved by a person
+};
+
+let mut session = NetconfSession::<RusshTransport>::connect(&opts).await?;
+session.set_policy(ConfigPolicy::with_default_floor());
+let interfaces = session
+    .get_configuration(Some("<configuration><interfaces/></configuration>"))
+    .await?;
 session.close().await?;
-# Ok(()) }
+```
+
+On a session opened the same way, this loads configuration in text format, which only
+`all_free(Access::Rwd)` permits:
+
+```rust
+use netconf::{Access, ConfigPolicy, Format, LoadAction};
+
+// `all_free` takes the filter off. Make that choice on purpose.
+session.set_policy(ConfigPolicy::all_free(Access::Rwd));
+session.lock().await?;
+session
+    .load_configuration("system { host-name pe1; }", LoadAction::Merge, Format::Text)
+    .await?;
+let diff = session.compare().await?;
+session.discard_changes().await?;
+session.unlock().await?;
 ```
 
 The full public surface is in [`docs/API.md`](docs/API.md), and a test checks that the
 public names in the code are in the document; it cannot tell whether a sentence there is true.
-[`docs/Usage.md`](docs/Usage.md) is the guide;
+[`docs/Usage.md`](docs/Usage.md) is the guide, with the rest of the examples;
 [`docs/Filter.md`](docs/Filter.md) documents the filter rules.
 
 ## What the crate does not do
