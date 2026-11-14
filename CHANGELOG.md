@@ -200,6 +200,8 @@ consumer needs krypto 0.8 and Rust 1.99.1.
   it stands first, with the comment it was sent with. A name of your own is read as a secret
   statement only where that statement is a secret wherever it stands. And the heading of the
   error chapter no longer says «three branches».
+- 2026-11-14 — The dependency lines in the README and the guide read `netconf = "0.7"`, and
+  `SECURITY.md` names 0.7.x as the supported version.
 
 ### Changed — API review and update
 
