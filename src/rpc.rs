@@ -520,7 +520,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
                             // its name (0.5.13); it used to be dropped.
                             let field = field_of(name).unwrap_or(Field::Other);
                             let path = match field {
-                                Field::Info if name != b"error-info" => {
+                                Field::Info if !local_eq(name, b"error-info") => {
                                     vec![String::from_utf8_lossy(name).into_owned()]
                                 }
                                 _ => Vec::new(),
@@ -566,7 +566,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
                             // as one inside `error-info` does.
                             let field = field_of(name).unwrap_or(Field::Other);
                             let value = match field {
-                                Field::Info if name != b"error-info" => {
+                                Field::Info if !local_eq(name, b"error-info") => {
                                     format!("{}:", String::from_utf8_lossy(name))
                                 }
                                 _ => String::new(),
@@ -1036,13 +1036,12 @@ fn set_field(de: &mut DeviceError, open: &OpenField, v: String) {
 /// Whether the local name of an element or an attribute — its name without a
 /// namespace prefix — is `want`.
 ///
-/// It is one comparison, and it is a function on purpose. Every place that asks
-/// what an element or an attribute is asks it here, so the rule for comparing
-/// names stands in one place: the name is compared whole, as bytes, and a
-/// namespace is not looked at. Written out at each of those places it would be the
-/// same line many times over, and a change to the rule would have to reach every
-/// one of them — the kind of code that is one day right in all places but one.
-/// Five places had it written out (0.7.0), and use this now.
+/// It is one comparison, and it is a function on purpose: a place that asks
+/// whether an element or an attribute is a given one asks it here where it can,
+/// so the rule stands in one place — the name is compared whole, as bytes, and a
+/// namespace is not looked at. Not every comparison of names fits it: a name
+/// against another name, a look-up in a list or a `match` over several names,
+/// and the read filter's own tag reader compare in their own way.
 pub(crate) fn local_eq(name: &[u8], want: &[u8]) -> bool {
     name == want
 }

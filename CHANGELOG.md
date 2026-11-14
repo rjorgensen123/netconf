@@ -185,6 +185,9 @@ Every notable change to this crate is recorded here. The format follows
   2026-11-12 said the guide was corrected, and one sentence was left. A certificate is not
   among the secrets that are redacted. And a failure before the commit is cleaned up with two
   exceptions: a request that got no answer, and a commit comment that is refused.
+- 2026-11-14 — More places compare an element's name through the one function for it
+  (`error-info`, `commit-history`, `date-time`, `name`, `configuration`). Its comment said every
+  place does; it says now that not every comparison of names fits it. The behaviour is the same.
 
 ### Changed — API review and update
 

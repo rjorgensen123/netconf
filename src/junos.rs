@@ -911,11 +911,11 @@ fn commit_entries(
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
                 let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
-                if !in_entry && name == "commit-history" {
+                if !in_entry && local_eq(name.as_bytes(), b"commit-history") {
                     in_entry = true;
                 } else if in_entry && field.is_none() {
                     take_loose(&mut loose, &mut fields);
-                    if name == "date-time" {
+                    if local_eq(name.as_bytes(), b"date-time") {
                         seconds = date_time_seconds(&e);
                     }
                     field = Some(name);
@@ -927,11 +927,11 @@ fn commit_entries(
             // left the next one to be taken for the last commit.
             Ok(Event::Empty(e)) => {
                 let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
-                if !in_entry && name == "commit-history" {
+                if !in_entry && local_eq(name.as_bytes(), b"commit-history") {
                     entries.push(CommitEntry { fields: Vec::new() });
                 } else if in_entry && field.is_none() {
                     take_loose(&mut loose, &mut fields);
-                    let seconds = (name == "date-time")
+                    let seconds = local_eq(name.as_bytes(), b"date-time")
                         .then(|| date_time_seconds(&e))
                         .flatten();
                     fields.push((name, String::new()));
@@ -981,7 +981,7 @@ fn commit_entries(
                         fields.push(("seconds".to_string(), seconds));
                     }
                     field = None;
-                } else if field.is_none() && name == "commit-history" {
+                } else if field.is_none() && local_eq(name.as_bytes(), b"commit-history") {
                     take_loose(&mut loose, &mut fields);
                     entries.push(CommitEntry {
                         fields: std::mem::take(&mut fields),
@@ -1120,7 +1120,7 @@ fn read_filter(filter: &str) -> Result<ReadFilter, NetconfError> {
     let mut whole = false;
     let child = |open: &mut Vec<(String, bool)>, name: &str| {
         if let Some(parent) = open.last_mut()
-            && name != "name"
+            && !local_eq(name.as_bytes(), b"name")
         {
             parent.1 = true;
         }
@@ -1339,7 +1339,7 @@ fn configuration_set(xml: &str) -> Result<String, NetconfError> {
 /// Record one element name as a read target: lowercase, and not `configuration`.
 fn push_target(names: &mut Vec<String>, local: &[u8]) {
     let name = String::from_utf8_lossy(local).to_ascii_lowercase();
-    if name != "configuration" {
+    if !local_eq(name.as_bytes(), b"configuration") {
         names.push(name);
     }
 }
