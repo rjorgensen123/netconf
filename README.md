@@ -97,8 +97,9 @@ session.close().await?;
 # Ok(()) }
 ```
 
-The full public surface is in [`docs/API.md`](docs/API.md), and a test enforces that the
-document and the code agree. [`docs/Usage.md`](docs/Usage.md) is the guide;
+The full public surface is in [`docs/API.md`](docs/API.md), and a test checks that the
+public names in the code are in the document; it cannot tell whether a sentence there is true.
+[`docs/Usage.md`](docs/Usage.md) is the guide;
 [`docs/Filter.md`](docs/Filter.md) documents the filter rules.
 
 ## What the crate does not do

@@ -31,7 +31,7 @@ Two normative rules bind whoever *changes* the surface:
   before it goes into an error's text or a log line. An uncovered case → update this
   document.
 - **The feedback contract.** What the crate answers — success, errors and status — lives HERE:
-  `Result` with the three error branches (§8), and the tracing facade (the logging section) for
+  `Result` with the error model of §8, and the tracing facade (the logging section) for
   events. An answer not written here is a gap in the contract and should be reported — not
   interpreted.
 
@@ -165,10 +165,11 @@ transport's. `close()` reports a `Timeout` like any request, in `CloseFailed`.
   session gets to live: **≥ 1 s and ≤ the ceiling**. Small tasks do not need long lives; a
   sequence that must span a commit-confirmed window needs more.
 - `connect` and `per_rpc` must not be zero — a zero in either is a session that can never
-  do anything. Neither has to fit inside `total`: a single wait is `min(per_rpc, remaining TTL)`.
+  do anything. Neither has to fit inside `total`: in `RusshTransport` a single wait is
+  `min(per_rpc, remaining TTL)`.
 - `per_commit`, when it is set, must be **≥ 1 s and ≤ `max_total`**; `None` is always
-  valid and means `per_rpc`. It need not fit inside `total` either: a single wait in a commit is
-  `min(per_commit, remaining TTL)`.
+  valid and means `per_rpc`. It need not fit inside `total` either: in `RusshTransport` a single
+  wait in a commit is `min(per_commit, remaining TTL)`.
 - Values outside the frames are **rejected at connect** by the transport (`validate`,
   fail-closed, as `Transport(InvalidOptions)` with a message that says what was given and what the range is)
   — nothing is silently clamped.
@@ -177,8 +178,8 @@ transport's. `close()` reports a `Timeout` like any request, in `CloseFailed`.
   the TCP connection, the SSH handshake and host key check, authentication, opening the channel
   and the device's answer to the subsystem request. Running out is `Timeout { op: "ssh-connect" }`, or
   `Timeout { op: "ssh-subsystem" }` while waiting for the subsystem answer, or `Timeout { op: "session-ttl" }`
-  when the deadline is what ran out. The hello is not part of it: `per_rpc` (60 s default) bounds
-  each single read, the hello's included, and each single send. `observe_host_key` runs
+  when the deadline is what ran out. The hello is not part of it: in `RusshTransport`, `per_rpc`
+  (60 s default) bounds each single read, the hello's included, and each single send. `observe_host_key` runs
   under the same bound and the same validation, with the same tags (§9). When `connect`
   or `observe_host_key` gives up — the bound running out, or any other failure — the TCP
   connection is closed at once, and the device sees it end.
@@ -594,7 +595,7 @@ What each helper sends. *Escaped* means `&`, `<` and `>` become entities — not
 | `load_configuration`, `Xml` | `<load-configuration action="<action>"><configuration>` payload **verbatim** — the caller owns its well-formedness |
 | `commit_check` | `<commit-configuration><check/></commit-configuration>` |
 | `commit` | `<commit-configuration/>`, or with `<log>` comment, escaped — a comment that is not one line of printable ASCII and a tab, or is longer than `MAX_COMMIT_COMMENT`, is refused and nothing is sent (below); with `set_synchronize_commits(true)`, `<synchronize/>` first inside it. When a confirmed commit made on this session is waiting: first `<get-commit-information/>`, then the compare RPC, then the commit; when the last commit is another, no commit, and the compare RPC against rollback N when the confirmed commit is still in the history |
-| `commit_confirmed` | `<commit-configuration><confirmed/><confirm-timeout>` minutes, then the optional `<log>` — a comment that breaks the rule `commit` holds it to is refused, and then nothing is sent and the commit history is not read (below); with `set_synchronize_commits(true)`, `<synchronize/>` first inside it; then `<get-commit-information/>` |
+| `commit_confirmed` | `<commit-configuration><confirmed/><confirm-timeout>` minutes, then the optional `<log>` comment, escaped — a comment that breaks the rule `commit` holds it to is refused, and then nothing is sent and the commit history is not read (below); with `set_synchronize_commits(true)`, `<synchronize/>` first inside it; `<get-commit-information/>` before the commit, and again after it |
 | `rollback` | `<load-configuration rollback="n"/>` |
 | `discard_changes` | `<discard-changes/>` |
 | `get_configuration` | `<get-configuration/>`, or the filter inside `<get-configuration>`, serialized from what the read gate parsed |
@@ -1239,13 +1240,21 @@ What is redacted:
 
 ## 8. Error model — three branches the consumer tells apart programmatically
 
+The error has three main branches — `Transport` (the connection: the network failed, or the options
+for it were refused before anything was sent), `Protocol` and `Device` — and beside them the
+outcomes that are variants of their own: a time limit that ran out (`Timeout`), a request the
+session refused (`Policy`), the outcomes around a commit (`Drift`, `ChangedSinceConfirmed`,
+`CommittedThenFailed`, `CommitUnanswered`), an operation that failed after some of its requests
+went through or whose cleanup failed too (`WithReplies`, `CleanupFailed`), and a failed close
+(`CloseFailed`).
+
 ```rust
 pub enum NetconfError { // #[non_exhaustive]
- Transport(TransportError), // the network failed
+ Transport(TransportError), // the connection: the network failed, or its options were refused before anything was sent
  Protocol { detail: String, received: Option<String> }, // we spoke wrongly; received = what the device sent
  Device(Box<DeviceError>), // Junos said no — boxed
  Timeout { op: &'static str, limit: Duration, during: String, partial: String, stderr: String }, // op: "ssh-connect" · "ssh-subsystem" · "rpc-recv" · "rpc-send" · "session-ttl"; limit = the time limit that ran out; during = what was going on, and through a session which request, empty when nothing said; partial = the incomplete message; stderr = what the device wrote on stderr, empty when nothing
- Policy(String), // our own policy stopped it — before anything was sent
+ Policy(String), // the session refused the request and did not send it — the policy, or a rule that holds under every policy
  Drift { fresh: String }, // the diff changed between approval and commit; fresh = the fresh diff
  ChangedSinceConfirmed(Box<DeviceChanged>), // the device changed between a confirmed commit and its confirming commit, which was withheld
  CommittedThenFailed { reply: String, error: Box<NetconfError> }, // the commit succeeded, then a later step failed; reply = the answer to the commit
@@ -1305,7 +1314,7 @@ Appendix A, the reference for all of them. `explanation()` gives the meaning for
 `<tag> — <meaning> (RFC 6241, Appendix A): <the device's message>`. The device's own words are
 always kept; any other tag reads `<tag>: <message>`.
 
-The point of three branches is that the consumer can act correctly **without parsing text**.
+The point of separate variants is that the consumer can act correctly **without parsing text**.
 `Negotiation` carries `offered` deliberately: against an old device "negotiation failed" is
 useless, while "it offered these four algorithms" is immediately actionable.
 
@@ -1450,7 +1459,7 @@ the contract:
 | Event | Level | When |
 |---|---|---|
 | `ssh_connect_refused` / `ssh_host_key_probe_refused` | warn | `connect` / `observe_host_key` refused before connecting: `reason`, the refusal text, with host and port — and username for `connect` — unless the host or username is what was refused. No start event precedes it |
-| `ssh_connect` / `ssh_connect_failed` | info/warn | `ssh_connect`: the attempt (host, port, username, policy, `pinned`/`enrollment`), warn the first time per device under a legacy policy. `ssh_connect_failed` (host, port, `ssh_policy`, `error`): the TCP connection or the SSH handshake failed; a timeout, a rejected login or a refused subsystem are reported through their own errors, not this event |
+| `ssh_connect` / `ssh_connect_failed` | info/warn | `ssh_connect`: the attempt (host, port, username, policy, `host_key = "pinned"`), warn the first time per device under a legacy policy. `ssh_connect_failed` (host, port, `ssh_policy`, `error`): the TCP connection or the SSH handshake failed; a timeout, a rejected login or a refused subsystem are reported through their own errors, not this event |
 | `ssh_auth_failed` | warn | authentication rejected (the methods the device named, `partial_success`) |
 | `ssh_session_established` / `ssh_session_closed` | info | session lifecycle; established only once the device has opened the subsystem |
 | `ssh_session_failed` | warn | russh ended an established connection on an error — `error` is russh's text, redacted |

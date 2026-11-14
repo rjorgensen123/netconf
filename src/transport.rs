@@ -20,6 +20,10 @@ use crate::error::{NetconfError, SshMessages};
 /// [`recv`](Self::recv) returns *arbitrary* pieces; they do not necessarily make up
 /// a whole NETCONF message. [`Decoder`](crate::framing::Decoder) puts them back
 /// together.
+///
+/// The time limits in [`Timeouts`] are the transport's to keep. The session has no
+/// clock, so a transport that does not bound its [`send`](Self::send) and
+/// [`recv`](Self::recv) by them can wait forever.
 #[async_trait]
 pub trait NetconfTransport: Send + Sized {
     /// Connect according to `opts`.
@@ -188,10 +192,11 @@ pub enum SshPolicy {
 ///
 /// Both are validated fail-closed at connection time. Nothing is silently clamped.
 ///
-/// Within a session, every single read and send waits no longer than its budget:
-/// `per_rpc`, or `per_commit` for a commit RPC when that is set — and never past the
-/// session's deadline. The budget is one clock for the whole read (0.7.0): what the
-/// device sends that is no data does not start it again.
+/// The transport keeps these limits (see [`NetconfTransport`]). In `RusshTransport`,
+/// every single read and send waits no longer than its budget: `per_rpc`, or
+/// `per_commit` for a commit RPC when that is set — and never past the session's
+/// deadline. The budget is one clock for the whole read (0.7.0): what the device
+/// sends that is no data does not start it again.
 #[derive(Debug, Clone, Copy)]
 pub struct Timeouts {
     /// The maximum time to establish the transport, counted from when the connection

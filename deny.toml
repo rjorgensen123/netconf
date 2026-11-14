@@ -1,7 +1,7 @@
 # cargo-deny — an audit of the dependency tree.
 # It runs in CI (`cargo deny check`): a vulnerable or wrongly licensed dependency
-# must break the build rather than be discovered later. The tree is checked both
-# with and without the russh-transport feature; the russh side is the large one.
+# must break the build rather than be discovered later. The tree is checked with
+# every feature on, so the russh side, the large one, is in it.
 
 [graph]
 all-features = true

@@ -1489,7 +1489,7 @@ const PUBLIC_PEM_LABELS: &[&str] = &["CERTIFICATE", "X509 CERTIFICATE", "TRUSTED
 
 /// PEM blocks — private keys, certificates and the rest. Returns what to redact
 /// when the line touches PEM at all (it continues a block, or begins one), and
-/// `None` otherwise, so the other rules apply.
+/// `None` otherwise. The other rules read the line either way.
 ///
 /// **The private key is the secret, and a certificate is not** (0.7.0). The body
 /// of a block is redacted unless its label says it is a certificate

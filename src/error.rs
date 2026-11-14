@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The error model — three branches a consumer can tell apart **programmatically**,
-//! without parsing text:
+//! The error model — three main branches a consumer can tell apart
+//! **programmatically**, without parsing text:
 //!
-//! - [`NetconfError::Transport`] — «the network failed» (SSH, IO, negotiation,
-//!   host key).
+//! - [`NetconfError::Transport`] — the connection: «the network failed» (SSH, IO,
+//!   negotiation, host key), or the options for it were refused before anything
+//!   was sent.
 //! - [`NetconfError::Protocol`] — «we spoke wrongly» (framing, parsing, hello).
 //! - [`NetconfError::Device`] — «the device said no» (a structured `<rpc-error>`).
 //!
-//! This is the contract towards the consumer: three branches, three different
-//! courses of action. Malformed input always produces an error, **never a panic**.
+//! Beside them, the outcomes that are variants of their own: a time limit that ran
+//! out (`Timeout`), a request the session refused (`Policy`), the outcomes around a
+//! commit (`Drift`, `ChangedSinceConfirmed`, `CommittedThenFailed`,
+//! `CommitUnanswered`), an operation that failed after some of its requests went
+//! through or whose cleanup failed too (`WithReplies`, `CleanupFailed`), and a
+//! failed close (`CloseFailed`). Malformed input always produces an error, **never
+//! a panic**.
 
 use std::fmt;
 
@@ -18,7 +24,9 @@ use crate::wire::printable;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum NetconfError {
-    /// SSH or the network — «the network failed».
+    /// SSH or the network — «the network failed» — or the options for the
+    /// connection, refused before anything was sent
+    /// ([`InvalidOptions`](TransportError::InvalidOptions)).
     Transport(TransportError),
     /// Framing, parsing or hello — «we spoke wrongly».
     ///
@@ -70,7 +78,11 @@ pub enum NetconfError {
         /// wrote nothing.
         stderr: String,
     },
-    /// The configuration filter (`ConfigPolicy`) refused the change.
+    /// The session refused the request and did not send it. The refusal is the
+    /// policy's, or one that holds under every policy: no policy bound, the lock a
+    /// change needs, how a command, a commit comment, a set payload or a
+    /// `get_configuration` filter is written, and a rename or copy whose target is
+    /// there already or cannot be checked.
     Policy(String),
     /// A fresh `show | compare` deviates from the approved diff — the candidate
     /// drifted between review and commit, and compare-then-commit aborted.

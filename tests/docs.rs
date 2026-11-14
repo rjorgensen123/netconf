@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Doc guard (0.5.1): every public name in the crate
-//! must appear in the shipped contract doc (`docs/API.md`).
+//! Doc guard (0.5.1): the public functions, constants, types, traits and modules
+//! the test finds in the crate's sources must appear by name in the shipped
+//! contract doc (`docs/API.md`); enum variants, fields and trait methods are not
+//! collected.
 //! A surface change that skips the docs fails `cargo test` — the same fence
 //! `tests/version.rs` puts around the changelog.
 //!
@@ -67,9 +69,12 @@ fn pub_names() -> BTreeSet<String> {
         let t = read(&format!("src/{f}"));
         for line in t.lines() {
             let l = line.trim_start();
-            let l = l.strip_prefix("pub async ").unwrap_or(l);
+            // `pub const fn ` stands before `pub const `, and the first prefix that
+            // matches is the only one read, so a const fn gives its own name.
             for p in [
                 "pub fn ",
+                "pub async fn ",
+                "pub const fn ",
                 "pub const ",
                 "pub struct ",
                 "pub enum ",
@@ -81,6 +86,7 @@ fn pub_names() -> BTreeSet<String> {
                     if !name.is_empty() {
                         names.insert(name);
                     }
+                    break;
                 }
             }
         }
@@ -96,6 +102,20 @@ fn every_public_name_is_in_the_contract_docs() {
         "the extractor found suspiciously few names ({}) — is it broken?",
         names.len()
     );
+    // The session's requests are `pub async fn`, and `all_deny` is a `pub const fn`;
+    // both kinds must be collected by their names.
+    for function in [
+        "prepare_change",
+        "confirm_commit",
+        "commit_confirmed",
+        "observe_host_key",
+        "all_deny",
+    ] {
+        assert!(
+            names.contains(function),
+            "the extractor did not collect the function {function} — is it broken?"
+        );
+    }
     // One document, so no loop: clippy rejects a for-loop over a single element,
     // and that lint has broken this crate's CI before.
     let doc = "docs/API.md";

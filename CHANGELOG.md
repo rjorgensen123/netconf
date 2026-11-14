@@ -145,6 +145,9 @@ Every notable change to this crate is recorded here. The format follows
   as the device closing.
 - 2026-11-14 — The docs say what the session lifetime ends and what it does not, and that
   `SshPolicy::Custom` is not built but planned.
+- 2026-11-14 — The docs say what the code does: the error model beyond its three main
+  branches, that the time limits are the transport's to keep, what `Policy` covers, and what
+  the docs test checks. That test now also collects `pub async fn` and `pub const fn` names.
 
 ## [0.6.1] — 2026-10-05
 

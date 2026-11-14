@@ -81,10 +81,11 @@ There are **two levels, and both are yours to set:**
 | `per_rpc` | each single read and send of a request | 60 s |
 | `per_commit` | each read and send of `commit` and `commit_confirmed`; `None` is `per_rpc` | `None` |
 
-The clock starts when you connect. When `total` runs out, the session answers
+The clock starts when you connect. When `total` runs out, the transport refuses with
 `Timeout { op: "session-ttl", .. }` regardless of activity — the next task gets a new session.
-Small tasks do not need long lives; a sequence with a commit-confirmed window needs more. No wait
-ever runs past the session's deadline.
+Small tasks do not need long lives; a sequence with a commit-confirmed window needs more. The
+transport keeps these limits: `RusshTransport` bounds every send and read by them, never past the
+session's deadline.
 
 Values outside the ranges are refused at connect, with a message that says what was given and what
 the range is. Nothing is silently clamped. To change only some of them:
@@ -611,11 +612,11 @@ verify that the framing is handled.
 
 | Error | Means | What to do |
 |---|---|---|
-| `Policy` | **your own** policy stopped it | fix the change or the policy — the device has seen nothing |
+| `Policy` | the session refused the request and did not send it — **your** policy, or a rule that holds under every policy | fix the request or the policy |
 | `Drift` | the diff changed between approval and commit | have a person look at `fresh`, the diff the device shows now |
 | `ChangedSinceConfirmed` | the device changed after a confirmed commit | it rolls back by itself; look at what changed |
 | `Device` | the device said no | read `message`, `path` and `explanation()` — that is Junos answering; further errors are in `also` |
-| `Transport` | the network, SSH, the login or the host key | see below |
+| `Transport` | the network, SSH, the login or the host key — or options refused before anything was sent | see below |
 | `Protocol` | the device's answer could not be read, or did not belong to the request | `received` is what the device sent |
 | `Timeout` | a time limit ran out | `op` says which, `limit` how long it was, and `during` what was going on — through a session with the request a call sent, not the `<close-session/>` of `close()`, `while waiting for an answer — request 3 (<commit-configuration>)`; `partial` is what had arrived; `stderr` is what the device wrote on stderr |
 | `CommittedThenFailed` | the commit went in, then a later step failed | the change is live; `reply` is the device's answer to the commit |
