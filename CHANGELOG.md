@@ -175,6 +175,25 @@ Every notable change to this crate is recorded here. The format follows
   among the secrets that are redacted. And a failure before the commit is cleaned up with two
   exceptions: a request that got no answer, and a commit comment that is refused.
 
+### Changed — API review and update
+
+`docs/API.md` was checked against the code in both directions and corrected in 47 places where
+it said something the code does not do, or left something out. No code changed.
+
+- 2026-11-14 — The session: what `rpc` checks in a request, that an unknown entity is refused in
+  text and not in an attribute value, that a `message-id` that cannot be read counts as absent,
+  and that `commit()` on a session out of step answers `CommitUnanswered`, not `Protocol`.
+- 2026-11-14 — Framing and the Junos helpers: what a size violation carries, what
+  `commit_history` and `confirmed_commit` return, and the `CommitRecord` methods.
+- 2026-11-14 — The write filter: the floor covers every verb of the `Delete` class. The entry
+  above says `ConfigPolicy::new` with an empty list has no floor; deleting a whole logical
+  system or tenant is still refused, and the guides say so now.
+- 2026-11-14 — The read filter: a control character or a character reference between `key`,
+  `password` and the like and its value leaves the value unredacted; it is under «Known
+  limits». The element rule and a `SECRET-DATA` line redact more than the document said.
+- 2026-11-14 — The error model and SSH: which errors carry stderr, what a read gives after the
+  device's EOF, the `ssh_policy` log field, and the `Timeout` `check_device` builds itself.
+
 ## [0.6.1] — 2026-10-05
 
 The public surface is that of 0.6.0, and the contract floor in `docs/API.md` stays 0.6.0.

@@ -76,13 +76,15 @@ pub use transport::{
 > **Note:** `rpc` and `mock` are `pub mod` without root re-exports — reachable as
 > `netconf::rpc::…` / `netconf::mock::…` and in active use by consumers (§10).
 
-**Derived traits.** `Op`, `Match`, `Access`, `Scope`, `Framing`, `Format`, `LoadAction` and
-`Platform` are `Copy + Eq`. `Change`, `Violation` and `ParseError` are `Clone + Eq`. `Timeouts`
-is `Copy` and `Default`; `DeviceError`, `Redactor` and `SessionEnd` are `Clone` and `Default`; `ConfigPolicy`,
-`Rule` and `PreparedChange` are `Clone`. Everything implements `Debug` except `Auth`, `SshPolicy`,
-`ConnectOptions`, `NetconfSession`, `MockTransport` and `RusshTransport` — `Auth` holds the
-password. `NetconfError`, `TransportError`, `DeviceError` and `ParseError` implement `Display`
-and `std::error::Error`; `DeviceChanged` implements `Display`.
+**Derived traits.** `Op`, `Match`, `Access`, `Scope`, `Framing`, `Format`, `LoadAction`,
+`Platform`, `ConfirmedCheck`, `CheckStep` and `Verdict` are `Copy + Eq`. `Change`, `Violation`,
+`ParseError`, `CommitRecord`, `ExitSignal` and `SshDisconnect` are `Clone + Eq`; `SshMessages` is
+`Clone + Eq` and `Default`. `Timeouts` is `Copy` and `Default`; `DeviceError`, `Redactor` and
+`SessionEnd` are `Clone` and `Default`; `ConfigPolicy`, `Rule` and `PreparedChange` are `Clone`.
+Everything implements `Debug` except `Auth`, `SshPolicy`, `ConnectOptions`, `NetconfSession`,
+`MockTransport` and `RusshTransport` — `Auth` holds the password. `NetconfError`,
+`TransportError`, `DeviceError` and `ParseError` implement `Display` and `std::error::Error`;
+`DeviceChanged`, `CheckStep`, `Verdict` and `DeviceCheck` implement `Display`.
 
 ---
 
@@ -151,7 +153,8 @@ pub enum Platform { Junos, JunosEvo } // reserved together with platform_hint
 
 The lifetime has **two levels**, and the clock starts when the connection is started.
 A reached deadline → `Timeout { op: "session-ttl" }` on every further send and read, regardless of
-activity. **The transport enforces time:** `RusshTransport` does, `MockTransport` does not, and
+activity; a read after the device's EOF ends in the close outcome instead (§9). **The transport
+enforces time:** `RusshTransport` does, `MockTransport` does not, and
 `NetconfSession` itself keeps no clock — `connect`, `validate` and the deadline below are the
 transport's. `close()` reports a `Timeout` like any request, in `CloseFailed`.
 
@@ -159,8 +162,9 @@ transport's. `close()` reports a `Timeout` like any request, in `CloseFailed`.
   crate into use (default **5 minutes**; frame **1–10 minutes**,
   `MIN_CEILING`..=`MAX_CEILING`). Once a session's deadline is reached, every further send and
   read is refused as `session-ttl`, whatever the activity, so no request is sent or answered
-  after it. The connection itself ends when the session is closed or dropped; a session that is
-  held and left unused is ended by the SSH layer after `total` without traffic.
+  after it; a read after the device's EOF gives the close outcome instead (§9). The connection
+  itself ends when the session is closed or dropped; a session that is held and left unused is
+  ended by the SSH layer after `total` without traffic.
 - **`total` — THIS session's TTL.** Your per-task message about how long this particular
   session gets to live: **≥ 1 s and ≤ the ceiling**. Small tasks do not need long lives; a
   sequence that must span a commit-confirmed window needs more.
@@ -171,7 +175,8 @@ transport's. `close()` reports a `Timeout` like any request, in `CloseFailed`.
   valid and means `per_rpc`. It need not fit inside `total` either: in `RusshTransport` a single
   wait in a commit is `min(per_commit, remaining TTL)`.
 - Values outside the frames are **rejected at connect** by the transport (`validate`,
-  fail-closed, as `Transport(InvalidOptions)` with a message that says what was given and what the range is)
+  fail-closed, as `Transport(InvalidOptions)` with a message that says what was given and what
+  the range is; for a zero `connect` or `per_rpc`, what was given and why it cannot work)
   — nothing is silently clamped.
 - `connect` (30 s default) bounds establishment as a whole, counted from when the connection is
   started — the same moment as the TTL clock — and never past the session deadline:
@@ -243,8 +248,8 @@ to the Terrapin attack (CVE-2023-48795). The name goes last in the key exchange 
 algorithm, and it has an effect only with a device that supports it.
 
 `3des-cbc` is in `LEGACY_ALGORITHMS`, so it is marked when seen, but **no policy offers it**.
- `LegacyJunos` offers everything russh 0.65 has for the R14 to Evo span;
- the two full-strength additions are not legacy, the SHA-1 group exchange and
+`LegacyJunos` offers the names in both columns above and no others, though russh has more;
+the two full-strength additions are not legacy, the SHA-1 group exchange and
 `ssh-dss` are.
 
 **`Custom` is your own lists**, for leaving out an algorithm you do not accept: a device that has
@@ -262,7 +267,10 @@ refuse a policy that breaks the rules as `Transport(InvalidOptions)` with its te
 - `SshPolicy::Custom: «<name>» is not one of the <kinds> netconf offers — the names are those of Modern and LegacyJunos`
 
 where `<kinds>` is `key exchanges`, `host key algorithms`, `ciphers` or `MACs`, and `<name>` is
-made printable. `without` builds a `Custom` from a policy you have: `SshPolicy::LegacyJunos.without(&["ssh-dss"])`
+made printable. `connect`, `observe_host_key` and `check_device` have a fourth, also as
+`Transport(InvalidOptions)`, for a name that passes `validate` and that the SSH library cannot
+use: `SshPolicy: «<name>» is not one of the <kinds> this SSH library can use`.
+`without` builds a `Custom` from a policy you have: `SshPolicy::LegacyJunos.without(&["ssh-dss"])`
 is `LegacyJunos`'s lists without `ssh-dss`, in the same order. A name that is in none of the
 policy's lists is refused with `SshPolicy::without: «<name>» is in none of this policy's lists, so
 there is nothing to leave out`, and a list left empty is refused by `validate` when it is used.
@@ -320,10 +328,12 @@ the gates, with or without a policy bound — and what it does to the device, a 
 the session does not know of. The reply and the errors are redacted as for any request. **One call
 is one request:** the text must be one XML element with nothing but whitespace around it, and in
 end-of-message framing it must not hold `]]>]]>`. Text that would be two requests to the device —
-two elements side by side, or an end tag that closes the `<rpc>` it is sent in — or none, or not
-well-formed, is refused as `Protocol` with nothing sent: `the request is not one request, and was
-not sent: <what it is instead>`. The session is as it was after the refusal. The requests of
-the typed helpers pass the same check.
+two elements side by side, or an end tag that closes the `<rpc>` it is sent in — or none, or that
+leaves an element open, closes one with another's end tag, or holds markup the XML reader cannot
+read, is refused as `Protocol` with nothing sent: `the request is not one request, and was not
+sent: <what it is instead>`. That is the whole check: it reads no attributes, and passes entities
+as they stand.
+The session is as it was after the refusal. The requests of the typed helpers pass the same check.
 
 **`set_synchronize_commits`** is for devices with two Routing Engines. When it is on,
 `commit` and `commit_confirmed` — and so `confirm_commit` — carry `<synchronize/>`, the Junos
@@ -339,7 +349,8 @@ must be a `<hello>` — `the document is not a <hello> but a <name> — refusing
 and a capability is read where RFC 6241 puts it, a `<capability>` in the `<capabilities>` of the
 hello, and nowhere else. A hello with no capabilities
 is `Protocol`, and so is one that is not UTF-8, that does not parse as XML, or that uses an entity
-other than the five predefined ones and character references anywhere in it. Data the device
+other than the five predefined ones and character references anywhere in its text; attribute
+values are not read. Data the device
 sends after its hello, before the first request, stops a switch to chunked framing as `Protocol`;
  whitespace there is tolerated. The hello with no capabilities, the hello that is not
 UTF-8 and the data after it go with the error in `received`. A transport that returns
@@ -353,7 +364,8 @@ chunk headers.
 transport build their errors without a policy to hand; the session passes each one through the
 policy's filter before it reaches the caller, exactly as it passes a reply: `received`, `partial`,
 the diffs, what the device said over SSH and the text of an `Io` error come with the device's
-secrets redacted unless the policy has `allow_secrets` or is `all_free`. During `connect` and
+secrets redacted unless the policy has `allow_secrets` or is `all_free`. What the device wrote on
+stderr is the exception: the transport redacts it, whatever the policy (§8). During `connect` and
 `establish` no policy is bound yet, so they are redacted. Bytes that are not part of valid UTF-8
 are written as `\xNN`, so nothing the device sent is lost on the way.
 
@@ -365,14 +377,17 @@ message-id="N">` (N counts from 1 per session) and returns the raw reply. What i
   with: `reply message-id `<text>` does not match the request's (N) …`, the device's
   text filtered as the reply is and made printable.
   A reply **without** one is accepted — Junos omits it
-  on some replies;
-- a document that is not an `<rpc-reply>`: `reply is not an <rpc-reply> but a <root>`,
-  naming the root that stood there — an empty `<rpc-reply/>` is an ordinary answer;
+  on some replies — and a `message-id` that cannot be read as XML writes an attribute, one
+  without quotes such as `message-id=7`, counts as absent and is accepted too;
+- a document that is not an `<rpc-reply>`: `reply is not an <rpc-reply> but a <root> — refusing
+  to read it as one`, naming the root that stood there — an empty `<rpc-reply/>` is an ordinary
+  answer;
  a document that holds a fatal `<rpc-error>` is `Device` whatever its root, since the
   error is the more specific answer; a document with no element at all is `reply contains no
   elements at all`;
 - XML that does not parse, or is incomplete at the end, or uses an entity other than the five
-  predefined ones and character references — anywhere in the reply;
+  predefined ones and character references — anywhere in the reply's text; attribute values are
+  not read, so an attribute XML would refuse, such as `message-id=7`, does not make the reply fail;
 - a reply that is not UTF-8.
 
 An `<rpc-error>` becomes `Device` (§8): the first error of the reply, carrying every other
@@ -443,11 +458,16 @@ replies, so nothing would tell. An `<rpc-error>` is the device's answer, and cha
   answered, nothing is due from it; what is there before the next request goes out would be read
   as that request's answer. The request is not sent: `Protocol`, `the device sent data that no
   request asked for — the session is out of step, and sends nothing more`, with the data in
-  `received`, and `unanswered()` says `the device sent data that no request asked for`.
+  `received`, and `unanswered()` says `the device sent data that no request asked for on session
+  <session-id> to <username>@<host>:<port>` — the session part as far as it is known. `close()`
+  does not make this check: it sends `<close-session/>` and reads what is buffered as its answer.
 - Every request after it is refused before anything is sent, as `Protocol`: `the session is out of
   step, and sends nothing more — <unanswered>. Its answer may still come, and a new request would
   read it as its own. Close the session, check that the device answers, and read its state on a
   new one`.
+- `commit()` with no confirmed commit waiting returns both refusals wrapped in `CommitUnanswered`,
+  the `Protocol` error inside it, although nothing was sent. `commit_confirmed`, and `commit()`
+  with a confirmed commit waiting, read the commit history first and return the plain `Protocol`.
 - `close()` does not send `<close-session/>` then. It closes the transport, which hands over what
   the device still sends on the way — the late answer, when it comes, is in the `Closed` error's
   `partial`, inside `CloseFailed`. The device lets go of the session's lock when the session ends.
@@ -487,7 +507,8 @@ Every violation carries the buffer as it stood in `received`: a buffer past the 
 a chunk-size that is empty, not one RFC 6242 allows, 0 or past the cap, and a chunk header that is
 not one — `\n#` missing at a chunk's start, no LF after `##` or after the chunk-size — where the
 text also names the bytes found where the frame broke and their offset: `chunked: expected \n# at
-chunk start, found `XY` at byte 7`.
+chunk start, found `XY` at byte 7`. In end-of-message framing, a whole message longer than the
+cap is the exception: it carries that message alone, without its terminator and what follows.
 Whitespace between chunked messages is discarded, anything else there is a violation,
 and a chunk size of 0 is refused. The chunk-size is read as RFC 6242 writes it: decimal
 digits, no leading zero, at most 4294967295 — `007` is a violation. De-framing a message
@@ -499,8 +520,9 @@ read.
 it, `with_max_message_size` sets another — applied to the
 de-framer's buffer and to a single chunk (fail-closed — the guard against a device that never ends
 a message or states an absurd chunk length). In EOM mode the buffer is refused once it passes the
-cap without a terminator, and so is a whole message longer than the cap; in chunked mode the buffered bytes, chunk headers included, and the
-chunks' total are both held under it, and a message may come in at most `MAX_CHUNKS` chunks,
+cap without a terminator, and so is a whole message longer than the cap; in chunked mode the
+chunks' total is always held under it, and the buffered bytes, chunk headers included, are held
+under it while the message is incomplete. A message may come in at most `MAX_CHUNKS` chunks,
 1048576 — `chunked: the message is in more than 1048576 chunks, the most one message may come in` —
 so what the de-framer keeps to track the chunks is bounded too. NETCONF has **no streaming of a single reply** (chunked framing is wire
 framing, not incremental delivery) — large configurations are therefore read in **segments**:
@@ -530,7 +552,16 @@ Typed operations on top of the generic RPC layer, so the consumer never handcraf
 ```rust
 pub enum LoadAction { Merge, Replace, Override }
 pub enum Format { Text, Set, Xml }
-pub struct CommitRecord { /* private */ } // one commit of commit_history(): fields(), sequence_number(), user(), client(), date_time(), seconds(), log()
+pub struct CommitRecord { /* private */ } // one commit of commit_history()
+impl CommitRecord {
+ pub fn fields(&self) -> &[(String, String)]; // every field, name and text, in the device's order
+ pub fn sequence_number(&self) -> Option<&str>;
+ pub fn user(&self) -> Option<&str>;
+ pub fn client(&self) -> Option<&str>;
+ pub fn date_time(&self) -> Option<&str>;
+ pub fn seconds(&self) -> Option<&str>;
+ pub fn log(&self) -> Option<&str>;
+}
 pub const MAX_COMMIT_COMMENT: usize = 512; // the most characters a commit comment may hold — one line of printable ASCII and a tab
 
 impl<T: NetconfTransport> NetconfSession<T> {
@@ -554,7 +585,9 @@ impl<T: NetconfTransport> NetconfSession<T> {
 
 **Every helper returns the device's answer**: the `<rpc-reply>`, with the device's
 secrets redacted unless the policy lets them through, as `rpc()` does — all but `compare`, which
-returns the diff text (below). Junos answers `<commit-configuration>` with `<commit-results>`: one
+returns the diff text (below), `commit_history`, which returns the device's commits as
+`Vec<CommitRecord>`, and `confirmed_commit`, which returns the session's record as
+`Option<String>`. Junos answers `<commit-configuration>` with `<commit-results>`: one
 `<routing-engine>` for each routing engine, its name, `<commit-check-success/>` or
 `<commit-success/>`, and its messages — for `commit_check` the reply is what the check found. It
 answers `lock`, `unlock` and `discard_changes` with `<ok/>`, and `load_configuration` and
@@ -562,10 +595,11 @@ answers `lock`, `unlock` and `discard_changes` with `<ok/>`, and `load_configura
 answers comes back. Warnings in a reply that succeeds are in `take_warnings()`. The operations of
 §5 give back their requests' answers the same way.
 
-**Every helper passes the session's policy first** — see `set_policy` in §2: no
-policy or `all_deny` refuses all of them before anything is sent; `load_configuration`, `prepare_change`,
-`commit`, `commit_confirmed`, `lock`, `unlock`, `discard_changes` and `rollback` also need a policy
-that permits a change, and
+**Every helper passes the session's policy first**, `confirmed_commit` excepted: it sends nothing
+and passes none. See `set_policy` in §2: no
+policy or `all_deny` refuses all the others before anything is sent; `load_configuration`,
+`prepare_change`, `commit`, `commit_confirmed`, `lock`, `unlock`, `discard_changes` and `rollback`
+also need a policy that permits a change, and
 `rollback(n > 0)` needs `all_free(Rwd)`: `rollback <n> loads a previous configuration whole, which
 the policy cannot check; like a Text or Xml load it requires the deliberate
 ConfigPolicy::all_free(Rwd)`.
@@ -588,13 +622,14 @@ with `establish` knows no user, and goes by the first alone). Otherwise the erro
 the device's history is its own: <why>. The last commit before it: <entry>. The last commit now:
 <entry>. …` — nothing is recorded, and the commit that confirms is not checked. A history that
 cannot be read before the commit fails the call with nothing committed. The record is the first `<commit-history>` entry's
-fields, `name=value`, joined with ` · `, with the `junos:seconds` on `<date-time>` as the field
+fields, `name=value`, each text with its whitespace collapsed — one space for each run, none at
+either end — joined with ` · `, with the `junos:seconds` on `<date-time>` as the field
 `seconds` after it — `date-time=2026-10-03 10:00:00 UTC · seconds=1759485600`, the commit's time as
 a number, read strictly as one; what is not one goes as it stood. The
 comparison of the recorded entry with the device's takes it in. A value in CDATA, a field that is there and empty
 (`name=`) and text outside every field (`#text=…`) are in it, and an
-empty first `<commit-history/>` is an entry with nothing in it, which is no record — it was
-skipped, and the next entry taken for the last commit. The `commit` that is to confirm it reads the commit
+empty first `<commit-history/>` is an entry with nothing in it, which is no record: the reply is
+refused as `Protocol`, as one with no entry is. The `commit` that is to confirm it reads the commit
 information again and the candidate's diff before it commits: if the last commit is another one,
 or the candidate holds changes, the commit is **withheld** as `ChangedSinceConfirmed`, and the
 device rolls the confirmed commit back by itself when its timeout runs out — a confirming commit
@@ -626,7 +661,7 @@ What each helper sends. *Escaped* means `&`, `<` and `>` become entities — not
 | Helper | RPC body |
 |---|---|
 | `lock` / `unlock` | `<lock><target><candidate/></target></lock>` / the same with `unlock` |
-| `load_configuration`, `Set` | `<load-configuration action="set" format="text"><configuration-set>` payload, escaped — `format="text"`, and **the `LoadAction` is not used** |
+| `load_configuration`, `Set` | `<load-configuration action="set" format="text"><configuration-set>` payload without its `#` comments, escaped — `format="text"`, and **the `LoadAction` is not used**; when a line renames or copies, first `<get-configuration database="candidate" format="set"/>` |
 | `load_configuration`, `Text` | `<load-configuration action="<action>" format="text"><configuration-text>` payload, escaped |
 | `load_configuration`, `Xml` | `<load-configuration action="<action>"><configuration>` payload **verbatim** — the caller owns its well-formedness |
 | `commit_check` | `<commit-configuration><check/></commit-configuration>` |
@@ -658,7 +693,8 @@ may be in a comment, and are escaped in `<log>`.
 
 **`commit_history()` is how a consumer finds out whether a commit took effect.** It returns one
 `CommitRecord` per `<commit-history>` entry, the newest first: each child of the entry by its
-local name, with its text, in the device's order — Junos writes `sequence-number` (`0` is the
+local name, with its text, whitespace collapsed (one space for each run, none at either end), in
+the device's order — Junos writes `sequence-number` (`0` is the
 newest), `user`, `client`, `date-time` and `log` — and `seconds`, the `junos:seconds` of the
 `<date-time>`. `fields()` gives them all; `sequence_number()`, `user()`, `client()`,
 `date_time()`, `seconds()` and `log()` give the one named, `None` when the device left it out. It
@@ -698,8 +734,9 @@ tree, or one system whole, is a read of a whole configuration — on the CLI, a 
 
 Refused, the text is `reading `<tree>` requires an explicit read grant (allow_read) — it carries
 device secrets`, or for the whole configuration `reading the FULL configuration includes sensitive
-trees without a read grant: [<trees>] — grant with allow_read(...) or read specific subtrees`; under
-`all_deny`, `all-deny: nothing is permitted — no read (denied, fail-closed)`.
+trees without a read grant: [<trees>] — grant with allow_read(...) or read specific subtrees`.
+Under `all_deny` a session refuses with its own text (§2), and `all-deny: nothing is permitted —
+no read (denied, fail-closed)` comes only from calling `ConfigPolicy::check_config_read` directly.
 
 **The filter is read strictly, and what was read is what is sent**. The filter sent to
 the device is serialized from what the gate read, so the two cannot differ. Refused, as `Policy` and with nothing sent: a declaration, doctype,
@@ -707,7 +744,9 @@ processing instruction, comment or CDATA; an element left open, or an end tag th
 an element or attribute name that is not an ASCII XML name (`[A-Za-z_][A-Za-z0-9_.-]*`, with an
 optional prefix); an attribute unquoted, given twice, or holding `<`; an entity other than the five
 predefined ones and character references; a control character, written directly or as a character
-reference such as `&#12;`; and `]]>]]>`. Whitespace between elements is not kept.
+reference such as `&#12;`; and `]]>]]>`. Whitespace between elements is not kept: text that is
+all whitespace to `str::trim` is dropped, not refused, the control characters U+000B, U+000C and
+U+0085 among it.
 
 **The command gate.** A command is checked for two things, in this order. **How it is written** is
 the same for every policy, `all_free(Rwd)` included: one line of printable ASCII and a tab, every
@@ -744,8 +783,10 @@ The other refusals read: `operational command outside the rule set: only `show .
 default (got `<word>`) …`; `read-only: only `show ...` is permitted — `<word>` is refused whatever is
 granted (denied, fail-closed)`; `a pipe (`|`) is only valid on `show` — `<word>` takes none (denied,
 fail-closed)`; `the pipe `| <name>` is not a read-only filter …`; `keywords are lowercase, as the
-device reads them: `<word>` is not `configuration` (denied, fail-closed)`; `empty operational
-command`; and under `all_deny`, `all-deny: nothing is permitted — no command (denied, fail-closed)`.
+device reads them: `<word>` is not `configuration` (denied, fail-closed)`; and `empty operational
+command`. Under `all_deny` a session refuses with its own text (§2), and `all-deny: nothing is
+permitted — no command (denied, fail-closed)` comes only from calling `ConfigPolicy::check_command`
+directly.
 
 An ordinary `show` runs under the device user's own login class on the
 box, which this crate does not try to reproduce.
@@ -835,7 +876,9 @@ answer to the commit in `reply`. A commit that got no readable answer is
 the error `CleanupFailed`, carrying both. Either comes inside `WithReplies` when a request of the
 cleanup went through. `abort_change` attempts both discard and unlock and
 reports every failure; it returns their answers, `[("discard-changes", reply), ("unlock", reply)]`,
-and when one of them fails the other's answer goes with its error in `WithReplies`.
+and when one of them fails the other's answer goes with its error in `WithReplies`. When both
+fail, the error is `CleanupFailed`: the discard's error, with `[("unlock", <error>)]`, and no
+`WithReplies` around it.
 
 
 `fingerprint()` is **not** what the drift check uses. A consumer that wants to carry an approval
@@ -877,7 +920,7 @@ impl Access { pub fn permits(self, op: Op) -> bool; } // Ro→none · Rw→Set �
 
 pub struct ConfigPolicy;
 impl ConfigPolicy {
- pub fn new(protected_roots: &[&str]) -> Self; // a floor of the caller's own: the list is the whole floor, and an empty one is none; the rest of the filter holds
+ pub fn new(protected_roots: &[&str]) -> Self; // a floor of the caller's own: the list is the floor's trees, and an empty one protects none; a whole logical system or tenant stays protected (see the floor, below); the rest of the filter holds
  pub fn with_default_floor() -> Self; // the ordinary policy: sensitive trees need allow_read
  pub fn read_only() -> Self; // show and reads as the ordinary policy; no command and no change, whatever is granted
  pub fn all_free(access: Access) -> Self;
@@ -984,7 +1027,9 @@ device unchecked, and that is the bypass surface itself.
 A line-carrying `ParseError` (`EmptyPath`, `UnbalancedQuote`, `Comment`, `SingleQuote`, `Hash`, `Target`) holds the line
 **already redacted** with `redact_secrets`, because the text ends up in `NetconfError::Policy`
 and from there in the consumer's log. `UnknownVerb` holds the unrecognised word, redacted the same
-way: `$9$hunter2 x` is `unknown verb «$9$[SENSITIVE: …]» (denied, fail-closed)`. A word with nothing to redact —
+way: `$9$hunter2 x` is `unknown verb «$9$[SENSITIVE: …]» (denied, fail-closed)`. For a line that
+begins with `wildcard` and does not go on with `delete`, it holds two words, `wildcard` and the
+next, or `wildcard` and a space when there is no next. A word with nothing to redact —
 `edit`, `SET`, `frobnicate` — comes through as written.
 `ControlCharacter` holds no text at all: `line` is the line number, counted from 1 as
 `str::lines` counts, and `character` the character.
@@ -995,7 +1040,7 @@ way: `$9$hunter2 x` is `unknown verb «$9$[SENSITIVE: …]» (denied, fail-close
 
 | Variant | Text |
 |---|---|
-| `UnknownVerb` | `unknown verb «v» (denied, fail-closed)` — and when the lowercase of the word is a verb, `unknown verb «SET» — verbs are lowercase, and «SET» is not «set» (denied, fail-closed)` |
+| `UnknownVerb` | `unknown verb «v» (denied, fail-closed)` — and when the lowercase of the word is a one-word verb, so not for `wildcard`, `unknown verb «SET» — verbs are lowercase, and «SET» is not «set» (denied, fail-closed)` |
 | `EmptyPath` | `line without a path: «line»` |
 | `UnbalancedQuote` | `unbalanced quote: «line»` |
 | `UnknownVerb` for `edit`, `top`, `up`, `exit` | `«edit» moves the context later lines are read in, and the filter cannot follow it — write every line with its full path (denied, fail-closed)` |
@@ -1032,9 +1077,12 @@ nothing.
 
 ### The floor
 
-`Op::Delete` of a whole protected top-level tree — `delete`, `deactivate`, `unprotect`, `rename` or
-`wildcard delete` of the one-token path itself, and `wildcard delete <tree> *` with a literal `*` —
-is refused under every policy except `all_free`, before any rule is consulted.
+`Op::Delete` of a whole protected top-level tree is refused under every policy except `all_free`,
+before any rule is consulted: a change of the `Delete` class — `delete`, `deactivate`,
+`unprotect`, `rename`, `replace` or `wildcard delete` — on the one-token path `<tree>` itself, or
+on `<tree> *` with a literal `*`. A `rename` of a one-token path does not reach the floor: the
+words after `to` must be fewer than the path's, so the parser refuses it under every policy, as
+`ParseError::Target`, or as `ParseError::EmptyPath` when nothing follows the path or the `to`.
 `logical-systems <name>` and `tenants <name>` hold a configuration of the same kind as the top
 level: the system itself is not deleted, nor emptied with `*`, and what is under it is
 judged as it would be at the top level, by the floor and by the rules — a rule matches the path
@@ -1042,8 +1090,12 @@ under the system, or the path as written. A bare `delete <tree>` rips out someth
 unreachable or unmanageable. The floor compares **case-insensitively**: it is the one
 rule meant to hold on its own, not because default-deny also happens to catch `System`.
 
-The floor is the list given to `new`; `with_default_floor` and `read_only` use
-`DEFAULT_PROTECTED_ROOTS` — verified
+The floor's top-level trees are the list given to `new`, and an empty list protects none of them.
+One refusal does not come from the list: a change of the `Delete` class on a whole logical system
+or tenant — `delete logical-systems <name>` or `delete tenants <name>`, also with a trailing `*` —
+is refused as `absolute floor: cannot delete the top-level tree «logical-systems <name>»` (or
+`tenants`) whatever the list holds, an empty one included. `with_default_floor` and `read_only`
+use `DEFAULT_PROTECTED_ROOTS` — verified
 against the Juniper hierarchies for MX/PTX/ACX/SRX:
 `system` · `interfaces` · `chassis` · `vmhost` · `protocols` · `routing-options` ·
 `routing-instances` · `security` · `groups` · `apply-groups` · `class-of-service` ·
@@ -1073,8 +1125,8 @@ release:
 - `keywords are lowercase, as the device reads them: «<word>» is not «logical-systems»` (or
   `tenants`) — when the path, the path under a logical system or a tenant, or the target of a
   `rename` or `copy`, begins with one of the two in another case; before the floor and the rules
-- `absolute floor: cannot delete the top-level tree «<tree>»` — for a nested system itself,
-  `«logical-systems <name>»`
+- `absolute floor: cannot delete the top-level tree «<tree>»`, or `«<tree> *»` for the path with
+  the literal `*` — for a nested system itself, `«logical-systems <name>»`
 - `absolute floor: cannot delete the top-level tree «<tree>» of «logical-systems <name>»` (or
   `tenants`)
 - `default-deny: no rule allows this (op, path)` — followed by `— paths are case-sensitive:
@@ -1110,10 +1162,10 @@ candidate configuration cannot be read as a set line, so whether the target «<p
 or copy is there already is not known (denied, fail-closed)`.
 The session's own gate comes first, so `read-only: no change is permitted …`,
 `all-free: Ro does not allow …` and the policy's `all-deny: nothing is permitted` are reached
-only through `check` and `check_command` directly; through a helper the session's texts are what
-arrive: `no policy bound to the session …`, `all-deny: nothing is permitted — the policy bound to
-this session denies every read, command and change`, `the policy bound to this session permits no
-change …`.
+only through `check`, `check_set_payload` and `check_command` directly; through a helper the
+session's texts are what arrive: `no policy bound to the session …`, `all-deny: nothing is
+permitted — the policy bound to this session denies every read, command and change`, `the policy
+bound to this session permits no change …`.
 
 ### `all_free`
 
@@ -1157,11 +1209,10 @@ consumer holds itself.
 ```rust
 pub const REDACTED: &str = "[SENSITIVE: hidden by netconf — allow_secrets() on the policy shows it]";
 
-pub struct Redactor; // #[non_exhaustive]
+pub struct Redactor {} // #[derive(Debug, Clone, Default)] #[non_exhaustive]
 impl Redactor {
  pub fn redact(&self, text: &str) -> String;
 }
-impl Default for Redactor { … }
 
 pub fn redact_secrets(text: &str) -> String; // Redactor::default() — the SNMP v2c community stays visible
 pub fn contains_secrets(text: &str) -> bool; // would redact_secrets change it? Warn WITHOUT logging the content
@@ -1174,16 +1225,25 @@ redact in it, and the secret elements a line leaves open are read on the line as
 
 
 **How a line is read**. Each line is read with its XML entities as the characters they
-stand for — the five predefined ones and character references, however many digits one has — so
+stand for — the five predefined ones and character references, however many digits one has, with
+an upper-case `X` and with a `+` before the digits too — so
 `&#x24;9&#x24;` is a `$9$`, `&#x0000000024;` a `$`,
 and `authentication-&#107;ey` a statement name, in an XML reply as in a diff; what is not redacted
 goes out as it came in, entities and all. Whitespace and the ASCII control characters separate
-words. Every rule reads the line as it stands, and what any of them finds is redacted. Markup is
-read only as XML writes it — a tag whose `<`, `>`, `=` and quotes are in the line as written; a
-comment, a CDATA section, a processing instruction, a tag that is not well formed and text that
-came from `&lt;…&gt;` are text like any other. The marker gets no treatment of its own: text that
-looks like it is redacted like any other — a value beginning with it, and a `SECRET-DATA` line
-holding it, too.
+tokens, which the names that are a secret wherever they stand are read from. The names that need
+their context — `key`, `password`, `value`, `ascii-text` and `hexadecimal` — are read from words
+split only where the line has whitespace written as it is: a control character that is not
+whitespace, or whitespace written as a character reference, between such a name and its value
+does not split them, and this rule then leaves the value —
+`authentication md5 1 key\u{7}hunter2` and `authentication md5 1 key&#32;hunter2` go out as
+they came. Every rule reads the line as it stands, and what any of them finds is redacted. The statement rule reads markup only as XML
+writes it — a tag whose `<`, `>`, `=` and quotes are in the line as written; a comment, a CDATA
+section, a processing instruction, a tag that is not well formed and text that came from
+`&lt;…&gt;` are text like any other to it. The element rule redacts in these cases too: it reads
+a tag both as written and as the entities decode it, takes a tag that is not well formed too, and
+reads inside a comment as anywhere else. The marker gets no treatment of its own: text that looks
+like it is redacted like any other — a value beginning with it, and a `SECRET-DATA` line holding
+it, too.
 
 What is redacted:
 
@@ -1264,10 +1324,11 @@ What is redacted:
   opening tag went with a statement's value on the same line is carried all the same, and on the
   line that closes them, what follows the closing tag is read like any line. The tags stay as they were, but for the closing tag of an element whose opening
   tag went with a value.
-- **The `SECRET-DATA` net.** A line Junos itself marks `SECRET-DATA` gets its value redacted
-  anyway — after the statement name, also on a diff line whose `+`/`-`/`!` marker is a word of
-  its own — unless a secret statement on it is written as a word of its own with a value
-  after it. It fires on what the line holds, not on whether another rule changed it.
+- **The `SECRET-DATA` net.** Unless a secret statement on it is written as a word of its own with
+  a value after it, a line Junos itself marks `SECRET-DATA` is redacted anyway from its second
+  word on — the third on a diff line whose `+`/`-`/`!` marker is a word of its own — whatever
+  that word is, up to an annotation, which stays: in set format, the path goes with the value. It
+  fires on what the line holds, not on whether another rule changed it.
 
 
 **The SNMP v2c community stays readable.**
@@ -1380,7 +1441,9 @@ it concerns, each piece once:
 | the session closes | `SessionEnd::ssh.stderr`, or `ssh.stderr` of the `Closed` a failed close gives |
 | `check_device` ran to its end | `DeviceCheck::stderr()`; when it stopped, the error of `stopped()` as above |
 
-What is not taken with `take_stderr` goes with the next error, or with the close. A line is handed
+What is not taken with `take_stderr` goes with the next error that carries it — a `Timeout`, or a
+transport error that finds the channel or the connection gone — or with the close; a `Device`,
+`Protocol` or `Policy` error carries none. A line is handed
 over when the device has ended it; one it has not ended waits for the end of the session — a
 refusal, a closed connection, the close — where nothing more can come.
 
@@ -1451,8 +1514,9 @@ statement it objected to in `<bad-element>` there — with the names of the elem
 kept: each is `name: text`, nested names joined by `/`, an empty one `name:`, and the
 parts joined with ` · `, so `<error-info><bad-element>unit</bad-element></error-info>` reads
 `bad-element: unit` and a lock's `<session-id>7</session-id>` reads `session-id: 7`; a
-`<bad-element>` straight under `<rpc-error>` reads the same. Markup inside any other field stays
-part of its text, and a field name nested inside an open field does not start a new one:
+`<bad-element>` or `<bad-attribute>` straight under `<rpc-error>` reads the same. Markup inside
+any other field stays part of its text, and a field name nested inside an open field does not
+start a new one:
  `bad <bad-element>unit</bad-element> here` reads as `bad unit here`.
 
 **Nothing in an `<rpc-error>` is dropped**. A child that is none of the fields —
@@ -1481,9 +1545,9 @@ a control character, or U+2028/U+2029, is written out as an escape (`\n`, `\r`, 
 
 | Type | Text |
 |---|---|
-| `NetconfError` | `transport: …` · `protocol: <detail>`, then `; the device sent: <received>` when it is `Some` · `device: <DeviceError>` · `timeout: <op> after <limit>`, with `<limit>` written as `Duration` writes itself (`180s`, `1.5s`, `500ms`), then `, <during>`, made printable, when it is not empty, then `; the incomplete message so far: <partial>` when it is not empty, then `; the device wrote on stderr: <stderr>` when it is not empty · `policy: …` · `drift: a fresh show\|compare deviates from the approved one; the fresh diff: <fresh>` · `changed since the confirmed commit: <DeviceChanged>` · `committed: the commit succeeded, then this failed: <error>`, then `; the device's answer to the commit: <reply>` · `commit unanswered: a commit was sent and no readable answer came back: <error>` · `<error>; the cleanup after it failed too: <step>: <error>; …` (`CleanupFailed`, 0.5.7) · `<error>`, then `; the device's answer to <step>: <reply>` for each in `replies` (`WithReplies`, 0.5.13) · `close: <error>`, then `; the session held this <severity>: <DeviceError>` for each warning, then what the device said over SSH as for `Closed` (`CloseFailed`, 0.5.13) |
+| `NetconfError` | `transport: …` · `protocol: <detail>`, then `; the device sent: <received>` when it is `Some` · `device: <DeviceError>` · `timeout: <op> after <limit>`, with `<limit>` written as `Duration` writes itself (`180s`, `1.5s`, `500ms`), then `, <during>`, made printable, when it is not empty, then `; the incomplete message so far: <partial>` when it is not empty, then `; the device wrote on stderr: <stderr>` when it is not empty · `policy: …` · `drift: a fresh show\|compare deviates from the approved one; the fresh diff: <fresh>` · `changed since the confirmed commit: <DeviceChanged>` · `committed: the commit succeeded, then this failed: <error>`, then `; the device's answer to the commit: <reply>` · `commit unanswered: a commit was sent and no readable answer came back: <error>` · `<error>; the cleanup after it failed too: <step>: <error>; …` (`CleanupFailed`, 0.5.7) · `<error>`, then `; the device's answer to <step>: <reply>` for each in `replies` (`WithReplies`, 0.5.13) · `close: <error>`, then `; the session held this <severity>: <DeviceError>` for each warning, `<severity>` being `warning` when the entry has none, then what the device said over SSH as for `Closed` (`CloseFailed`, 0.5.13) |
 | `DeviceChanged` | `the device's last commit is no longer the confirmed one — it was «<confirmed>», it is «<now>»; the confirming commit is withheld, and the device rolls the confirmed commit back by itself when its timeout runs out`, or `the candidate holds <n> line(s) of changes that are not the confirmed commit's; …`; then `; the diff against rollback <N>: <diff>`, `; the diff against rollback <N> could not be fetched: <error>`, or `; the confirmed commit is no longer in the device's commit history, so there is no rollback to compare with` |
-| `DeviceError` | `<tag>: <message> [path: <path>]` (`unknown` / `(no message)` when absent); for a translated tag `<tag> — <meaning> (RFC 6241, Appendix A): <message> …`; then ` [info: <info>]`, ` [app-tag: <app_tag>]` and ` [type: <error_type>]` for each that is present, and ` [<name>: <text>]` for each entry in `other`; then `; also <severity>: <DeviceError>` for each entry in `also`; then `; the reply besides its errors: <rest>` when `rest` is present |
+| `DeviceError` | `<tag>: <message> [path: <path>]` (`unknown` / `(no message)` when absent); for a translated tag `<tag> — <meaning> (RFC 6241, Appendix A): <message> …`; then ` [info: <info>]`, ` [app-tag: <app_tag>]` and ` [type: <error_type>]` for each that is present, and ` [<name>: <text>]` for each entry in `other`; then `; also <severity>: <DeviceError>` for each entry in `also`, `<severity>` being `error` when the entry has none; then `; the reply besides its errors: <rest>` when `rest` is present |
 | `TransportError` | `io: …` · `invalid options: …` · `negotiation (<detail>); peer offered: <a, b>` · `host key: <detail>; device presented: <fingerprint>`, or without the second part when `observed` is `None` · ``the device did not offer the NETCONF subsystem — NETCONF over SSH is not enabled on the device (Junos: `set system services netconf ssh`)``, then `; the device said: <stderr>` when `stderr` is not empty · `SSH password authentication rejected by the device — <methods>`, or `the device ACCEPTED the password but requires further authentication — <methods>` under `partial_success`, where `<methods>` is `the device says it accepts: <a, b>` or `the device named no other method` · `closed: <detail>`, then the incomplete message as for `Timeout`. `SubsystemUnavailable` and `Closed` then add what the device said over SSH, each part present: `; the device wrote on stderr: <stderr>`, `; the subsystem's exit status: <n>`, `; the subsystem's exit signal: <name>[, core dumped][, the device said: <message>]`, `; the device disconnected, reason code <n>[, and said: <description>]`, `; the device's login banner: <banner>` |
 
 ## Logging — the tracing facade
@@ -1495,14 +1559,14 @@ the contract:
 | Event | Level | When |
 |---|---|---|
 | `ssh_connect_refused` / `ssh_host_key_probe_refused` | warn | `connect` / `observe_host_key` refused before connecting: `reason`, the refusal text, with host and port — and username for `connect` — unless the host or username is what was refused. No start event precedes it |
-| `ssh_connect` / `ssh_connect_failed` | info/warn | `ssh_connect`: the attempt (host, port, username, policy, `host_key = "pinned"`), warn the first time per device under a legacy policy — `LegacyJunos`, or a `Custom` that holds a name `is_legacy` knows. `ssh_connect_failed` (host, port, `ssh_policy`, `error`): the TCP connection or the SSH handshake failed; a timeout, a rejected login or a refused subsystem are reported through their own errors, not this event |
+| `ssh_connect` / `ssh_connect_failed` | info/warn | `ssh_connect`: the attempt (host, port, username, `ssh_policy`, `host_key = "pinned"`), warn the first time per device under a legacy policy — `LegacyJunos`, or a `Custom` that holds a name `is_legacy` knows. `ssh_connect_failed` (host, port, `ssh_policy`, `error`): the TCP connection or the SSH handshake failed; a timeout, a rejected login or a refused subsystem are reported through their own errors, not this event |
 | `ssh_auth_failed` | warn | authentication rejected (the methods the device named, `partial_success`) |
 | `ssh_session_established` / `ssh_session_closed` | info | session lifecycle; established only once the device has opened the subsystem |
 | `ssh_session_failed` | warn | russh ended an established connection on an error — `error` is russh's text, redacted |
 | `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch, a host certificate, or a key of a type the policy does not allow (rejected) |
 | `ssh_host_key_enrollment` / `ssh_host_key_observed` | info | no pin — fingerprint observed |
 | `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run; `ssh_host_key_probe` only for a probe that goes on the wire |
-| `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr: `bytes`, how much, and `cut`, whether the cap was reached. Not the text |
+| `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr: `ext`, the SSH extended data type (1 is stderr), `bytes`, how much, and `cut`, whether the cap was reached. Not the text |
 | `ssh_empty_data` | warn | the device sent an empty SSH data message: skipped, and not read as a close; once per transport |
 | `secrets_in_diff` | warn | the compare diff `prepare_change` fetched carries device secrets (only a fingerprint is logged); `compare()` on its own emits nothing |
 
@@ -1651,8 +1715,10 @@ decides nothing from it.
   closed. No configuration is read, no command is run, and no policy is needed. `observe_host_key`
   is lighter still: it stops before the login.
 - **One clock:** the whole check runs within `Timeouts::connect`, counted from its start, and
-  never past `total`. A step that runs out of it is the step the check stopped at, with the
-  `Timeout` `connect` or the session would have returned.
+  never past `total`. A step that runs out of it is the step the check stopped at: up to
+  `Netconf` with the `Timeout` `connect` would have returned; at `Hello` and `Request` with a
+  `Timeout` the check builds itself, `rpc-recv` with `Timeouts::connect` as its `limit` (§8). A
+  `Timeout` the session returns there first is the step's error as it came.
 - **Always a report:** once the connection is started, the result is `Ok(DeviceCheck)`, whether
   every step answered or one stopped. `Err` is only what `connect` refuses before anything is
   connected, as `Transport(InvalidOptions)` — a missing `host_key` or one that is not a
@@ -1664,7 +1730,8 @@ decides nothing from it.
   since no policy is bound. `fingerprint()` is there once the handshake has shown the key, also
   when the check stopped on it; `capabilities()` and `session_id()` once the hello has come;
   `banner()` when the check ran to its end, and `stderr()` then, when the device wrote on the
-  subsystem's stderr; when the check stopped, that text is in the error.
+  subsystem's stderr; when the check stopped, that text is in the error where the error carries
+  it (§8). A `Timeout` the check builds itself at `Hello` or `Request` carries none.
 
 The report is always whole, and is read at three levels:
 
@@ -1672,7 +1739,7 @@ The report is always whole, and is read at three levels:
 |---|---|---|
 | One word | `verdict()` | `Verdict`, below |
 | One line | `summary()` | `<verdict> — every step answered, in <elapsed> of <limit>`, or `<verdict> — stopped at <step> after <elapsed> of <limit>: <error>`; times as seconds with three decimals, `1.204s` |
-| Everything | `Display`, or the accessors | the summary, then one line for each step that answered (`<step>: <time>`), the step that stopped (`<step>: stopped after <time>`), and `host key`, `session id`, `capabilities` and `banner` when they are there |
+| Everything | `Display`, or the accessors | the summary, then one line for each step that answered (`<step>: <time>`), the step that stopped (`<step>: stopped after <time>`), and `host key`, `session id`, `capabilities`, `banner` and `stderr` when they are there |
 
 | `Verdict` | When | `Display` |
 |---|---|---|
@@ -1713,7 +1780,7 @@ pub const BASE_1_0: &str; pub const BASE_1_1: &str;
 pub fn client_hello(offer_1_1: bool) -> String;
 pub fn wrap_rpc(message_id: u64, inner: &str) -> String;
 pub fn parse_hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError>; // the document must be a <hello>, and the capabilities those of its <capabilities>; a Protocol error carries the document in received, redacted, and what it quotes of it redacted
-pub fn parse_rpc_reply(xml: &str) -> Result<Vec<DeviceError>, NetconfError>; // the checks in §2, a Protocol error carrying the reply; Ok = the warnings; the device's text in an error, and what a Protocol error quotes and carries of the reply, redacted with redact_secrets
+pub fn parse_rpc_reply(xml: &str) -> Result<Vec<DeviceError>, NetconfError>; // the checks in §2 but the message-id and UTF-8, which are the session's; a Protocol error carrying the reply; Ok = the warnings; the device's text in an error, and what a Protocol error quotes and carries of the reply, redacted with redact_secrets
 pub fn reply_message_id(xml: &str) -> Option<u64>; // digits, no leading zero, any u64 — the session itself compares the text, never this number
 pub fn hello_session_id(xml: &str) -> Option<u64>; // read as RFC 6241's unsignedInt — digits, no leading zero, at most 4294967295
 pub fn extract_compare_diff(xml: &str) -> Result<String, NetconfError>; // no <configuration-output> = Protocol; a Protocol error carries the reply in received, redacted, and what it quotes of it redacted
@@ -1766,4 +1833,9 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
 - A name of your own that is one of the secret statement names of §7 (`secret`, `token`, …) is not
   supported, a community's name excepted: in set format and in text on one line it is read as that
   statement, and what follows it on the line is redacted.
+- A secret statement that needs its context — `key`, `password`, `value`, `ascii-text`,
+  `hexadecimal` — is read from words split only on whitespace written in the line. A control
+  character that is not whitespace, or whitespace written as a character reference, between the
+  name and its value does not split them, and the value is not redacted unless another rule
+  finds it, as a `$9$` value is found (§7).
 

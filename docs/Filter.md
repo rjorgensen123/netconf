@@ -38,7 +38,7 @@ There are four kinds of policy:
 
 | Policy | Permits |
 |---|---|
-| `ConfigPolicy::with_default_floor()` | the ordinary policy: reads and `show`, plus whatever you grant, under the floor. `ConfigPolicy::new(&[...])` is the same with a floor of your own: the list you give is the whole floor, and an empty list is no floor |
+| `ConfigPolicy::with_default_floor()` | the ordinary policy: reads and `show`, plus whatever you grant, under the floor. `ConfigPolicy::new(&[...])` is the same with a floor of your own: the list you give is the floor's trees, and an empty list protects none; a whole logical system or tenant cannot be deleted all the same |
 | `ConfigPolicy::read_only()` | reads and `show`, and **no change and no other command, whatever is granted** — `allow_command` and change grants have no effect on it |
 | `ConfigPolicy::all_free(access)` | the access level alone, on any path — no rules, no floor, nothing redacted. The filter is off, deliberately |
 | `ConfigPolicy::all_deny()` | nothing at all — what a session without a policy has |
@@ -167,8 +167,9 @@ The principle is deliberate: **do not make the library useless.** Only what make
 unmanageable is hard-blocked. The rest is kept safe by everything else being denied by default.
 
 `all_free` has no floor: it is the deliberate choice of full control, with the filter off.
-`ConfigPolicy::new` with an empty list has no floor either; there the rules alone decide what may
-be deleted.
+`ConfigPolicy::new` with an empty list protects no top-level tree; there the rules decide what
+may be deleted. One refusal stays under every policy but `all_free`: deleting a whole logical
+system or a whole tenant.
 
 ## What the filter can read
 

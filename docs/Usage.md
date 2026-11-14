@@ -429,7 +429,9 @@ let policy = ConfigPolicy::all_free(Access::Rwd);
 **The floor:** under `with_default_floor()` and `read_only()`, deleting an entire protected
 top-level tree — `delete interfaces`, `delete protocols` — is refused no matter what you grant.
 That mistake must not be possible to configure your way into. `ConfigPolicy::new` holds the floor
-you give it, and none when the list is empty; `all_free` has no floor.
+you give it, and protects no top-level tree when the list is empty; `all_free` has no floor.
+Deleting a whole logical system or a whole tenant is refused under every policy but `all_free`,
+whatever the list holds.
 
 **Unknown input rejects the whole payload** — an unknown verb, an empty path, an unbalanced or
 single quote, a `/*` comment, a `#` inside a word, a control character. A line that is not understood would otherwise go
