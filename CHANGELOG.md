@@ -7,6 +7,15 @@ Every notable change to this crate is recorded here. The format follows
 > **Note:** before 1.0 the API can change between minor versions. `docs/API.md` names the
 > version its contract applies from, and that number moves only when the public surface does.
 
+## [0.8.0-rc1]
+
+### Changed
+
+- 2026-11-21 — Upgraded to krypto 0.9.0. `Auth::Password` takes a `krypto::SecretString`, so a
+  consumer that builds the password moves to krypto 0.9 as well: the `SecretString` of krypto 0.8
+  and that of 0.9 are two different types in one build. The contract floor in `docs/API.md` is
+  0.8.0-rc1; the README, the guide and `SECURITY.md` follow.
+
 ## [0.7.0] — 2026-11-14
 
 The public surface changed, and the contract floor in `docs/API.md` is 0.7.0. Entries marked

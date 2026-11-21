@@ -11,8 +11,8 @@ variant — is in [API](API.md).
 
 ```toml
 [dependencies]
-netconf = { version = "0.7", features = ["russh-transport"] }
-krypto  = "0.8"     # for the password
+netconf = { version = "0.8.0-rc1", features = ["russh-transport"] }
+krypto  = "0.9"     # for the password
 ```
 
 **The feature flag is not optional if you are talking to real equipment.** Without

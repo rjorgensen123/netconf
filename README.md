@@ -78,7 +78,7 @@ That is the whole idea. Everything else here exists to make it hold.
 
 ```toml
 [dependencies]
-netconf = "0.7"
+netconf = "0.8.0-rc1"
 ```
 
 Real SSH against a device is behind a feature. Without it the crate builds without russh or
@@ -86,8 +86,8 @@ tokio, which is what the offline tests use:
 
 ```toml
 [dependencies]
-netconf = { version = "0.7", features = ["russh-transport"] }
-krypto  = "0.8"     # for the password
+netconf = { version = "0.8.0-rc1", features = ["russh-transport"] }
+krypto  = "0.9"     # for the password
 ```
 
 Connect over SSH with a pinned host key, bind a policy, read, and close:

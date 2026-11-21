@@ -74,6 +74,7 @@ dependencies = [
  "blake2",
  "cpufeatures",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -232,6 +233,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -433,6 +435,7 @@ dependencies = [
  "const-oid",
  "crypto-common",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -811,9 +814,9 @@ dependencies = [
 
 [[package]]
 name = "krypto"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9008de9478f7a6cc0697cfd559adb6e24869974ca674ddfe72cb0607da82866f"
+checksum = "16d23821ae5e87e2571255c4e99e88cbbcf1bffb95d65e25f4de956967610819"
 dependencies = [
  "aegis",
  "aes-gcm",
@@ -903,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "netconf"
-version = "0.7.0"
+version = "0.8.0-rc1"
 dependencies = [
  "async-trait",
  "bytes",

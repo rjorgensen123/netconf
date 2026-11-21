@@ -1,8 +1,8 @@
-# netconf — API contract (v0.7.0)
+# netconf — API contract (v0.8.0-rc1)
 
-**The version is a floor: v0.7.0 is the LOWEST netconf this contract describes.** Every netconf
-from 0.7.0 onwards has what is written here. 0.7.0 is where the public surface last changed, so the
-contract starts there and describes nothing older. The number is raised only when the public surface
+**The version is a floor: v0.8.0-rc1 is the LOWEST netconf this contract describes.** Every netconf
+from 0.8.0-rc1 onwards has what is written here. 0.8.0-rc1 is where the public surface last changed, so
+the contract starts there and describes nothing older. The number is raised only when the public surface
 itself changes — to the crate version at that moment — and stands still while it does not, however
 many releases pass in between. A contract *newer* than the crate it describes would promise
 something the code does not do, so it can never be ahead of `Cargo.toml`.
@@ -45,7 +45,7 @@ across that span; the problems live in **SSH negotiation** and **reply parsing**
 framing and the error model are the core, not RPC building.
 
 **No YANG layer, no multivendor abstraction.** `#![forbid(unsafe_code)]` — zero `unsafe`.
-Device passwords are taken **exclusively** as `krypto::SecretString` (krypto 0.8) —
+Device passwords are taken **exclusively** as `krypto::SecretString` (krypto 0.9) —
 secrets never cross the API boundary as plain text; that is type-enforced, not a convention.
 
 ## Root exports — 1:1 with `lib.rs`
