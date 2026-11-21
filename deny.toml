@@ -18,6 +18,11 @@ ignore = [
     # the older devices the crate is meant to reach. TO BE REASSESSED when `rsa`
     # ships a fix, or if this crate ever performs a private-key operation.
     { id = "RUSTSEC-2023-0071", reason = "client-side host-key verification only — no RSA private-key operations in this crate" },
+    # chrono is marked as unmaintained; the advisory reports no vulnerability. It
+    # is in the lockfile through russh-util, which depends on it only on wasm32,
+    # so no native build of this crate compiles it. The entry goes when russh no
+    # longer brings chrono in.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no vulnerability — a wasm32-only dependency of russh-util, not compiled in a native build" },
 ]
 
 [licenses]

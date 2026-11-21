@@ -84,10 +84,9 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --no-deps --all-features
 
-  # The dependency audit: RustSec advisories, with the documented
-  # RUSTSEC-2023-0071 exception (see deny.toml), the licence allowlist, the
-  # aws-lc ban and the source check. `all-features` in deny.toml means the russh
-  # tree is audited too.
+  # The dependency audit: RustSec advisories, with the documented exceptions
+  # (see deny.toml), the licence allowlist, the aws-lc ban and the source check.
+  # `all-features` in deny.toml means the russh tree is audited too.
   deny:
     runs-on: ubuntu-latest
     container:

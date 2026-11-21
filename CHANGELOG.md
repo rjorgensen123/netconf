@@ -15,6 +15,9 @@ Every notable change to this crate is recorded here. The format follows
   consumer that builds the password moves to krypto 0.9 as well: the `SecretString` of krypto 0.8
   and that of 0.9 are two different types in one build. The contract floor in `docs/API.md` is
   0.8.0-rc1; the README, the guide and `SECURITY.md` follow.
+- 2026-11-21 — `deny.toml` has an exception for RUSTSEC-2026-0543, which marks chrono as
+  unmaintained and reports no vulnerability. chrono is in the lockfile through `russh-util`, which
+  uses it only on wasm32, so no native build of the crate compiles it.
 
 ## [0.7.0] — 2026-11-14
 
