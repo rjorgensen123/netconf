@@ -1,7 +1,7 @@
 # GitHub Actions CI for netconf.
 # It runs on every push to main, and on pull requests.
 #
-# The same jobs as .gitea/workflows/ci.yml, in the same rust:1-bookworm
+# The same jobs as .gitea/workflows/ci.yml, in the same rust:1-trixie
 # container, with the same build, test and audit steps, so a result here means
 # the same as a result there. Two things differ: the checkout, which on GitHub is
 # actions/checkout, and the `permissions` block below, which only this file has.
@@ -28,7 +28,7 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     container:
-      image: rust:1-bookworm
+      image: rust:1-trixie
     steps:
       # Pinned to a commit, not a tag: a tag can be moved, a commit cannot.
       # The job token is not left behind in .git/config, since nothing here pushes.
@@ -90,7 +90,7 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     container:
-      image: rust:1-bookworm
+      image: rust:1-trixie
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

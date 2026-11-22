@@ -22,10 +22,10 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     container:
-      image: rust:1-bookworm
+      image: rust:1-trixie
     steps:
       # Checkout without actions/checkout, which would be fetched from github.
-      # Clone directly with the job token instead; rust:1-bookworm has git and
+      # Clone directly with the job token instead; rust:1-trixie has git and
       # base64 already.
       - name: Checkout (in-house, no github)
         run: |
@@ -90,7 +90,7 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     container:
-      image: rust:1-bookworm
+      image: rust:1-trixie
     steps:
       - name: Checkout (in-house, no github)
         run: |

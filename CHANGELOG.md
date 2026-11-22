@@ -43,6 +43,10 @@ Every notable change to this crate is recorded here. The format follows
   the rest of the lockfile, and cargo-deny 0.22.0 in CI. A consumer needs Rust 1.100.0. What the
   crate reads and sends is unchanged. `deny.toml` says `unmaintained = "all"`, so an unmaintained
   crate anywhere in the tree still fails the check.
+- 2026-11-22 — The CI jobs run in the `rust:1-trixie` container, on Debian 13, the current Debian
+  stable, instead of `rust:1-bookworm`. The Rust they build with is still the `rust-version` from
+  `Cargo.toml`. Changed in `.gitea/workflows/ci.yml`, `.github/workflows/ci.yml` and
+  `DEVELOPMENT.md`.
 
 ## [0.8.0-rc1]
 

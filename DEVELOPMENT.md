@@ -80,7 +80,7 @@ the [README](README.md) and under [`docs/`](docs/Home.md).
   zeroize comes with the feature too, but zeroize is built either way, through krypto. That a build
   without the feature leaves russh and tokio out has no guard: it is read against `Cargo.toml`.
 - **The Rust version is `rust-version` in `Cargo.toml`, and every CI job uses exactly that one.**
-  The jobs run on `ubuntu-latest`, in the `rust:1-bookworm` container. Guard: the CI step «Use the
+  The jobs run on `ubuntu-latest`, in the `rust:1-trixie` container. Guard: the CI step «Use the
   Rust the crate asks for», which fails when `rustc` is not that version once it is installed.
 
 ## Input
