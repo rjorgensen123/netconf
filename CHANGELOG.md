@@ -7,6 +7,22 @@ Every notable change to this crate is recorded here. The format follows
 > **Note:** before 1.0 the API can change between minor versions. `docs/API.md` names the
 > version its contract applies from, and that number moves only when the public surface does.
 
+## [0.8.0]
+
+### Added
+
+- 2026-11-22 — `DEVELOPMENT.md` says how the code is laid out and the rules a change follows, each
+  with the test that guards it. `CODE_OF_CONDUCT.md` and `THIRD_PARTY_LICENSES.md` are new, and a
+  test holds the licence list equal to `Cargo.lock`.
+- 2026-11-22 — The reviews of netconf are listed in `docs/Reviews.md`, and the README and
+  `docs/Home.md` have a Reviews section that links to it. `docs/Home.md` now names the same
+  reviewers as the README.
+
+### Changed
+
+- 2026-11-22 — The version is 0.8.0, and the README and the guide ask for `netconf = "0.8"`. The
+  contract floor in `docs/API.md` stays at 0.8.0-rc1, where the public surface last changed.
+
 ## [0.8.0-rc1]
 
 ### Changed

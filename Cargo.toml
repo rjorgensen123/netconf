@@ -1,6 +1,6 @@
 [package]
 name = "netconf"
-version = "0.8.0-rc1"
+version = "0.8.0"
 edition = "2024"
 # The crate follows the newest stable Rust and asks for it (since 0.7.0): 1.99.1,
 # with edition 2024. The dependencies alone would need 1.89.

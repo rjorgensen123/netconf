@@ -78,7 +78,7 @@ That is the whole idea. Everything else here exists to make it hold.
 
 ```toml
 [dependencies]
-netconf = "0.8.0-rc1"
+netconf = "0.8"
 ```
 
 Real SSH against a device is behind a feature. Without it the crate builds without russh or
@@ -86,7 +86,7 @@ tokio, which is what the offline tests use:
 
 ```toml
 [dependencies]
-netconf = { version = "0.8.0-rc1", features = ["russh-transport"] }
+netconf = { version = "0.8", features = ["russh-transport"] }
 krypto  = "0.9"     # for the password
 ```
 
@@ -136,6 +136,7 @@ The full public surface is in [`docs/API.md`](docs/API.md), and a test checks th
 public names in the code are in the document; it cannot tell whether a sentence there is true.
 [`docs/Usage.md`](docs/Usage.md) is the guide, with the rest of the examples;
 [`docs/Filter.md`](docs/Filter.md) documents the filter rules.
+[`DEVELOPMENT.md`](DEVELOPMENT.md) says how the code is laid out and the rules a change follows.
 
 ## What the crate does not do
 
@@ -160,6 +161,11 @@ cargo test --features russh-transport       # also compiles and tests the SSH tr
 cargo clippy --all-targets -- -D warnings
 ```
 
+## Reviews
+
+Reviewed independently by Fable, Opus, Gemini, MiMo and Mistral Vibe. The reviews are listed in
+[docs/Reviews.md](docs/Reviews.md).
+
 ## Author
 
 **Roger Jorgensen** — rogerj@gmail.com
@@ -170,8 +176,6 @@ the crate presents outwards; and the decisions about what it does and deliberate
 not do.
 
 The code is written by Claude AI (Opus and Fable).
-
-Reviewed independently by Fable, Opus, Gemini, MiMo and Mistral Vibe.
 
 ## License
 

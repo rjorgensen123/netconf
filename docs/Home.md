@@ -90,6 +90,11 @@ That arrangement is the point. The consumer decides what is permitted once, in i
 source; everything it does afterwards is checked against that decision down here, where a
 mistake further up cannot reach past it.
 
+## Reviews
+
+Reviewed independently by Fable, Opus, Gemini, MiMo and Mistral Vibe. The reviews are listed in
+[Reviews.md](Reviews.md).
+
 ## Author
 
 **Roger Jorgensen** — rogerj@gmail.com
@@ -100,8 +105,6 @@ the crate presents outwards; and the decisions about what it does and deliberate
 not do.
 
 The code is written by Claude AI (Opus and Fable).
-
-Reviewed independently by Fable, Opus and Gemini.
 
 ## License
 
