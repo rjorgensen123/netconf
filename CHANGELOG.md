@@ -30,6 +30,10 @@ Every notable change to this crate is recorded here. The format follows
 - 2026-11-22 — The reviews of netconf are listed in `docs/Reviews.md`, and the README and
   `docs/Home.md` have a Reviews section that links to it. `docs/Home.md` now names the same
   reviewers as the README.
+- 2026-11-22 — Tests now hold what was kept in step by hand: the SPDX line of every source file,
+  the version in the dependency lines of the README and the guide, in `SECURITY.md` and in the
+  floor of `docs/API.md`, that the two CI files run the same steps, and that the licence list has
+  one row per crate.
 
 ### Changed
 

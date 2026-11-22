@@ -145,7 +145,11 @@ crate version at that moment, and it is never ahead of `Cargo.toml`. Guard:
 is not in `docs/API.md`: the `pub use` lists and the `pub mod` and `pub const` lines of
 `src/lib.rs`, and the `pub fn`, `pub async fn`, `pub const fn`, `pub const`, `pub struct`,
 `pub enum`, `pub trait` and `pub type` lines of the eleven module files it names. It collects no
-enum variants, fields or trait methods. No test reads the floor or checks what the document says
+enum variants, fields or trait methods. Guard, for the floor:
+`the_contract_floor_is_not_ahead_of_the_crate` in `tests/repository.rs`, which fails when one of
+the four places at the top that state it (the title, «is the LOWEST», «onwards» and «where the
+public surface last changed») is missing or is not a whole version, when they do not all say the
+same version, or when that version is ahead of the crate's. No test checks what the document says
 about behaviour: that is read against the code.
 
 **The log events are part of the contract,** in the logging section of `docs/API.md`. Guard, in
@@ -173,7 +177,7 @@ from crates.io as published, with no `path` and no `registry`.
 
 **A new crate gets a row in `THIRD_PARTY_LICENSES.md`.** Guard: the tests in
 `tests/third_party.rs`, which fail when a crate in `Cargo.lock` has no row, a row names a crate
-that is not in `Cargo.lock`, or a row has no license.
+that is not in `Cargo.lock`, a row has no license, or a crate is listed twice.
 
 **Dependencies come from crates.io only.** `deny.toml` allows no other registry and no git source,
 and `publish = ["crates-io"]` and `.cargo/config.toml` send the crate to crates.io only. Guard, for
@@ -207,12 +211,21 @@ its reviewer is named in the Reviews section of `README.md` and `docs/Home.md`.
   derives it from there, `VERSION` being `env!("CARGO_PKG_VERSION")`. Guards:
   `changelog_has_an_entry_for_the_current_version` in `tests/version.rs`, which fails when
   `CHANGELOG.md` has no `## [<version>]` heading, and `version_constant_mirrors_cargo_toml`, which
-  fails when `VERSION` is not the version in `Cargo.toml`. Written by hand, with no guard: the
-  dependency lines in `README.md` and `docs/Usage.md`, the table in `SECURITY.md`, and the title
-  and the floor of `docs/API.md`.
+  fails when `VERSION` is not the version in `Cargo.toml`. Written by hand, and held by tests in
+  `tests/repository.rs`: `the_dependency_lines_name_this_version`, which fails when a line
+  beginning `netconf = ` in `README.md` or `docs/Usage.md` does not name `major.minor` of the
+  version (the whole version for a pre-release), when a `krypto` line there does not name the
+  requirement in `Cargo.toml`, or when the README has fewer than two such `netconf` lines, the
+  guide fewer than one, or either no `krypto` line; `security_md_names_this_version`, which fails
+  when the table in `SECURITY.md` is not the two rows `major.minor.x` yes and `< major.minor` no;
+  `the_contract_floor_is_not_ahead_of_the_crate`, which fails on the floor of `docs/API.md`, as
+  under «The public surface»; and `the_rust_version_comment_matches_rust_version`, which fails
+  when the comment lines directly over `rust-version` in `Cargo.toml` do not contain that version.
 - Every `.rs` file in `src/` and `tests/` starts with its SPDX line,
-  `// SPDX-License-Identifier: MIT OR Apache-2.0`. This rule has no guard: it is read against the
-  code.
+  `// SPDX-License-Identifier: MIT OR Apache-2.0`. Guard:
+  `every_source_file_starts_with_its_spdx_line` in `tests/repository.rs`, which fails when a `.rs`
+  file under `src/` or `tests/` does not begin with that line, or when it finds fewer than 20
+  of them.
 - A doc comment or comment marks the version in which a behaviour is new or changed: `(x.y.z)`.
   This rule has no guard: it is read against the code.
 - A comment is in English. A new one says in a sentence or two what the thing is, and why when that
@@ -233,4 +246,7 @@ its reviewer is named in the Reviews section of `README.md` and `docs/Home.md`.
 - A new rule the code is to hold gets a test that fails when the rule is broken.
 - CI runs on a push to `main` and on pull requests. `.gitea/workflows/ci.yml` and
   `.github/workflows/ci.yml` run the same jobs with the same steps but the checkout; the GitHub file
-  also has a `permissions` block.
+  also has a `permissions` block. Guard: `both_ci_files_run_the_same_steps` in
+  `tests/repository.rs`, which fails when the two files differ once blank lines, comment lines,
+  every checkout step and the top-level `permissions:` block are left out of both, or when only
+  one of the two exists. Where neither exists, which is the published crate, it is skipped.

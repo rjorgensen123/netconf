@@ -3,9 +3,9 @@
 //!
 //! `THIRD_PARTY_LICENSES.md` lists every package in `Cargo.lock` other than
 //! `netconf` itself, each with the license it declares. A dependency added
-//! without a row, a row left behind for a dependency that is gone, and a row
-//! without a license all fail here. The published crate carries both files, so
-//! nothing here is skipped.
+//! without a row, a row left behind for a dependency that is gone, a row
+//! without a license and a crate listed twice all fail here. The published
+//! crate carries both files, so nothing here is skipped.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -103,4 +103,18 @@ fn every_row_names_a_license() {
             row[0]
         );
     }
+}
+
+#[test]
+fn no_crate_is_listed_twice() {
+    let mut seen = BTreeSet::new();
+    let twice: BTreeSet<String> = rows(RUST_SECTION)
+        .into_iter()
+        .map(|row| row[0].clone())
+        .filter(|name| !seen.insert(name.clone()))
+        .collect();
+    assert!(
+        twice.is_empty(),
+        "listed more than once in {DOCUMENT} under '## {RUST_SECTION}': {twice:?}"
+    );
 }

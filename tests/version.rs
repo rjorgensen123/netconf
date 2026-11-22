@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Version guard. The version lives in ONE place, `Cargo.toml`; everything else
-//! that states it is derived from there, so there is nothing to keep in step by
-//! hand. What is checked here is the one thing that cannot be derived: that the
-//! changelog has an entry for the version being built.
+//! Version guard. The version lives in ONE place, `Cargo.toml`, and the code
+//! derives it from there. What is checked here is that the changelog has an entry
+//! for the version being built, and that `VERSION` is that version; the places
+//! where a document states the version by hand are held by `tests/repository.rs`.
 
 #[test]
 fn changelog_has_an_entry_for_the_current_version() {
