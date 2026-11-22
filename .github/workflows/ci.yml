@@ -84,8 +84,8 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --no-deps --all-features
 
-  # The dependency audit: RustSec advisories, with the documented exceptions
-  # (see deny.toml), the licence allowlist, the aws-lc ban and the source check.
+  # The dependency audit: RustSec advisories, with the exceptions `deny.toml`
+  # documents, the licence allowlist, the aws-lc ban and the source check.
   # `all-features` in deny.toml means the russh tree is audited too.
   deny:
     runs-on: ubuntu-latest
@@ -117,11 +117,11 @@ jobs:
       - name: Fetch cargo-deny
         run: |
           curl -sSfL -o /tmp/cd.tgz \
-            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
-          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  /tmp/cd.tgz" | sha256sum -c -
+            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.22.0/cargo-deny-0.22.0-x86_64-unknown-linux-musl.tar.gz
+          echo "98c56e6a408bfa5c3c60744b6015aaa6aa08f743fdeb88386d06fca035bb1786  /tmp/cd.tgz" | sha256sum -c -
           tar -xzf /tmp/cd.tgz -C /tmp --strip-components=1
           install /tmp/cargo-deny /usr/local/bin/
-          test "$(cargo deny --version)" = "cargo-deny 0.20.2"
+          test "$(cargo deny --version)" = "cargo-deny 0.22.0"
 
       - name: cargo deny check
         run: cargo deny check

@@ -110,8 +110,8 @@ struct ClientHandler {
     /// The pinned fingerprint, from the consumer. `None` means enrollment mode.
     pinned: Option<String>,
     /// The policy's host key algorithms (0.7.0). A key of a type none of them
-    /// allows is refused: russh verifies the device's signature with whatever key
-    /// arrives, and does not check it against the algorithm that was negotiated.
+    /// allows is refused. russh also refuses a key or a signature that does not
+    /// match the negotiated algorithm, before the key reaches this handler (0.8.0).
     host_key_algorithms: Vec<russh::keys::Algorithm>,
     /// The observed fingerprint, filled in while connecting.
     observed: Arc<StdMutex<Option<String>>>,
@@ -840,9 +840,11 @@ fn classify_connect_err(e: russh::Error, observed: Option<String>) -> NetconfErr
         russh::Error::UnknownKey
         | russh::Error::WrongServerSig
         | russh::Error::KeyChanged { .. } => {
-            // The fingerprint the device presented travels WITH the error.
-            // `check_server_key` saw the key before this point, so it is known here,
-            // and a consumer should not have to connect again to learn who answered.
+            // The fingerprint the device presented travels WITH the error when
+            // `check_server_key` saw the key, so a consumer does not have to connect
+            // again to learn who answered. russh refuses a key or a signature that
+            // does not match the negotiated algorithm before that, and then there is
+            // no fingerprint.
             NetconfError::Transport(TransportError::HostKey { observed, detail })
         }
 
@@ -2417,8 +2419,9 @@ mod host_key_tests {
     }
 
     /// **A host key of a type the policy does not allow is refused** (0.7.0), even
-    /// when it is the pinned one, and in enrollment too: russh verifies the
-    /// signature with whatever key arrives. What the device presented is recorded.
+    /// when it is the pinned one, and in enrollment too. What the device presented
+    /// is recorded. The handler is called directly here; over a connection, russh
+    /// refuses a key that does not match the negotiated algorithm first (0.8.0).
     /// A key of an allowed type with the right pin is accepted as before.
     #[tokio::test]
     async fn a_host_key_of_a_type_the_policy_does_not_allow_is_refused() {

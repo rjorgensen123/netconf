@@ -278,11 +278,11 @@ there is nothing to leave out`, and a list left empty is refused by `validate` w
 Under every policy, the device's host key must be of a type the policy allows — `ssh-ed25519` an
 Ed25519 key, each `ecdsa-sha2-nistpNNN` an ECDSA key on that curve, `rsa-sha2-512`,
 `rsa-sha2-256` or `ssh-rsa` an RSA key, `ssh-dss` a DSA key — or it is refused like a host
-certificate, as `HostKey` (§9). The check is of the key's type: for an RSA key, the hash the device
-signs with is checked by russh, not by netconf, and russh accepts a SHA-1 signature from an RSA
-key, so leaving `ssh-rsa` out stops a device that follows the protocol, which finds no algorithm in
-common, but not a device that holds the pinned RSA key, announces `rsa-sha2-512` or `rsa-sha2-256`,
-and signs with SHA-1.
+certificate, as `HostKey` (§9). netconf's check is of the key's type. russh checks the rest (0.8.0):
+the key must be of the type the negotiated algorithm names, and the signature must be made with
+exactly that algorithm. A device that announces `rsa-sha2-512` or `rsa-sha2-256` and signs with
+SHA-1 is refused, so leaving `ssh-rsa` out leaves SHA-1 signatures out. russh refuses such a device
+before netconf sees its key, and that `HostKey` has no `observed`.
 
 ---
 
@@ -1423,8 +1423,9 @@ useless, while "it offered these four algorithms" is immediately actionable.
 `HostKey` carries `observed` for the same reason: the key the device actually presented is
 known already in `check_server_key`, that is **before** the error is built. Without it the consumer
 had to connect a second time to tell the operator what answered — and then the evidence was "what
-answered when we asked again", not "what was presented in the handshake that broke". `None` means the
-key exchange never got far enough for a key to be seen.
+answered when we asked again", not "what was presented in the handshake that broke". `None` means
+`check_server_key` never saw a key: the key exchange did not get that far, or russh refused the key
+or its signature first.
 
 `SubsystemUnavailable` means the login went through — address, host key and credentials
 are fine — and the device did not open the `netconf` subsystem: it answered the request with a
@@ -1568,7 +1569,7 @@ the contract:
 | `ssh_auth_failed` | warn | authentication rejected (the methods the device named, `partial_success`) |
 | `ssh_session_established` / `ssh_session_closed` | info | session lifecycle; established only once the device has opened the subsystem |
 | `ssh_session_failed` | warn | russh ended an established connection on an error — `error` is russh's text, redacted |
-| `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch, a host certificate, or a key of a type the policy does not allow (rejected) |
+| `ssh_host_key_verified` / `ssh_host_key_mismatch` | debug/warn | pinned key matched / mismatch or a host certificate (rejected). A key that does not match the negotiated algorithm is refused by russh before this and gives `ssh_connect_failed` only (0.8.0) |
 | `ssh_host_key_enrollment` / `ssh_host_key_observed` | info | no pin — fingerprint observed |
 | `ssh_host_key_probe` / `ssh_host_key_probe_failed` | info/warn | the `observe_host_key` run; `ssh_host_key_probe` only for a probe that goes on the wire |
 | `netconf_subsystem_stderr` | warn | the netconf subsystem wrote to stderr: `ext`, the SSH extended data type (1 is stderr), `bytes`, how much, and `cut`, whether the cap was reached. Not the text |
@@ -1659,7 +1660,7 @@ What a failure becomes (classified by russh's error types, not its message text)
 
 | | Error |
 |---|---|
-| the key is not the pinned one or not of a type the policy allows, the device presented a host certificate, or the device's signature does not hold | `HostKey { observed }` |
+| the key is not the pinned one, the device presented a host certificate, the key or the signature does not match the negotiated algorithm, or the signature does not hold | `HostKey { observed }`; `observed` is `None` in the last two, where russh refuses before netconf sees the key |
 | no common algorithm | `Negotiation { offered }` — what the device announced |
 | key exchange failed otherwise | `Negotiation { offered: [] }` |
 | the password was not accepted | `AuthRejected { username, remaining_methods, partial_success }` |
@@ -1822,10 +1823,6 @@ Its `close` returns an empty `SshMessages`. The mock keeps no clock.
 
 - `SshPolicy::Custom` chooses among the names `Modern` and `LegacyJunos` offer; it cannot add
   another.
-- The check of the device's host key is of the key's type. For an RSA key, the hash the device
-  signs with is checked by russh, not by netconf, and russh accepts a SHA-1 signature from an RSA
-  key: leaving `ssh-rsa` out does not stop a device that holds the pinned RSA key, announces
-  `rsa-sha2-512` or `rsa-sha2-256`, and signs with SHA-1.
 - `platform_hint`/`Platform` is reserved and not read.
 - There is no keepalive.
 - Policy enforcement reads set payloads only: a `Text` or `Xml` load — and `prepare_change` with

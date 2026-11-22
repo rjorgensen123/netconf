@@ -860,8 +860,8 @@ fn date_time_seconds(e: &BytesStart<'_>) -> Option<String> {
     let attr = e
         .attributes()
         .flatten()
-        .find(|a| local_eq(a.key.local_name().as_ref(), b"seconds"))?;
-    let text = String::from_utf8_lossy(&attr.value).into_owned();
+        .find(|a| local_eq(a.key.local_name().as_ref().as_bytes(), b"seconds"))?;
+    let text = attr.value.into_owned();
     Some(match crate::wire::strict_u64(&text) {
         Some(n) => n.to_string(),
         None => text,
@@ -910,7 +910,7 @@ fn commit_entries(
             }
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
-                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                let name = e.local_name().as_ref().to_owned();
                 if !in_entry && local_eq(name.as_bytes(), b"commit-history") {
                     in_entry = true;
                 } else if in_entry && field.is_none() {
@@ -926,7 +926,7 @@ fn commit_entries(
             // is an entry (0.5.13): both used to be skipped, and an empty first entry
             // left the next one to be taken for the last commit.
             Ok(Event::Empty(e)) => {
-                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                let name = e.local_name().as_ref().to_owned();
                 if !in_entry && local_eq(name.as_bytes(), b"commit-history") {
                     entries.push(CommitEntry { fields: Vec::new() });
                 } else if in_entry && field.is_none() {
@@ -941,15 +941,7 @@ fn commit_entries(
                 }
             }
             Ok(Event::Text(t)) if in_entry => {
-                let s = t.xml10_content().map_err(|e| {
-                    NetconfError::protocol_with(
-                        format!(
-                            "commit information: {}",
-                            crate::rpc::quoted(filter, &e.to_string())
-                        ),
-                        xml,
-                    )
-                })?;
+                let s = t.xml10_content();
                 if field.is_some() {
                     value.push_str(&s);
                 } else {
@@ -958,7 +950,7 @@ fn commit_entries(
             }
             // A value in CDATA is a value (0.5.13); it used to be skipped.
             Ok(Event::CData(t)) if in_entry => {
-                let s = String::from_utf8_lossy(&t);
+                let s = t.into_inner();
                 if field.is_some() {
                     value.push_str(&s);
                 } else {
@@ -974,7 +966,7 @@ fn commit_entries(
                 }
             }
             Ok(Event::End(e)) if in_entry => {
-                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                let name = e.local_name().as_ref().to_owned();
                 if field.as_deref() == Some(name.as_str()) {
                     fields.push((name, collapse(&value)));
                     if let Some(seconds) = seconds.take() {
@@ -1136,9 +1128,9 @@ fn read_filter(filter: &str) -> Result<ReadFilter, NetconfError> {
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
                 depth += 1;
-                let name = element_name(e.name().into_inner(), &refuse)?;
-                push_target(&mut targets, e.local_name().as_ref());
-                let local = String::from_utf8_lossy(e.local_name().as_ref()).to_ascii_lowercase();
+                let name = element_name(e.name().into_inner().as_bytes(), &refuse)?;
+                push_target(&mut targets, e.local_name().as_ref().as_bytes());
+                let local = e.local_name().as_ref().to_ascii_lowercase();
                 child(&mut open, &local);
                 open.push((local, false));
                 write(Event::Start(with_attributes(
@@ -1148,9 +1140,9 @@ fn read_filter(filter: &str) -> Result<ReadFilter, NetconfError> {
                 )?))?;
             }
             Ok(Event::Empty(e)) => {
-                let name = element_name(e.name().into_inner(), &refuse)?;
-                push_target(&mut targets, e.local_name().as_ref());
-                let local = String::from_utf8_lossy(e.local_name().as_ref()).to_ascii_lowercase();
+                let name = element_name(e.name().into_inner().as_bytes(), &refuse)?;
+                push_target(&mut targets, e.local_name().as_ref().as_bytes());
+                let local = e.local_name().as_ref().to_ascii_lowercase();
                 child(&mut open, &local);
                 whole |= crate::policy::NESTED_CONFIGURATIONS.contains(&local.as_str());
                 write(Event::Empty(with_attributes(
@@ -1165,13 +1157,11 @@ fn read_filter(filter: &str) -> Result<ReadFilter, NetconfError> {
                     whole |= !has_child
                         && crate::policy::NESTED_CONFIGURATIONS.contains(&local.as_str());
                 }
-                let name = element_name(e.name().into_inner(), &refuse)?;
+                let name = element_name(e.name().into_inner().as_bytes(), &refuse)?;
                 write(Event::End(BytesEnd::new(name)))?;
             }
             Ok(Event::Text(t)) => {
-                let text = t
-                    .xml10_content()
-                    .map_err(|e| refuse(format!("text: {}", printable(&e.to_string()))))?;
+                let text = t.xml10_content();
                 if text.trim().is_empty() {
                     continue; // whitespace between elements is formatting, not filter
                 }
@@ -1252,8 +1242,8 @@ fn with_attributes<'a>(
                 printable(&e.to_string())
             ))
         })?;
-        let key = element_name(attr.key.as_ref(), refuse)?.to_string();
-        if attr.value.contains(&b'<') {
+        let key = element_name(attr.key.as_ref().as_bytes(), refuse)?.to_string();
+        if attr.value.contains('<') {
             return Err(refuse(format!(
                 "not well-formed XML: `<` in the value of the attribute `{key}`"
             )));
@@ -1313,20 +1303,22 @@ fn configuration_set(xml: &str) -> Result<String, NetconfError> {
                     xml,
                 ));
             }
-            Event::Start(e) if local_eq(e.local_name().as_ref(), b"configuration-set") => {
+            Event::Start(e)
+                if local_eq(e.local_name().as_ref().as_bytes(), b"configuration-set") =>
+            {
                 (inside, seen) = (true, true)
             }
             // An empty candidate: `<configuration-set/>`.
-            Event::Empty(e) if local_eq(e.local_name().as_ref(), b"configuration-set") => {
+            Event::Empty(e)
+                if local_eq(e.local_name().as_ref().as_bytes(), b"configuration-set") =>
+            {
                 seen = true
             }
-            Event::End(e) if local_eq(e.local_name().as_ref(), b"configuration-set") => {
+            Event::End(e) if local_eq(e.local_name().as_ref().as_bytes(), b"configuration-set") => {
                 inside = false
             }
-            Event::Text(t) if inside => {
-                out.push_str(&t.xml10_content().map_err(|e| broken(e.to_string()))?)
-            }
-            Event::CData(t) if inside => out.push_str(&String::from_utf8_lossy(&t)),
+            Event::Text(t) if inside => out.push_str(&t.xml10_content()),
+            Event::CData(t) if inside => out.push_str(&t),
             Event::GeneralRef(r) if inside => out.push_str(
                 &crate::rpc::resolve_entity(&r, &|t: &str| t.to_string())
                     .map_err(|e| broken(e.to_string()))?,

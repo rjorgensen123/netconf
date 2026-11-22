@@ -87,7 +87,6 @@ without features), `netconf with russh-transport` (only a build with that featur
 | futures-sink | MIT OR Apache-2.0 | netconf with russh-transport |
 | futures-task | MIT OR Apache-2.0 | netconf with russh-transport |
 | futures-util | MIT OR Apache-2.0 | netconf with russh-transport |
-| generic-array | MIT | netconf with russh-transport |
 | getrandom | MIT OR Apache-2.0 | netconf |
 | ghash | Apache-2.0 OR MIT | netconf |
 | group | MIT/Apache-2.0 | netconf |
@@ -145,7 +144,7 @@ without features), `netconf with russh-transport` (only a build with that featur
 | russh-cryptovec | Apache-2.0 | netconf with russh-transport |
 | russh-util | Apache-2.0 | netconf with russh-transport |
 | rustc_version | MIT OR Apache-2.0 | tests and build only |
-| rustversion | MIT OR Apache-2.0 | netconf with russh-transport |
+| rustversion | MIT OR Apache-2.0 | tests and build only |
 | salsa20 | MIT OR Apache-2.0 | netconf with russh-transport |
 | scrypt | MIT OR Apache-2.0 | netconf with russh-transport |
 | sec1 | Apache-2.0 OR MIT | netconf |
@@ -157,6 +156,7 @@ without features), `netconf with russh-transport` (only a build with that featur
 | sha1 | MIT OR Apache-2.0 | netconf with russh-transport |
 | sha2 | MIT OR Apache-2.0 | netconf |
 | sha3 | MIT OR Apache-2.0 | netconf with russh-transport |
+| shake | MIT OR Apache-2.0 | netconf with russh-transport |
 | shlex | MIT OR Apache-2.0 | tests and build only |
 | signature | Apache-2.0 OR MIT | netconf |
 | simd-adler32 | MIT | netconf with russh-transport |
@@ -211,3 +211,4 @@ without features), `netconf with russh-transport` (only a build with that featur
 | wnaf | Apache-2.0 OR MIT | netconf |
 | x25519-dalek | BSD-3-Clause | netconf |
 | zeroize | Apache-2.0 OR MIT | netconf |
+| zlib-rs | Zlib | not built |

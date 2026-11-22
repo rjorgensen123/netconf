@@ -8,16 +8,10 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+# An unmaintained crate anywhere in the tree fails the check, not only a direct
+# dependency: cargo-deny's own default covers the direct ones alone.
+unmaintained = "all"
 ignore = [
-    # The Marvin attack: a timing side channel in the `rsa` crate's PRIVATE-key
-    # operations. The tree pulls it in through russh's `rsa` feature, which we
-    # turn on because RSA host keys are common on older Junos. This crate only
-    # VERIFIES the device's host key — a client-side public-key operation — and
-    # never holds an RSA private key, so the attack surface does not exist here.
-    # No fixed release of `rsa` exists, and dropping the feature would cut off
-    # the older devices the crate is meant to reach. TO BE REASSESSED when `rsa`
-    # ships a fix, or if this crate ever performs a private-key operation.
-    { id = "RUSTSEC-2023-0071", reason = "client-side host-key verification only — no RSA private-key operations in this crate" },
     # chrono is marked as unmaintained; the advisory reports no vulnerability. It
     # is in the lockfile through russh-util, which depends on it only on wasm32,
     # so no native build of this crate compiles it. The entry goes when russh no

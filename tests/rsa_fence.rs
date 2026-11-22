@@ -7,30 +7,18 @@
 /// The entire explanation — one source, used by both tests.
 const WHY: &str = "\n\
     ── WHY THIS TEST IS FAILING ────────────────────────────────────────────────\n\
-    The `rsa` crate has a KNOWN, UNFIXED vulnerability: RUSTSEC-2023-0071,\n\
-    «Marvin» — a timing side channel in RSA PRIVATE KEY operations (decryption\n\
-    and signing). An attacker who can send many chosen ciphertexts and measure\n\
-    the response time precisely can reconstruct plaintext step by step. The fix\n\
-    requires rewriting the crate in constant time, and has not arrived in years.\n\
+    netconf has no use for RSA of its own. The `rsa` crate is in the tree only\n\
+    through russh's support for RSA HOST KEYS, where the device's signature is\n\
+    VERIFIED — a public-key operation. The crate holds no RSA private key and\n\
+    performs no RSA private-key operation; its own authentication is the device\n\
+    password.\n\
     \n\
-    We have considered and ACCEPTED that the crate sits in the dependency tree\n\
-    (see .cargo/audit.toml) — but that assessment rests on ONE premise:\n\
-    \n\
-        WE NEVER PERFORM RSA PRIVATE KEY OPERATIONS.\n\
-    \n\
-    Today `rsa` enters only through russh's support for RSA HOST KEYS, where we\n\
-    do nothing but VERIFY the device's signature — a pure public-key operation,\n\
-    with no secret to leak. Marvin is therefore out of reach here.\n\
-    \n\
-    This test failed because something now USES rsa directly — and at that point\n\
-    the assessment no longer holds: a single RSA decryption or signature with a\n\
-    private key turns Marvin into a real attack against us.\n\
+    This test failed because something now USES rsa directly.\n\
     \n\
     DO THIS — do NOT delete the test:\n\
-      1. Find out why rsa came into use. Is it genuinely needed? (Our own\n\
-         signatures are Ed25519 through `krypto` — use those.)\n\
-      2. If rsa MUST be used: redo the Marvin assessment, write it down in\n\
-         .cargo/audit.toml, and update this fence deliberately.\n\
+      1. Find out why rsa came into use. Is it genuinely needed?\n\
+      2. If rsa MUST be used: say so in DEVELOPMENT.md, where this constraint is\n\
+         written down, and update this fence deliberately.\n\
     ────────────────────────────────────────────────────────────────────────────";
 
 #[test]

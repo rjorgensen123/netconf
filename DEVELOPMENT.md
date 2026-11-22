@@ -14,7 +14,7 @@ the [README](README.md) and under [`docs/`](docs/Home.md).
 | `docs/` | `API.md` is the contract; `Usage.md` is the guide, with the examples; `Filter.md` tells the filter rules in prose; `Home.md` says what the crate is; `Reviews.md` lists the reviews |
 | `.gitea/workflows/`, `.github/workflows/` | CI on Gitea and on GitHub, with the same jobs in both |
 | `deny.toml` | The `cargo deny` configuration: advisories, licenses, banned crates and sources |
-| `.cargo/` | `config.toml` (crates.io for a bare `cargo publish`), `audit.toml` (the exception for `cargo audit`) |
+| `.cargo/` | `config.toml` (crates.io for a bare `cargo publish`) |
 
 ## Fixed design constraints
 
@@ -63,12 +63,11 @@ the [README](README.md) and under [`docs/`](docs/Home.md).
 - **The SSH policy is chosen per device, never globally, and russh's crypto backend is ring.**
   russh is taken with `default-features = false`, since its defaults bring in aws-lc-rs, and
   `deny.toml` bans `aws-lc-rs` and `aws-lc-sys`. The `rsa` crate comes in only through russh's RSA
-  host-key support, where it verifies a device's host key; no RSA private-key operation runs, and
-  the exception for RUSTSEC-2023-0071 rests on that. Guards: `rsa_is_never_a_direct_dependency` in
-  `tests/rsa_fence.rs`, which fails when a line of `Cargo.toml` begins `rsa ` or `rsa=`, and
-  `our_own_code_never_calls_rsa`, which fails when a `.rs` file under `src/` contains `use rsa` or
-  `rsa::`. The aws-lc ban is checked by the `deny` job in CI. That the policy is per device has no
-  guard: it is read against the code.
+  host-key support, where it verifies a device's host key; no RSA private-key operation runs.
+  Guards: `rsa_is_never_a_direct_dependency` in `tests/rsa_fence.rs`, which fails when a line of
+  `Cargo.toml` begins `rsa ` or `rsa=`, and `our_own_code_never_calls_rsa`, which fails when a
+  `.rs` file under `src/` contains `use rsa` or `rsa::`. The aws-lc ban is checked by the `deny`
+  job in CI. That the policy is per device has no guard: it is read against the code.
 - **Logging goes through the `tracing` facade, and the consumer attaches the subscriber.** netconf
   writes nothing to standard output or standard error itself, and its events are part of the
   contract (below). Guard, in part: the event tests in `tests/ssh_policy.rs`, run with
@@ -166,12 +165,11 @@ against the code.
 ## Dependencies
 
 `Cargo.lock` is committed, and CI lints, tests and documents with `--locked`. The `deny` job runs
-`cargo deny check` against `deny.toml`, with every feature on: advisories (yanked crates refused;
-two exceptions, each with its reason), a license allow list, banned crates (`aws-lc-rs`,
-`aws-lc-sys`) and sources. `.cargo/audit.toml` holds the RSA exception for `cargo audit`, which CI
-does not run. `Cargo.toml` gives the reason beside the dependencies that need one: russh is taken
-with `default-features = false`, and krypto comes from crates.io as published, with no `path` and
-no `registry`.
+`cargo deny check` against `deny.toml`, with every feature on: advisories (yanked crates refused,
+and an unmaintained crate anywhere in the tree; one exception, with its reason), a license allow
+list, banned crates (`aws-lc-rs`, `aws-lc-sys`) and sources. `Cargo.toml` gives the reason beside
+the dependencies that need one: russh is taken with `default-features = false`, and krypto comes
+from crates.io as published, with no `path` and no `registry`.
 
 **A new crate gets a row in `THIRD_PARTY_LICENSES.md`.** Guard: the tests in
 `tests/third_party.rs`, which fail when a crate in `Cargo.lock` has no row, a row names a crate

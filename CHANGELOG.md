@@ -9,6 +9,19 @@ Every notable change to this crate is recorded here. The format follows
 
 ## [0.8.0]
 
+### Security
+
+- 2026-11-22 — russh 0.65.4 is the lowest russh the crate takes. It has the client-side security
+  fixes of 0.65.3 and 0.65.4 (GHSA-ppq4-8rhp-9xrq, GHSA-66vf-xq4p-pg7q, GHSA-7qgr-cjxw-6vjf): among
+  them, a device could make the client's memory grow without bound before the login.
+- 2026-11-22 — russh now refuses a host key or a signature that does not match the negotiated
+  algorithm, so a device that announces `rsa-sha2-512` or `rsa-sha2-256` and signs with SHA-1 is
+  refused; that was a known limit. The refusal comes before netconf sees the key: it is a `HostKey`
+  without `observed`, and `ssh_host_key_mismatch` is not logged for it. The entry of 2026-11-14 on
+  the host key's type was written before this.
+- 2026-11-22 — `rsa` 0.10.0 comes in with russh. It is the fix for RUSTSEC-2023-0071, and the
+  exception for that advisory is gone from `deny.toml`; `.cargo/audit.toml` is removed.
+
 ### Added
 
 - 2026-11-22 — `DEVELOPMENT.md` says how the code is laid out and the rules a change follows, each
@@ -22,6 +35,10 @@ Every notable change to this crate is recorded here. The format follows
 
 - 2026-11-22 — The version is 0.8.0, and the README and the guide ask for `netconf = "0.8"`. The
   contract floor in `docs/API.md` stays at 0.8.0-rc1, where the public surface last changed.
+- 2026-11-22 — Everything is on its newest version: Rust 1.100.0 as `rust-version`, quick-xml 0.42,
+  the rest of the lockfile, and cargo-deny 0.22.0 in CI. A consumer needs Rust 1.100.0. What the
+  crate reads and sends is unchanged. `deny.toml` says `unmaintained = "all"`, so an unmaintained
+  crate anywhere in the tree still fails the check.
 
 ## [0.8.0-rc1]
 

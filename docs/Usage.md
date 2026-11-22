@@ -684,7 +684,7 @@ minutes, so put the slack you want for a slow device into `per_commit`.
 
 | `TransportError` | Means |
 |---|---|
-| `HostKey` | the device's key is not the one you pinned; `observed` is the one it presented |
+| `HostKey` | the device's key is not the one you pinned, or its key or signature was refused; `observed` is the key it presented, when netconf got to see it |
 | `Negotiation` | no common SSH algorithms; `offered` is what the device offered |
 | `AuthRejected` | the login was refused; `remaining_methods` is what the device accepts, and `partial_success` says the password was accepted but more is required |
 | `SubsystemUnavailable` | logged in, but the device has no NETCONF over SSH |

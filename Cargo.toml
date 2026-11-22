@@ -2,9 +2,9 @@
 name = "netconf"
 version = "0.8.0"
 edition = "2024"
-# The crate follows the newest stable Rust and asks for it (since 0.7.0): 1.99.1,
+# The crate follows the newest stable Rust and asks for it (since 0.7.0): 1.100.0,
 # with edition 2024. The dependencies alone would need 1.89.
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "MIT OR Apache-2.0"
 description = "Pre-release (beta). Narrow asynchronous NETCONF client for Junos: RFC 6241/6242 framing, a pluggable transport, a default-deny configuration filter with read redaction, and atomic compare-then-commit."
 repository = "https://github.com/rjorgensen123/netconf"
@@ -25,7 +25,7 @@ publish = ["crates-io"]
 krypto = "0.9"
 async-trait = "0.1"
 bytes = "1"
-quick-xml = "0.41"
+quick-xml = "0.42"
 # Structured logging as a FACADE: this crate emits events (SSH connection,
 # host-key verification, which SshPolicy is in force), but never decides where
 # they end up. The consumer attaches a subscriber. With no subscriber attached
@@ -35,7 +35,8 @@ tracing = "0.1"
 # tests against MockTransport do not have to pull in russh or tokio.
 #
 # russh 0.65 since 0.7.0: the 0.64 line does not get the security fixes that
-# came with 0.65.0.
+# came with 0.65.0. At least 0.65.4 since 0.8.0: it has the client-side security
+# fixes of 0.65.3 and 0.65.4, and it takes `rsa` 0.10.
 #
 # `default-features = false` is not decoration: russh 0.65's defaults include
 # aws-lc-rs, which would put a second cryptographic backend in the tree next to
@@ -45,7 +46,7 @@ tracing = "0.1"
 # compression and is a russh default. `dsa` covers DSA host keys (`ssh-dss`),
 # which `LegacyJunos` offers for old Junos. `des` is DELIBERATELY absent (since
 # 0.3.2): 3des-cbc protected nothing.
-russh = { version = "0.65", optional = true, default-features = false, features = ["ring", "rsa", "flate2", "dsa"] }
+russh = { version = "0.65.4", optional = true, default-features = false, features = ["ring", "rsa", "flate2", "dsa"] }
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros", "rt"], optional = true }
 # Zeroizes the transient copy of the password we have to make before russh takes
 # it (feature-gated, same as the transport itself).

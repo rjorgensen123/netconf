@@ -33,10 +33,8 @@ pub(crate) fn resolve_entity(r: &BytesRef<'_>, filter: Filter<'_>) -> Result<Str
     })? {
         return Ok(c.to_string());
     }
-    let name = r.decode().map_err(|e| {
-        NetconfError::protocol(format!("XML entity: {}", quoted(filter, &e.to_string())))
-    })?;
-    Ok(match name.as_ref() {
+    let name: &str = r;
+    Ok(match name {
         "amp" => "&",
         "lt" => "<",
         "gt" => ">",
@@ -142,7 +140,7 @@ pub(crate) fn one_request(inner: &str, eom: bool) -> Result<(), String> {
                 if open.is_empty() {
                     elements += 1;
                 }
-                open.push(e.name().as_ref().to_vec());
+                open.push(e.name().as_ref().as_bytes().to_vec());
             }
             Ok(Event::Empty(_)) => {
                 if open.is_empty() {
@@ -158,7 +156,7 @@ pub(crate) fn one_request(inner: &str, eom: bool) -> Result<(), String> {
                             .into(),
                     );
                 }
-                Some(name) if name != e.name().as_ref() => {
+                Some(name) if name != e.name().as_ref().as_bytes() => {
                     return Err(
                         "it is not well-formed XML: an end tag in it closes another \
                          element than the one that is open"
@@ -168,7 +166,7 @@ pub(crate) fn one_request(inner: &str, eom: bool) -> Result<(), String> {
                 Some(_) => {}
             },
             Ok(Event::Text(t)) if open.is_empty() => {
-                if !t.iter().all(u8::is_ascii_whitespace) {
+                if !t.as_bytes().iter().all(u8::is_ascii_whitespace) {
                     return Err(outside.into());
                 }
             }
@@ -241,11 +239,12 @@ fn hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> {
             }
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
-                let name = e.local_name();
-                if open.is_empty() && !local_eq(name.as_ref(), b"hello") {
-                    return Err(not_a_hello(name.as_ref()));
+                let ln = e.local_name();
+                let name = ln.as_ref().as_bytes();
+                if open.is_empty() && !local_eq(name, b"hello") {
+                    return Err(not_a_hello(name));
                 }
-                open.push(name.as_ref().to_vec());
+                open.push(name.to_vec());
                 // `<hello><capabilities><capability>`, and nowhere else.
                 in_cap = open.len() == 3
                     && local_eq(&open[1], b"capabilities")
@@ -255,26 +254,21 @@ fn hello_capabilities(xml: &str) -> Result<Vec<String>, NetconfError> {
                 }
             }
             Ok(Event::Empty(e)) if open.is_empty() => {
-                let name = e.local_name();
-                if !local_eq(name.as_ref(), b"hello") {
-                    return Err(not_a_hello(name.as_ref()));
+                let ln = e.local_name();
+                let name = ln.as_ref().as_bytes();
+                if !local_eq(name, b"hello") {
+                    return Err(not_a_hello(name));
                 }
             }
             Ok(Event::Text(t)) if in_cap => {
-                let s = t.xml10_content().map_err(|e| {
-                    NetconfError::protocol_with(
-                        format!("hello text: {}", quoted(filter, &e.to_string())),
-                        xml,
-                    )
-                })?;
-                cur.push_str(&s);
+                cur.push_str(&t.xml10_content());
             }
             Ok(Event::GeneralRef(r)) if in_cap => {
                 cur.push_str(&resolve_entity(&r, filter).map_err(|e| e.about(xml))?);
             }
             // A capability in CDATA is a capability (0.5.13); it used to be skipped.
             Ok(Event::CData(t)) if in_cap => {
-                cur.push_str(&String::from_utf8_lossy(&t));
+                cur.push_str(&t);
             }
             // An entity anywhere else in the hello must still be one we know.
             Ok(Event::GeneralRef(r)) => {
@@ -482,7 +476,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
             Ok(Event::Start(e)) => {
                 depth += 1;
                 let ln = e.local_name();
-                let name = ln.as_ref();
+                let name = ln.as_ref().as_bytes();
                 if root_seen.is_none() {
                     root_seen = Some(name.to_vec());
                 }
@@ -540,7 +534,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
             }
             Ok(Event::Empty(e)) => {
                 let ln = e.local_name();
-                let name = ln.as_ref();
+                let name = ln.as_ref().as_bytes();
                 // An empty reply arrives as `<rpc-reply/>`, which quick-xml reports
                 // as Empty and never as Start. Recording the root only on Start made
                 // the root check conclude that the document held no elements at all,
@@ -595,12 +589,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
                 }
             }
             Ok(Event::Text(t)) if in_error => {
-                let s = t.xml10_content().map_err(|e| {
-                    NetconfError::protocol_with(
-                        format!("rpc-error text: {}", quoted(filter, &e.to_string())),
-                        xml,
-                    )
-                })?;
+                let s = t.xml10_content();
                 if cur_field.is_some() {
                     cur.push_str(&s);
                 } else {
@@ -617,7 +606,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
             }
             Ok(Event::CData(t)) if in_error => {
                 // CDATA is raw and unescaped, so take the content directly.
-                let s = String::from_utf8_lossy(&t.into_inner()).into_owned();
+                let s = t.into_inner().into_owned();
                 if cur_field.is_some() {
                     cur.push_str(&s);
                 } else {
@@ -632,7 +621,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
                 more = true;
             }
             Ok(Event::Text(t)) => {
-                if t.iter().any(|b| !b.is_ascii_whitespace()) {
+                if t.as_bytes().iter().any(|b| !b.is_ascii_whitespace()) {
                     more = true;
                 }
             }
@@ -646,7 +635,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
             // or `#pi`, and outside one it makes the rest of the reply worth
             // carrying. Both used to be dropped.
             Ok(Event::Comment(t)) => {
-                let text = String::from_utf8_lossy(&t).trim().to_string();
+                let text = t.trim().to_string();
                 if in_error {
                     de.other.push(("#comment".to_string(), text));
                 } else {
@@ -654,7 +643,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
                 }
             }
             Ok(Event::PI(t)) => {
-                let text = String::from_utf8_lossy(&t).trim().to_string();
+                let text = t.trim().to_string();
                 if in_error {
                     de.other.push(("#pi".to_string(), text));
                 } else {
@@ -664,7 +653,7 @@ pub(crate) fn read_rpc_reply(xml: &str, filter: Filter<'_>) -> Result<ReplyRead,
             Ok(Event::End(e)) => {
                 depth -= 1;
                 let ln = e.local_name();
-                let name = ln.as_ref();
+                let name = ln.as_ref().as_bytes();
                 if in_error && cur_field.is_none() && local_eq(name, b"rpc-error") {
                     in_error = false;
                     take_loose(&mut de, &mut loose);
@@ -778,14 +767,14 @@ pub fn hello_session_id(xml: &str) -> Option<u64> {
     let mut cur = String::new();
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e)) if local_eq(e.local_name().as_ref(), b"session-id") => {
+            Ok(Event::Start(e)) if local_eq(e.local_name().as_ref().as_bytes(), b"session-id") => {
                 in_id = true;
                 cur.clear();
             }
             Ok(Event::Text(t)) if in_id => {
-                cur.push_str(&String::from_utf8_lossy(&t.into_inner()));
+                cur.push_str(&t);
             }
-            Ok(Event::End(e)) if local_eq(e.local_name().as_ref(), b"session-id") => {
+            Ok(Event::End(e)) if local_eq(e.local_name().as_ref().as_bytes(), b"session-id") => {
                 return strict_u32(cur.trim()).map(u64::from);
             }
             Ok(Event::Eof) | Err(_) => return None,
@@ -808,8 +797,8 @@ pub fn reply_message_id(xml: &str) -> Option<u64> {
     let attr = tag
         .attributes()
         .flatten()
-        .find(|attr| local_eq(attr.key.local_name().as_ref(), b"message-id"))?;
-    strict_u64(&String::from_utf8_lossy(&attr.value))
+        .find(|attr| local_eq(attr.key.local_name().as_ref().as_bytes(), b"message-id"))?;
+    strict_u64(&attr.value)
 }
 
 /// What the first `<rpc-reply>` says of its `message-id` — see
@@ -846,8 +835,8 @@ pub(crate) fn reply_message_id_raw(xml: &str) -> ReplyMessageId {
         let Ok(attr) = attr else {
             return ReplyMessageId::Unreadable;
         };
-        if found.is_none() && local_eq(attr.key.local_name().as_ref(), b"message-id") {
-            found = Some(String::from_utf8_lossy(&attr.value).into_owned());
+        if found.is_none() && local_eq(attr.key.local_name().as_ref().as_bytes(), b"message-id") {
+            found = Some(attr.value.into_owned());
         }
     }
     match found {
@@ -863,7 +852,7 @@ fn first_rpc_reply(xml: &str) -> Option<BytesStart<'_>> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e))
-                if local_eq(e.local_name().as_ref(), b"rpc-reply") =>
+                if local_eq(e.local_name().as_ref().as_bytes(), b"rpc-reply") =>
             {
                 return Some(e);
             }
@@ -911,24 +900,24 @@ pub(crate) fn compare_diff(xml: &str, filter: Filter<'_>) -> Result<String, Netc
                 ));
             }
             Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) if local_eq(e.local_name().as_ref(), b"configuration-output") => {
+            Ok(Event::Start(e))
+                if local_eq(e.local_name().as_ref().as_bytes(), b"configuration-output") =>
+            {
                 present = true;
                 in_output = true;
             }
-            Ok(Event::Empty(e)) if local_eq(e.local_name().as_ref(), b"configuration-output") => {
+            Ok(Event::Empty(e))
+                if local_eq(e.local_name().as_ref().as_bytes(), b"configuration-output") =>
+            {
                 present = true;
             }
-            Ok(Event::End(e)) if local_eq(e.local_name().as_ref(), b"configuration-output") => {
+            Ok(Event::End(e))
+                if local_eq(e.local_name().as_ref().as_bytes(), b"configuration-output") =>
+            {
                 in_output = false;
             }
             Ok(Event::Text(t)) if in_output => {
-                let s = t.xml10_content().map_err(|e| {
-                    NetconfError::protocol_with(
-                        format!("compare text: {}", quoted(filter, &e.to_string())),
-                        xml,
-                    )
-                })?;
-                out.push_str(&s);
+                out.push_str(&t.xml10_content());
             }
             Ok(Event::GeneralRef(r)) if in_output => {
                 out.push_str(&resolve_entity(&r, filter).map_err(|e| e.about(xml))?);
@@ -940,7 +929,7 @@ pub(crate) fn compare_diff(xml: &str, filter: Filter<'_>) -> Result<String, Netc
                 // Some devices put the diff in CDATA. Without this the diff would come
                 // back empty, and the drift check would read «no change» and commit
                 // something nobody saw.
-                out.push_str(&String::from_utf8_lossy(&t.into_inner()));
+                out.push_str(&t);
             }
             _ => {}
         }
